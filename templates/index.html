@@ -1,0 +1,670 @@
+<!DOCTYPE html>
+<html lang="en" data-bs-theme="dark">
+<head>
+    <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Advanced Terminal</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.1/font/bootstrap-icons.css">
+    <style>
+        body { background: #0b0c10; color: #fff; font-family: sans-serif; }
+        .card-custom { background: #1f2833; border: 1px solid #45a29e; border-radius: 12px; }
+        .indicator-tag { font-size: 0.65rem; padding: 2px 6px; border-radius: 4px; font-weight: bold; margin-right: 4px; cursor: help; }
+        .bull { background: #00d57822; color: #00d578; }
+        .bear { background: #ff4b5c22; color: #ff4b5c; }
+        .neu { background: #6c757d22; color: #adb5bd; }
+        .text-success-custom { color: #66fcf1; }
+        .text-danger-custom { color: #ff4b5c; }
+        .text-warning-custom { color: #ffc107; }
+        .book-row { font-family: monospace; font-size: 0.75rem; display: flex; justify-content: space-between; }
+        .nav-tabs .nav-link { color: #45a29e; border-radius: 12px 12px 0 0; }
+        .nav-tabs .nav-link.active { background-color: #1f2833; border-color: #45a29e; color: #66fcf1; }
+        .progress-bar-custom { height: 10px; border-radius: 5px; background: #333; display: flex; overflow: hidden; }
+        .progress-bid { background: #00d578; }
+        .progress-ask { background: #ff4b5c; }
+    </style>
+</head>
+<body>
+    <nav class="navbar border-bottom border-secondary p-3 mb-4 shadow-sm" style="background: #16171d;">
+        <div class="container-fluid">
+            <span class="navbar-brand fw-bold text-primary"><i class="bi bi-activity me-2"></i>TERMINAL</span>
+            <span id="live-dot" class="badge bg-success rounded-pill">LIVE</span>
+        </div>
+    </nav>
+
+    <div class="container py-2">
+        <ul class="nav nav-tabs mb-4 border-secondary" id="terminalTabs" role="tablist">
+            <li class="nav-item" role="presentation"><button class="nav-link active fw-bold" id="trade-tab" data-bs-toggle="tab" data-bs-target="#trade-panel" type="button" role="tab">TRADING DESK</button></li>
+            <li class="nav-item" role="presentation"><button class="nav-link fw-bold" id="orders-tab" data-bs-toggle="tab" data-bs-target="#orders-panel" type="button" role="tab">ORDERS</button></li>
+            <li class="nav-item" role="presentation"><button class="nav-link fw-bold" id="bot-tab" data-bs-toggle="tab" data-bs-target="#bot-panel" type="button" role="tab">BOT MANAGER</button></li>
+            <li class="nav-item" role="presentation"><button class="nav-link fw-bold" id="screen-tab" data-bs-toggle="tab" data-bs-target="#screen-panel" type="button" role="tab">MARKET SCREENER</button></li>
+        </ul>
+
+        <div class="tab-content" id="terminalTabsContent">
+            
+            <div class="tab-pane fade show active" id="trade-panel" role="tabpanel">
+                <div class="input-group input-group-lg mb-4 shadow">
+                    <input type="text" id="asset-search" class="form-control bg-dark text-white border-secondary" placeholder="Search to Trade & Chart (e.g., BTC, SOL-PERP)...">
+                    <button class="btn btn-primary px-4" onclick="handleSearch()">SEARCH</button>
+                </div>
+
+                <div class="text-center mb-5">
+                    <h1 class="display-4 fw-bold" id="total-val">$0.00</h1>
+                    <small class="text-muted text-uppercase mb-2 d-block">Net Portfolio Value</small>
+                    <div>
+                        <span class="badge bg-dark border border-success text-success px-3 py-2 me-2" style="font-size: 0.85rem;">FREE USD: <span id="free-usd-val">$0.00</span></span>
+                        <span class="badge bg-dark border border-warning text-warning px-3 py-2" style="font-size: 0.85rem;">BOT LOCKED: <span id="bot-locked-val">$0.00</span></span>
+                    </div>
+                </div>
+
+                <div class="row mt-4 mb-4">
+                    <div class="col-lg-8 mb-3">
+                        <div class="card card-custom p-2 h-100" style="min-height: 400px;">
+                            <div id="tv_chart_container" style="height:100%; width:100%"></div>
+                        </div>
+                    </div>
+                    <div class="col-lg-4 mb-3">
+                        <div class="card card-custom p-3 h-100">
+                            <h6 class="fw-bold text-primary mb-3"><i class="bi bi-fire me-2"></i>LIQUIDITY HEATMAP</h6>
+                            <small class="text-muted mb-2 d-block" id="book-pair-label">No Active Position</small>
+                            <div id="book-feed">
+                                <div class="mb-3">
+                                    <div class="d-flex justify-content-between small fw-bold mb-1">
+                                        <span class="text-success-custom" id="bid-pct-label">50% Bids</span>
+                                        <span class="text-danger-custom" id="ask-pct-label">50% Asks</span>
+                                    </div>
+                                    <div class="progress-bar-custom">
+                                        <div id="bid-bar" class="progress-bid" style="width: 50%;"></div>
+                                        <div id="ask-bar" class="progress-ask" style="width: 50%;"></div>
+                                    </div>
+                                </div>
+                                <div class="p-2 rounded mb-3" style="background: #16171d;">
+                                    <small class="text-muted d-block mb-1" style="font-size:0.65rem;">NEAREST WHALE WALLS</small>
+                                    <div class="d-flex justify-content-between small">
+                                        <span class="text-danger-custom fw-bold" id="sell-wall">Sell: $0.00</span>
+                                        <span class="text-success-custom fw-bold" id="buy-wall">Buy: $0.00</span>
+                                    </div>
+                                </div>
+                                <div class="text-danger" id="asks-list"></div>
+                                <hr class="my-2 border-secondary">
+                                <div class="text-success" id="bids-list"></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="row mt-4">
+                    <div class="col-lg-8">
+                        <h6 class="text-uppercase fw-bold text-muted mb-3">Positions</h6>
+                        <div class="row g-3 mb-5" id="pos-grid"></div>
+
+                        <h6 class="text-uppercase fw-bold text-muted mb-3">Recent Activity</h6>
+                        <div class="card card-custom shadow-sm overflow-hidden mb-5">
+                            <div class="table-responsive">
+                                <table class="table table-dark table-hover mb-0" style="font-size: 0.85rem;">
+                                    <thead><tr><th>Pair</th><th>Side</th><th>Status</th><th>Time</th></tr></thead>
+                                    <tbody id="history-grid"></tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-lg-4">
+                        <div class="card card-custom p-3 shadow-sm mb-4">
+                            <div class="d-flex justify-content-between align-items-center mb-3">
+                                <h6 class="fw-bold text-warning mb-0"><i class="bi bi-scale me-2"></i>REBALANCE</h6>
+                                <button class="btn btn-sm btn-outline-secondary" onclick="openRebalanceConfig()"><i class="bi bi-gear"></i></button>
+                            </div>
+                            <div id="rebalance-content"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="tab-pane fade" id="orders-panel" role="tabpanel">
+                <div class="card card-custom p-4">
+                    <div class="d-flex justify-content-between align-items-center mb-4">
+                        <h4 class="fw-bold text-primary mb-0"><i class="bi bi-list-check me-2"></i>Order Management</h4>
+                        <button class="btn btn-sm btn-outline-primary" onclick="loadAllOrders()"><i class="bi bi-arrow-clockwise"></i> Refresh</button>
+                    </div>
+                    <div class="table-responsive">
+                        <table class="table table-dark table-hover align-middle" style="font-size: 0.9rem;">
+                            <thead>
+                                <tr>
+                                    <th>Time</th>
+                                    <th>Pair</th>
+                                    <th>Side</th>
+                                    <th>Type/Price</th>
+                                    <th>Size/Filled</th>
+                                    <th>Status</th>
+                                    <th class="text-end">Action</th>
+                                </tr>
+                            </thead>
+                            <tbody id="all-orders-grid">
+                                <tr><td colspan="7" class="text-center text-muted py-4">Fetching orders...</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+            <div class="tab-pane fade" id="bot-panel" role="tabpanel">
+                <div class="row">
+                    <div class="col-lg-4 mb-4">
+                        <div class="card card-custom p-4 h-100">
+                            <h5 class="fw-bold text-success-custom mb-4"><i class="bi bi-robot me-2"></i>Deploy Bot</h5>
+                            
+                            <div class="mb-3">
+                                <label class="small text-muted mb-1">ASSET PAIR</label>
+                                <input type="text" id="bot-pair" class="form-control bg-dark border-secondary text-white" placeholder="e.g. BTC-USD" style="text-transform: uppercase;">
+                            </div>
+                            
+                            <div class="mb-3">
+                                <label class="small text-muted mb-1">STRATEGY</label>
+                                <select id="bot-strategy" class="form-select bg-dark text-white border-secondary" onchange="toggleBotSettings()">
+                                    <option value="QUAD">Quad Rotation (Strict Pullbacks)</option>
+                                    <option value="QUAD_SUPER">Quad Super Signal (Extreme Reversals)</option>
+                                    <option value="ORB">ORB (Midnight Breakout - Perps Only)</option>
+                                    <option value="GRID">Grid Bot (Ranging Cashflow)</option>
+                                </select>
+                            </div>
+                            
+                            <div class="mb-4">
+                                <label class="small text-muted mb-1">ALLOCATED CAPITAL (USD)</label>
+                                <input type="number" id="bot-amount" class="form-control bg-dark border-secondary text-white" placeholder="e.g. 100" step="any">
+                                <small class="text-warning mt-1 d-block" style="font-size: 0.65rem;">This amount will be locked in the bot's virtual sandbox.</small>
+                            </div>
+
+                            <div id="grid-settings" class="d-none border-top border-secondary pt-3 mb-4">
+                                <h6 class="text-muted small fw-bold mb-3">GRID PARAMETERS</h6>
+                                <div class="row g-2">
+                                    <div class="col-6">
+                                        <label class="small text-muted mb-1">Lower Price</label>
+                                        <input type="number" id="grid-lower" class="form-control form-control-sm bg-dark border-secondary text-white" step="any">
+                                    </div>
+                                    <div class="col-6">
+                                        <label class="small text-muted mb-1">Upper Price</label>
+                                        <input type="number" id="grid-upper" class="form-control form-control-sm bg-dark border-secondary text-white" step="any">
+                                    </div>
+                                    <div class="col-12 mt-2">
+                                        <label class="small text-muted mb-1">Number of Grids</label>
+                                        <input type="number" id="grid-count" class="form-control form-control-sm bg-dark border-secondary text-white" value="10">
+                                    </div>
+                                </div>
+                            </div>
+
+                            <button class="btn btn-success w-100 py-3 fw-bold mt-auto" onclick="deployBot()">INITIALIZE BOT</button>
+                        </div>
+                    </div>
+
+                    <div class="col-lg-8 mb-4">
+                        <div class="card card-custom p-4 h-100">
+                            <h5 class="fw-bold text-warning-custom mb-4"><i class="bi bi-cpu me-2"></i>Active Operations</h5>
+                            <div id="active-bots-grid" class="row g-3">
+                                <div class="text-center text-muted py-5">No bots currently deployed.</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="tab-pane fade" id="screen-panel" role="tabpanel">
+                <div class="card card-custom p-4">
+                    <div class="d-flex justify-content-between align-items-center mb-4">
+                        <h4 class="fw-bold text-success-custom mb-0"><i class="bi bi-radar me-2"></i>Market Screener</h4>
+                        <button class="btn btn-sm btn-outline-primary" onclick="loadScreener()"><i class="bi bi-arrow-clockwise"></i> Refresh</button>
+                    </div>
+                    <div class="table-responsive">
+                        <table class="table table-dark table-hover" style="font-size: 0.9rem;">
+                            <thead><tr><th>Asset</th><th>Price</th><th>RSI (14D)</th><th>MACD Trend</th></tr></thead>
+                            <tbody id="screener-grid"><tr><td colspan="4" class="text-center text-muted py-4">Scanning markets...</td></tr></tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal fade" id="rebalanceModal" tabindex="-1">
+        <div class="modal-dialog modal-dialog-centered"><div class="modal-content card-custom p-4 shadow-lg">
+            <h4 class="fw-bold text-warning mb-3">Configure Targets</h4>
+            <div id="reb-rows-container" class="mb-3"></div>
+            <button class="btn btn-sm btn-outline-primary w-100 mb-4 fw-bold" onclick="addRebRow('','')">+ ADD ASSET</button>
+            <div class="d-flex justify-content-between align-items-center border-top border-secondary pt-3 mb-3">
+                <span class="text-muted fw-bold">TOTAL:</span><span id="reb-total-calc" class="fw-bold fs-5">0%</span>
+            </div>
+            <button class="btn btn-warning w-100 py-2 fw-bold" onclick="saveRebalance()">SAVE CONFIGURATION</button>
+        </div></div>
+    </div>
+
+    <div class="modal fade" id="orderModal" tabindex="-1">
+        <div class="modal-dialog modal-dialog-centered"><div class="modal-content card-custom p-4 shadow-lg">
+            <div class="text-center">
+                <div id="m-type" class="badge bg-primary mb-2">SPOT</div>
+                <h2 id="m-price" class="fw-bold mb-0">$0.00</h2>
+                <p id="m-pair" class="text-muted small mb-4"></p>
+                <select id="m-order-type" class="form-select mb-3 bg-dark text-white border-secondary" onchange="toggleOrderUI()"><option value="MARKET">Market</option><option value="LIMIT">Limit</option></select>
+                <div id="m-limit-box" class="mb-3 d-none text-start"><label class="small text-muted mb-1">LIMIT PRICE</label><input type="number" id="m-limit-px" class="form-control bg-dark border-secondary text-white" step="any"></div>
+                <div class="mb-4 text-start"><label class="small text-muted mb-1" id="m-amt-label">AMOUNT (USD)</label><input type="number" id="m-amt" class="form-control bg-dark border-secondary text-white" step="any"></div>
+                <div class="row g-2 mb-4"><div class="col-6"><button class="btn btn-success w-100 py-3 fw-bold" onclick="sendOrder('BUY')">BUY</button></div><div class="col-6"><button class="btn btn-danger w-100 py-3 fw-bold" onclick="sendOrder('SELL')">SELL</button></div></div>
+                <div class="pt-3 border-top border-secondary text-start"><label class="small text-warning-custom fw-bold mb-2"><i class="bi bi-activity"></i> TRAILING STOP LOSS (%)</label><div class="input-group"><input type="number" id="trail-pct" class="form-control bg-dark border-secondary text-white" placeholder="e.g. 2.0" step="0.1"><button class="btn btn-warning fw-bold text-dark" onclick="setTrailingStop()">ACTIVATE</button></div></div>
+            </div>
+        </div></div>
+    </div>
+
+    <div class="modal fade" id="tpslModal" tabindex="-1">
+        <div class="modal-dialog modal-dialog-centered"><div class="modal-content card-custom p-4 shadow-lg">
+            <div class="text-center">
+                <h4 class="fw-bold mb-0 text-warning-custom">Manage Targets</h4>
+                <p id="tpsl-pair" class="text-muted small mb-4"></p>
+                <div class="mb-3 text-start"><label class="small text-success-custom fw-bold mb-1">TAKE PROFIT PRICE</label><input type="number" id="tp-price" class="form-control bg-dark border-secondary text-white" step="any"></div>
+                <div class="mb-4 text-start"><label class="small text-danger-custom fw-bold mb-1">STOP LOSS PRICE</label><input type="number" id="sl-price" class="form-control bg-dark border-secondary text-white" step="any"></div>
+                <button class="btn btn-primary w-100 py-3 fw-bold" onclick="submitTPSL()">SET TARGETS</button>
+            </div>
+        </div></div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+    <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
+    
+    <script>
+        let selPair = "", selSize = "", selSide = "", selType = "", selCurrentPx = 0;
+        let activeBookPair = ""; 
+        let currentData = { positions: [], history: [], total_value: 0.0, rebalance: [], rebalance_configured: false, trails: [], free_usd: 0.0, bot_locked_usd: 0.0 };
+        let indicatorState = {}; 
+        
+        const modal = new bootstrap.Modal(document.getElementById('orderModal'));
+        const tpslModal = new bootstrap.Modal(document.getElementById('tpslModal'));
+        const rebModal = new bootstrap.Modal(document.getElementById('rebalanceModal'));
+
+        function renderChart(symbol) {
+            document.getElementById('tv_chart_container').innerHTML = ''; 
+            new TradingView.widget({
+                "autosize": true, "symbol": "COINBASE:" + symbol.replace('-PERP', '').replace('-USD', 'USD'),
+                "interval": "60", "timezone": "Etc/UTC", "theme": "dark", "style": "1", "locale": "en",
+                "enable_publishing": false, "backgroundColor": "#1f2833", "gridColor": "#45a29e22",
+                "hide_top_toolbar": false, "hide_legend": false, "save_image": false, "container_id": "tv_chart_container"
+            });
+        }
+        renderChart("BTCUSD");
+
+        async function loadOrderBook(pair) {
+            if(!pair) return;
+            document.getElementById('book-pair-label').innerText = pair;
+            try {
+                const bookR = await fetch(`/api/orderbook/${pair}`); const bookD = await bookR.json();
+                if(bookD.imbalance) {
+                    document.getElementById('bid-pct-label').innerText = `${bookD.imbalance.bid_pct}% Bids`;
+                    document.getElementById('ask-pct-label').innerText = `${bookD.imbalance.ask_pct}% Asks`;
+                    document.getElementById('bid-bar').style.width = `${bookD.imbalance.bid_pct}%`;
+                    document.getElementById('ask-bar').style.width = `${bookD.imbalance.ask_pct}%`;
+                    document.getElementById('buy-wall').innerText = `Buy: $${parseFloat(bookD.walls.buy_wall_px).toLocaleString()} (${parseFloat(bookD.walls.buy_wall_size).toFixed(2)})`;
+                    document.getElementById('sell-wall').innerText = `Sell: $${parseFloat(bookD.walls.sell_wall_px).toLocaleString()} (${parseFloat(bookD.walls.sell_wall_size).toFixed(2)})`;
+                    document.getElementById('asks-list').innerHTML = bookD.asks.map(a => `<div class="book-row"><span>$${parseFloat(a.price).toLocaleString(undefined,{minimumFractionDigits:2})}</span><span class="text-muted">${parseFloat(a.size).toFixed(4)}</span></div>`).reverse().join('');
+                    document.getElementById('bids-list').innerHTML = bookD.bids.map(b => `<div class="book-row"><span>$${parseFloat(b.price).toLocaleString(undefined,{minimumFractionDigits:2})}</span><span class="text-muted">${parseFloat(b.size).toFixed(4)}</span></div>`).join('');
+                }
+            } catch(e) {}
+        }
+
+        async function loadIndicator(asset, type) {
+            let pair = type === 'SPOT' ? `${asset}-USD` : asset;
+            indicatorState[asset] = '<div class="spinner-border spinner-border-sm text-primary"></div>';
+            renderDashboard(); 
+            try {
+                const r = await fetch(`/api/indicators/${pair}`); const d = await r.json();
+                if (d.rsi.includes('Err') || d.rsi === 'No Data') indicatorState[asset] = `<span class="indicator-tag neu">${d.rsi}</span>`;
+                else {
+                    const rClass = d.rsi === 'Bullish' ? 'bull' : (d.rsi === 'Bearish' ? 'bear' : 'neu');
+                    const tClass = d.trend === 'Bullish' ? 'bull' : (d.trend === 'Bearish' ? 'bear' : 'neu');
+                    const mClass = d.macd === 'Bullish' ? 'bull' : (d.macd === 'Bearish' ? 'bear' : 'neu');
+                    indicatorState[asset] = `<span class="indicator-tag ${rClass}">RSI: ${d.rsi}</span><span class="indicator-tag ${tClass}">SMA: ${d.trend}</span><span class="indicator-tag ${mClass}">MACD: ${d.macd}</span>`;
+                }
+            } catch (e) { indicatorState[asset] = '<span class="indicator-tag neu">Fetch Err</span>'; }
+            renderDashboard();
+        }
+
+        async function refresh() {
+            try {
+                const r = await fetch('/api/data'); currentData = await r.json();
+                currentData.positions.forEach(p => { if (indicatorState[p.asset] === undefined) loadIndicator(p.asset, p.type); });
+                document.getElementById('live-dot').className = "badge bg-success rounded-pill";
+                renderDashboard();
+                if(!activeBookPair && currentData.positions.length > 0) activeBookPair = currentData.positions[0].type === 'SPOT' ? `${currentData.positions[0].asset}-USD` : currentData.positions[0].asset;
+                if(activeBookPair) loadOrderBook(activeBookPair);
+                loadBots(); 
+            } catch (e) { document.getElementById('live-dot').className = "badge bg-danger rounded-pill"; }
+        }
+
+        function renderDashboard() {
+            if (!currentData.positions) return;
+            
+            // Format top level values
+            const currencyFormatter = new Intl.NumberFormat('en-US',{style:'currency',currency:'USD'});
+            document.getElementById('total-val').innerText = currencyFormatter.format(currentData.total_value);
+            document.getElementById('free-usd-val').innerText = currencyFormatter.format(currentData.free_usd || 0);
+            document.getElementById('bot-locked-val').innerText = currencyFormatter.format(currentData.bot_locked_usd || 0);
+            
+            // Rebalance UI
+            let rebHTML = "";
+            if (!currentData.rebalance_configured) {
+                rebHTML = `<div class="text-center p-3"><p class="text-muted small">Rebalance targets not set.</p><button class="btn btn-outline-warning btn-sm fw-bold" onclick="openRebalanceConfig()">CONFIGURE</button></div>`;
+            } else {
+                let listHTML = currentData.rebalance.map(r => `
+                    <div class="d-flex justify-content-between align-items-center mb-2 border-bottom border-secondary pb-1">
+                        <div><b class="text-white">${r.asset}</b> <span class="text-muted">Target: ${r.target}</span><br><span class="text-muted">Actual: <span class="${r.status==='Balanced'?'text-success-custom':r.status==='Over'?'text-danger-custom':'text-warning-custom'}">${r.actual}</span></span></div>
+                        <div class="text-end"><span class="badge ${r.status==='Balanced'?'bg-success':r.status==='Over'?'bg-danger':'bg-warning text-dark'}">${r.status}</span><br><span class="text-muted" style="font-size:0.65rem;">${r.action}</span></div>
+                    </div>`).join('');
+                rebHTML = `${listHTML}<button class="btn btn-outline-warning w-100 fw-bold py-2 mt-2" onclick="executeRebalance()">1-CLICK REBALANCE</button>`;
+            }
+            document.getElementById('rebalance-content').innerHTML = rebHTML;
+
+            // Positions Grid
+            document.getElementById('pos-grid').innerHTML = currentData.positions.map(i => {
+                let tradePair = i.type === 'SPOT' ? `${i.asset}-USD` : i.asset;
+                let indHtml = indicatorState[i.asset] || '';
+                let entryPxStr = i.entry_price !== 'N/A' ? '$' + i.entry_price.toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:6}) : 'N/A';
+                let curPxStr = '$' + i.price.toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:6});
+                let liqHtml = i.liquidation !== 'N/A' ? `<div class="text-center"><small class="text-warning-custom d-block small" style="font-size:0.7rem; text-transform:uppercase;">Liq Price</small><span class="fw-bold text-warning-custom">${i.liquidation}</span></div>` : '<div></div>';
+                let pnlHtml = i.pnl ? `<div class="text-end"><small class="text-muted d-block small" style="font-size:0.7rem; text-transform:uppercase;">P&L</small><span class="${i.pnl.includes('-')?'text-danger-custom':'text-success-custom'} fw-bold">${i.pnl}</span></div>` : '<div class="text-end"></div>';
+                let trailBadge = currentData.trails.includes(tradePair) ? `<span class="badge bg-warning text-dark border border-warning position-absolute top-0 end-0 m-2" style="font-size:0.5rem;"><i class="bi bi-activity"></i> TRAILING</span>` : '';
+
+                return `
+                <div class="col-12 col-md-12 col-lg-6">
+                    <div class="card card-custom p-3 shadow-sm h-100 d-flex flex-column position-relative">
+                        ${trailBadge}
+                        <div class="d-flex justify-content-between align-items-start mb-3 border-bottom border-secondary pb-2">
+                            <div><h5 class="mb-0 fw-bold" style="color:#66fcf1;">${i.asset}</h5><span class="badge bg-dark border border-secondary mt-1" style="font-size:0.6rem">${i.type}</span></div>
+                            <div class="text-end"><h5 class="mb-0 fw-bold">$${i.usd_value.toLocaleString(undefined,{minimumFractionDigits:2})}</h5><span class="badge ${i.side === 'LONG' ? 'bg-success text-dark' : i.side === 'SHORT' ? 'bg-danger text-white' : 'bg-secondary'} mt-1" style="font-size:0.6rem">${i.side || 'N/A'}</span></div>
+                        </div>
+                        <div class="d-flex justify-content-between mb-3 border-bottom border-secondary pb-2">
+                            <div><small class="text-muted d-block" style="font-size:0.65rem; text-transform:uppercase;">Avg Entry</small><b class="text-white">${entryPxStr}</b></div>
+                            <div class="text-end"><small class="text-muted d-block" style="font-size:0.65rem; text-transform:uppercase;">Current Price</small><b class="text-white">${curPxStr}</b></div>
+                        </div>
+                        <div class="d-flex mb-3 mt-1">${indHtml}</div>
+                        <div class="d-flex justify-content-between border-top border-secondary pt-3 mt-auto mb-3">
+                            <div><small class="text-muted d-block" style="font-size:0.7rem; text-transform:uppercase;">Owned</small><b>${i.size}</b></div>
+                            ${liqHtml}${pnlHtml}
+                        </div>
+                        <div class="d-flex justify-content-between gap-2 mt-auto">
+                            <button class="btn btn-sm btn-outline-warning rounded-pill flex-grow-1" style="font-size:0.75rem;" onclick="openTPSL('${tradePair}','${i.size}','${i.side}','${i.type}')">TP/SL</button>
+                            <button class="btn btn-sm btn-outline-primary rounded-pill flex-grow-1" style="font-size:0.75rem;" onclick="openM('${tradePair}',${i.price},'${i.type}','${i.size}')">TRADE</button>
+                            <button class="btn btn-sm btn-danger rounded-pill flex-grow-1" style="font-size:0.75rem;" onclick="closePos('${tradePair}','${i.size}','${i.side}','${i.type}')">CLOSE</button>
+                        </div>
+                    </div>
+                </div>`
+            }).join('');
+
+            // Recent Order History Snippet (Trading Desk)
+            document.getElementById('history-grid').innerHTML = currentData.history.map(h => {
+                let sClass = "bg-secondary"; if(h.status === 'FILLED') sClass = "bg-success"; if(h.status === 'REJECTED' || h.status === 'FAILED') sClass = "bg-danger"; if(h.status === 'CANCELLED') sClass = "bg-warning text-dark";
+                return `<tr><td class="fw-bold">${h.pair}</td><td><span class="badge ${h.side==='BUY'?'text-success':'text-danger'}">${h.side}</span></td><td><span class="badge badge-status ${sClass}">${h.status}</span></td><td class="text-muted small">${h.time}</td></tr>`;
+            }).join('');
+        }
+
+        // ==========================================
+        // DEDICATED ORDERS TAB LOGIC
+        // ==========================================
+        async function loadAllOrders() {
+            try {
+                const res = await fetch('/api/orders');
+                const data = await res.json();
+                const grid = document.getElementById('all-orders-grid');
+                
+                if (data.length === 0) {
+                    grid.innerHTML = '<tr><td colspan="7" class="text-center text-muted py-4">No order history found.</td></tr>';
+                    return;
+                }
+
+                grid.innerHTML = data.map(o => {
+                    let sClass = "bg-secondary text-white"; 
+                    if(o.status === 'FILLED') sClass = "bg-success text-dark"; 
+                    if(o.status === 'REJECTED' || o.status === 'FAILED') sClass = "bg-danger text-white"; 
+                    if(o.status === 'CANCELLED') sClass = "bg-warning text-dark";
+                    if(o.status === 'OPEN' || o.status === 'PENDING') sClass = "bg-primary text-white";
+
+                    let actionBtn = '';
+                    if (o.status === 'OPEN' || o.status === 'PENDING') {
+                        actionBtn = `<button class="btn btn-sm btn-outline-danger" onclick="cancelOrder('${o.id}')">CANCEL</button>`;
+                    }
+
+                    return `<tr>
+                        <td class="text-muted small">${o.time}</td>
+                        <td class="fw-bold text-white">${o.pair}</td>
+                        <td><span class="badge ${o.side === 'BUY' ? 'text-success border border-success' : 'text-danger border border-danger'} bg-transparent">${o.side}</span></td>
+                        <td>${o.price}</td>
+                        <td class="text-muted">${o.filled} / ${o.size}</td>
+                        <td><span class="badge ${sClass}">${o.status}</span></td>
+                        <td class="text-end">${actionBtn}</td>
+                    </tr>`;
+                }).join('');
+            } catch (e) { console.error("Error loading orders:", e); }
+        }
+
+        async function cancelOrder(orderId) {
+            if(!confirm("Are you sure you want to cancel this order?")) return;
+            try {
+                const res = await fetch('/api/orders/cancel', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({order_id: orderId})
+                });
+                const d = await res.json();
+                alert(d.message || d.error);
+                loadAllOrders(); // Refresh the orders tab immediately
+                refresh();       // Refresh main UI data
+            } catch (e) { alert("Network error cancelling order."); }
+        }
+
+        // ==========================================
+        // BOT MANAGER LOGIC
+        // ==========================================
+        function toggleBotSettings() {
+            const strat = document.getElementById('bot-strategy').value;
+            document.getElementById('grid-settings').classList.toggle('d-none', strat !== 'GRID');
+        }
+
+        async function deployBot() {
+            const pair = document.getElementById('bot-pair').value.toUpperCase();
+            let amount = parseFloat(document.getElementById('bot-amount').value);
+            const strategy = document.getElementById('bot-strategy').value;
+            
+            if (!pair || !amount || amount <= 0) return alert("Please enter a valid asset pair and allocation amount.");
+            if (!pair.includes('-')) document.getElementById('bot-pair').value = pair + '-USD';
+
+            const payload = { pair: document.getElementById('bot-pair').value, strategy: strategy, amount: amount, settings: {} };
+            
+            if (strategy === 'GRID') {
+                payload.settings = {
+                    lower_price: parseFloat(document.getElementById('grid-lower').value),
+                    upper_price: parseFloat(document.getElementById('grid-upper').value),
+                    grid_count: parseInt(document.getElementById('grid-count').value)
+                };
+                if (!payload.settings.lower_price || !payload.settings.upper_price) return alert("Please set Grid limits.");
+            }
+
+            if(!confirm(`Deploy ${strategy} bot on ${payload.pair} with $${amount}? This will lock funds into the bot's sandbox.`)) return;
+
+            const res = await fetch('/api/bots/start', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload) });
+            const d = await res.json();
+            alert(d.message || d.error);
+            document.getElementById('bot-pair').value = '';
+            document.getElementById('bot-amount').value = '';
+            loadBots();
+            refresh(); // Update the free USD balance immediately
+        }
+
+        async function stopBot(botId) {
+            if(!confirm("Are you sure you want to stop this bot? It will stop executing trades.")) return;
+            const res = await fetch(`/api/bots/stop/${botId}`, { method: 'POST' });
+            const d = await res.json();
+            alert(d.message || d.error);
+            loadBots();
+        }
+
+        async function restartBot(botId) {
+            const res = await fetch(`/api/bots/restart/${botId}`, { method: 'POST' });
+            const d = await res.json();
+            alert(d.message || d.error);
+            loadBots();
+        }
+
+        async function deleteBot(botId) {
+            if(!confirm("Are you sure you want to completely delete this bot? Any crypto it holds will remain in your main portfolio, but the bot's sandbox will be destroyed.")) return;
+            const res = await fetch(`/api/bots/delete/${botId}`, { method: 'DELETE' });
+            const d = await res.json();
+            alert(d.message || d.error);
+            loadBots();
+            refresh(); // Return the locked funds to free balance immediately
+        }
+
+        async function loadBots() {
+            try {
+                const r = await fetch('/api/bots');
+                const bots = await r.json();
+                const grid = document.getElementById('active-bots-grid');
+                
+                if (Object.keys(bots).length === 0) {
+                    grid.innerHTML = '<div class="text-center text-muted py-5">No bots currently deployed.</div>';
+                    return;
+                }
+
+                grid.innerHTML = Object.entries(bots).map(([id, b]) => {
+                    const statusClass = b.status === 'RUNNING' ? 'bg-success text-dark' : 'bg-danger';
+                    const pnl = b.live_pnl || 0; 
+                    const pnlClass = pnl >= 0 ? 'text-success-custom' : 'text-danger-custom';
+
+                    let actionButtons = '';
+                    if (b.status === 'RUNNING') {
+                        actionButtons = `<button class="btn btn-sm btn-outline-danger" onclick="stopBot('${id}')"><i class="bi bi-stop-circle"></i> STOP</button>`;
+                    } else {
+                        actionButtons = `
+                            <button class="btn btn-sm btn-outline-success me-2" onclick="restartBot('${id}')"><i class="bi bi-play-circle"></i> RESTART</button>
+                            <button class="btn btn-sm btn-outline-secondary" onclick="deleteBot('${id}')"><i class="bi bi-trash"></i> DELETE</button>
+                        `;
+                    }
+
+                    return `
+                    <div class="col-12 col-md-6">
+                        <div class="card card-custom p-3 shadow-sm h-100 position-relative border-${b.status === 'RUNNING' ? 'success' : 'secondary'}">
+                            <div class="d-flex justify-content-between mb-2">
+                                <div><h6 class="fw-bold mb-0 text-white">${b.pair}</h6><span class="badge bg-dark border border-secondary" style="font-size:0.6rem">${b.strategy} BOT</span></div>
+                                <div class="text-end"><span class="badge ${statusClass} mb-1">${b.status}</span><br><small class="text-muted" style="font-size: 0.6rem;">ID: ${id}</small></div>
+                            </div>
+                            <div class="d-flex justify-content-between small border-top border-secondary pt-2 mt-2">
+                                <div><span class="text-muted d-block" style="font-size: 0.65rem;">SANDBOX USD</span><b class="text-white">$${b.current_usd.toFixed(2)}</b></div>
+                                <div class="text-end"><span class="text-muted d-block" style="font-size: 0.65rem;">ASSET HELD</span><b class="text-white">${b.asset_held.toFixed(6)}</b></div>
+                            </div>
+                            <div class="d-flex justify-content-between align-items-end mt-3">
+                                <div><span class="text-muted d-block" style="font-size: 0.65rem;">NET PNL (LIVE)</span><b class="${pnlClass}">${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}</b></div>
+                                <div>${actionButtons}</div>
+                            </div>
+                        </div>
+                    </div>`;
+                }).join('');
+            } catch (e) {}
+        }
+
+        // ==========================================
+        // SCREENER & REBALANCE LOGIC
+        // ==========================================
+        async function loadScreener() {
+            try {
+                const r = await fetch('/api/screener'); const data = await r.json();
+                if (data.length === 0) return;
+                document.getElementById('screener-grid').innerHTML = data.map(i => {
+                    let rClass = i.rsi.includes('Buy') ? 'text-success-custom' : i.rsi.includes('Sell') ? 'text-danger-custom' : 'text-muted';
+                    let mClass = i.macd === 'Bullish' ? 'text-success-custom' : i.macd === 'Bearish' ? 'text-danger-custom' : 'text-muted';
+                    return `<tr><td class="fw-bold">${i.asset}</td><td>${i.price}</td><td class="${rClass} fw-bold">${i.rsi}</td><td class="${mClass} fw-bold">${i.macd}</td></tr>`;
+                }).join('');
+            } catch(e) {}
+        }
+
+        function openRebalanceConfig() {
+            document.getElementById('reb-rows-container').innerHTML = '';
+            if (currentData.current_targets && Object.keys(currentData.current_targets).length > 0) {
+                for (const [asset, pct] of Object.entries(currentData.current_targets)) { addRebRow(asset, pct); }
+            } else { addRebRow('BTC', 50); addRebRow('ETH', 50); }
+            updateRebTotal(); rebModal.show();
+        }
+
+        function addRebRow(asset, pct) {
+            const row = document.createElement('div'); row.className = "d-flex gap-2 mb-2 reb-row";
+            row.innerHTML = `<input type="text" class="form-control bg-dark border-secondary text-white reb-asset" placeholder="e.g. BTC" value="${asset}" style="text-transform:uppercase;">
+                             <input type="number" class="form-control bg-dark border-secondary text-white reb-pct" placeholder="%" value="${pct}" oninput="updateRebTotal()">
+                             <button class="btn btn-outline-danger" onclick="this.parentElement.remove(); updateRebTotal();"><i class="bi bi-x-lg"></i></button>`;
+            document.getElementById('reb-rows-container').appendChild(row);
+        }
+
+        function updateRebTotal() {
+            let total = 0; document.querySelectorAll('.reb-pct').forEach(el => total += parseFloat(el.value || 0));
+            const totalEl = document.getElementById('reb-total-calc');
+            totalEl.innerText = `${total}%`; totalEl.className = total === 100 ? "fw-bold fs-5 text-success" : "fw-bold fs-5 text-danger";
+        }
+
+        async function saveRebalance() {
+            let payload = {};
+            document.querySelectorAll('.reb-row').forEach(row => {
+                const asset = row.querySelector('.reb-asset').value.trim(); const pct = row.querySelector('.reb-pct').value;
+                if (asset && pct) payload[asset] = pct;
+            });
+            const res = await fetch('/api/config_rebalance', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload) });
+            const d = await res.json(); if(!d.success) return alert(d.error);
+            rebModal.hide(); refresh();
+        }
+
+        async function executeRebalance() {
+            if(!confirm("Execute trades to rebalance your portfolio?")) return;
+            const res = await fetch('/api/execute_rebalance', { method: 'POST' });
+            const d = await res.json(); alert(d.message || d.error); refresh();
+        }
+
+        // ==========================================
+        // MANUAL TRADING LOGIC
+        // ==========================================
+        async function handleSearch() {
+            const s = document.getElementById('asset-search').value;
+            if(!s) return;
+            const res = await fetch(`/api/search/${s}`); const d = await res.json();
+            if(d.success) {
+                renderChart(d.symbol);
+                activeBookPair = d.symbol;         
+                loadOrderBook(activeBookPair);     
+                openM(d.symbol, d.price, d.type, '0');
+            } else alert("Asset not found.");
+        }
+
+        function openM(p, px, t, size) { 
+            selPair = p; selCurrentPx = px; selSize = size;
+            document.getElementById('m-price').innerText = `$${px.toLocaleString()}`; 
+            document.getElementById('m-pair').innerText = p; document.getElementById('m-type').innerText = t; 
+            modal.show(); 
+        }
+
+        function toggleOrderUI() { 
+            const isL = document.getElementById('m-order-type').value === 'LIMIT'; 
+            document.getElementById('m-limit-box').classList.toggle('d-none', !isL); document.getElementById('m-amt-label').innerText = isL ? "SIZE (UNITS)" : "AMOUNT (USD)"; 
+        }
+
+        async function sendOrder(s) {
+            const payload = { pair: selPair, side: s, order_type: document.getElementById('m-order-type').value, amount: document.getElementById('m-amt').value, limit_price: document.getElementById('m-limit-px').value };
+            const res = await fetch('/api/trade', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload) });
+            const d = await res.json(); alert(d.message || d.error); modal.hide(); refresh();
+            loadAllOrders(); // refresh the orders page just in case
+        }
+
+        async function closePos(pair, size, side, type) {
+            if(!confirm(`Close entire position of ${size} units for ${pair}?`)) return;
+            const res = await fetch('/api/trade', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({action: 'CLOSE', pair: pair, size: size, side: side, type: type}) });
+            const data = await res.json(); if(!data.success) alert(data.error); else refresh();
+        }
+
+        // Intervals for polling data
+        setInterval(refresh, 5000); 
+        setInterval(loadScreener, 30000); 
+        setInterval(loadAllOrders, 10000); // Polling for order state changes
+
+        // Initial Data Loads
+        refresh(); 
+        loadScreener();
+        loadAllOrders();
+    </script>
+</body>
+</html>
