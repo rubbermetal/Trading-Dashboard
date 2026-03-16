@@ -26,3 +26,19 @@ SCREENER_DATA = []
 #    "settings": {} 
 # }
 ACTIVE_BOTS = {}
+
+def new_bot_stats():
+    """Returns a fresh stats object for a newly created bot."""
+    return {
+        "total_trades": 0,
+        "winning_trades": 0,
+        "losing_trades": 0,
+        "stopped_out": 0,
+        "total_pnl": 0.0,
+        "largest_win": 0.0,
+        "largest_loss": 0.0,
+        "total_fees_est": 0.0,
+        "deposits": 0.0,       # cumulative added capital
+        "withdrawals": 0.0,    # cumulative removed capital
+        "trade_log": []        # list of completed trade dicts
+    }

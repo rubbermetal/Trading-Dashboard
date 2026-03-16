@@ -6,7 +6,8 @@ import threading
 import pandas as pd
 from decimal import Decimal, ROUND_DOWN
 from flask import Blueprint, jsonify, request
-from shared import client, ACTIVE_BOTS
+from datetime import datetime, timezone
+from shared import client, ACTIVE_BOTS, new_bot_stats
 from strategies import calculate_quad_rotation, calculate_quad_super, calculate_orb, calculate_advanced_grid
 
 bot_manager_bp = Blueprint('bot_manager', __name__)
@@ -41,6 +42,67 @@ def snap_to_increment(value, increment):
         return result.rstrip('0').rstrip('.') if '.' in result else result
     except:
         return str(value)
+
+# ==========================================
+# TRADE RECORDING & STATS HELPERS
+# ==========================================
+def ensure_stats(bot):
+    """Backfill stats object for bots created before the upgrade."""
+    if 'stats' not in bot:
+        bot['stats'] = new_bot_stats()
+    # Ensure any newly added keys exist on older stats dicts
+    defaults = new_bot_stats()
+    for k, v in defaults.items():
+        if k not in bot['stats']:
+            bot['stats'][k] = v
+    return bot['stats']
+
+def record_trade(bot, entry_px, exit_px, size, side, exit_reason, pair, multiplier=1.0):
+    """
+    Records a completed trade into the bot's stats and trade_log.
+    side: 'LONG' or 'SHORT'
+    exit_reason: 'SIGNAL', 'STOP_LOSS', 'TRAILING_STOP', 'GRID_FLIP', 'MANUAL'
+    """
+    stats = ensure_stats(bot)
+    
+    if side == 'LONG':
+        raw_pnl = (exit_px - entry_px) * abs(size) * multiplier
+    else:
+        raw_pnl = (entry_px - exit_px) * abs(size) * multiplier
+    
+    # Rough fee estimate (0.5% round-trip for taker, lower for maker)
+    fee_est = abs(size) * multiplier * exit_px * 0.005
+    net_pnl = raw_pnl - fee_est
+
+    stats['total_trades'] += 1
+    stats['total_pnl'] += net_pnl
+    stats['total_fees_est'] += fee_est
+
+    if net_pnl >= 0:
+        stats['winning_trades'] += 1
+        if net_pnl > stats['largest_win']:
+            stats['largest_win'] = net_pnl
+    else:
+        stats['losing_trades'] += 1
+        if net_pnl < stats['largest_loss']:
+            stats['largest_loss'] = net_pnl
+
+    if exit_reason in ('STOP_LOSS', 'TRAILING_STOP'):
+        stats['stopped_out'] += 1
+
+    stats['trade_log'].append({
+        'pair': pair,
+        'side': side,
+        'entry_price': round(entry_px, 6),
+        'exit_price': round(exit_px, 6),
+        'size': round(abs(size), 8),
+        'pnl': round(net_pnl, 4),
+        'fee_est': round(fee_est, 4),
+        'exit_reason': exit_reason,
+        'timestamp': datetime.now(timezone.utc).isoformat()
+    })
+    
+    save_bots()
 
 # ==========================================
 # STATE RECOVERY
@@ -203,9 +265,12 @@ def execute_orb(bot_id, bot, pair):
         
     elif signal == 'EXIT_LONG' and pos_side == 'LONG':
         print(f"[ORB BOT] {pair} EXIT LONG: {reason}")
+        exit_reason = 'TRAILING_STOP' if 'Trailing' in reason else ('STOP_LOSS' if 'Stop' in reason else 'SIGNAL')
         try:
             oid = str(uuid.uuid4())
             client.market_order_sell(client_order_id=oid, product_id=pair, base_size=str(abs(bot['asset_held'])))
+            
+            record_trade(bot, bot['entry_price'], current_px, abs(bot['asset_held']), 'LONG', exit_reason, pair, mult)
             
             profit = (current_px - bot['entry_price']) * abs(bot['asset_held']) * mult
             bot['current_usd'] = bot['allocated_usd'] + (profit * 0.995)
@@ -219,9 +284,12 @@ def execute_orb(bot_id, bot, pair):
         
     elif signal == 'EXIT_SHORT' and pos_side == 'SHORT':
         print(f"[ORB BOT] {pair} EXIT SHORT: {reason}")
+        exit_reason = 'TRAILING_STOP' if 'Trailing' in reason else ('STOP_LOSS' if 'Stop' in reason else 'SIGNAL')
         try:
             oid = str(uuid.uuid4())
             client.market_order_buy(client_order_id=oid, product_id=pair, base_size=str(abs(bot['asset_held'])))
+            
+            record_trade(bot, bot['entry_price'], current_px, abs(bot['asset_held']), 'SHORT', exit_reason, pair, mult)
             
             profit = (bot['entry_price'] - current_px) * abs(bot['asset_held']) * mult
             bot['current_usd'] = bot['allocated_usd'] + (profit * 0.995)
@@ -267,6 +335,8 @@ def execute_quad(bot_id, bot, pair, mode='STANDARD'):
                 
             bot['asset_held'] += qty
             bot['current_usd'] = 0.0
+            bot['entry_price'] = current_px
+            bot['position_side'] = 'LONG'
             save_bots()
         except Exception as e: print(f"Order failed: {e}")
         
@@ -275,8 +345,12 @@ def execute_quad(bot_id, bot, pair, mode='STANDARD'):
             oid = str(uuid.uuid4())
             client.market_order_sell(client_order_id=oid, product_id=pair, base_size=str(bot['asset_held']))
             
+            entry_px = bot.get('entry_price', current_px)
+            record_trade(bot, entry_px, current_px, bot['asset_held'], 'LONG', 'SIGNAL', pair, mult)
+            
             bot['current_usd'] += (bot['asset_held'] * current_px * mult) * 0.995 
             bot['asset_held'] = 0.0
+            bot['position_side'] = 'FLAT'
             save_bots()
         except Exception as e: print(f"Order failed: {e}")
 
@@ -333,6 +407,11 @@ def process_grid_fill(order_id, filled_size, filled_value, status, pair):
                     except Exception as e: print(f"[WS GRID FLIP] Sell Exception: {e}")
                     
                 elif grid['side'] == 'SELL':
+                    # A SELL fill completes a round-trip: bought at (price - step), sold at price
+                    buy_price = grid['price'] - step_size
+                    sell_price = grid['price']
+                    record_trade(bot, buy_price, sell_price, filled_size, 'LONG', 'GRID_FLIP', pair, mult)
+                    
                     new_price = grid['price'] - step_size
                     new_oid = str(uuid.uuid4())
                     
@@ -531,8 +610,29 @@ def get_bots():
         pnl = net_val - bot['allocated_usd']
         b_copy = bot.copy()
         b_copy['live_pnl'] = pnl
+        b_copy['net_value'] = net_val
+        
+        # Ensure stats exist (migration for pre-upgrade bots)
+        stats = ensure_stats(bot)
+        b_copy['stats'] = stats.copy()
+        # Don't send full trade_log in list view (can be large)
+        b_copy['stats']['trade_log'] = len(stats.get('trade_log', []))
+        
+        # Computed convenience fields
+        total_t = stats['total_trades']
+        b_copy['stats']['win_rate'] = round((stats['winning_trades'] / total_t) * 100, 1) if total_t > 0 else 0.0
+        b_copy['stats']['avg_pnl'] = round(stats['total_pnl'] / total_t, 4) if total_t > 0 else 0.0
+        
         response_data[bot_id] = b_copy
     return jsonify(response_data)
+
+@bot_manager_bp.route('/api/bots/<bot_id>/trades', methods=['GET'])
+def get_bot_trades(bot_id):
+    """Returns the full trade log for a specific bot."""
+    if bot_id not in ACTIVE_BOTS:
+        return jsonify(success=False, error="Bot not found.")
+    stats = ensure_stats(ACTIVE_BOTS[bot_id])
+    return jsonify(stats.get('trade_log', []))
 
 @bot_manager_bp.route('/api/bots/start', methods=['POST'])
 def start_bot():
@@ -546,8 +646,12 @@ def start_bot():
         "current_usd": float(d['amount']),
         "asset_held": 0.0,
         "position_side": "FLAT",
-        "settings": d.get('settings', {})
+        "settings": d.get('settings', {}),
+        "stats": new_bot_stats(),
+        "created_at": datetime.now(timezone.utc).isoformat()
     }
+    # Record the initial deposit
+    ACTIVE_BOTS[bot_id]['stats']['deposits'] = float(d['amount'])
     save_bots()
     threading.Thread(target=run_bot, args=(bot_id,), daemon=True).start()
     return jsonify(success=True, message="Bot started!")
@@ -580,5 +684,44 @@ def delete_bot(bot_id):
         save_bots()
         return jsonify(success=True, message="Bot permanently deleted.")
     return jsonify(success=False, error="Bot not found.")
+
+@bot_manager_bp.route('/api/bots/deposit/<bot_id>', methods=['POST'])
+def deposit_to_bot(bot_id):
+    """Add funds to a bot's sandbox account."""
+    if bot_id not in ACTIVE_BOTS:
+        return jsonify(success=False, error="Bot not found.")
+    d = request.json
+    amount = float(d.get('amount', 0))
+    if amount <= 0:
+        return jsonify(success=False, error="Amount must be positive.")
+    
+    bot = ACTIVE_BOTS[bot_id]
+    bot['current_usd'] += amount
+    bot['allocated_usd'] += amount
+    stats = ensure_stats(bot)
+    stats['deposits'] += amount
+    save_bots()
+    return jsonify(success=True, message=f"Deposited ${amount:.2f} into bot {bot_id}.")
+
+@bot_manager_bp.route('/api/bots/withdraw/<bot_id>', methods=['POST'])
+def withdraw_from_bot(bot_id):
+    """Remove funds from a bot's sandbox account (only idle USD, not held assets)."""
+    if bot_id not in ACTIVE_BOTS:
+        return jsonify(success=False, error="Bot not found.")
+    d = request.json
+    amount = float(d.get('amount', 0))
+    if amount <= 0:
+        return jsonify(success=False, error="Amount must be positive.")
+    
+    bot = ACTIVE_BOTS[bot_id]
+    if amount > bot['current_usd']:
+        return jsonify(success=False, error=f"Insufficient idle USD. Available: ${bot['current_usd']:.2f}")
+    
+    bot['current_usd'] -= amount
+    bot['allocated_usd'] -= amount
+    stats = ensure_stats(bot)
+    stats['withdrawals'] += amount
+    save_bots()
+    return jsonify(success=True, message=f"Withdrew ${amount:.2f} from bot {bot_id}.")
 
 load_bots()

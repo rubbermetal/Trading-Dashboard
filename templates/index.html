@@ -262,6 +262,38 @@
         </div></div>
     </div>
 
+    <div class="modal fade" id="botFundsModal" tabindex="-1">
+        <div class="modal-dialog modal-dialog-centered"><div class="modal-content card-custom p-4 shadow-lg">
+            <h4 class="fw-bold text-primary mb-1">Manage Bot Funds</h4>
+            <p id="fund-bot-label" class="text-muted small mb-4"></p>
+            <div class="mb-3">
+                <label class="small text-muted mb-1">AMOUNT (USD)</label>
+                <input type="number" id="fund-amount" class="form-control bg-dark border-secondary text-white" placeholder="e.g. 50" step="any">
+            </div>
+            <div class="row g-2">
+                <div class="col-6"><button class="btn btn-success w-100 py-3 fw-bold" onclick="submitBotFund('deposit')">DEPOSIT</button></div>
+                <div class="col-6"><button class="btn btn-danger w-100 py-3 fw-bold" onclick="submitBotFund('withdraw')">WITHDRAW</button></div>
+            </div>
+            <small class="text-muted mt-3 d-block text-center" style="font-size:0.6rem;">Withdrawals are limited to idle USD not held in open positions.</small>
+        </div></div>
+    </div>
+
+    <div class="modal fade" id="tradeLogModal" tabindex="-1">
+        <div class="modal-dialog modal-lg modal-dialog-centered modal-dialog-scrollable"><div class="modal-content card-custom p-4 shadow-lg">
+            <div class="d-flex justify-content-between align-items-center mb-3">
+                <h4 class="fw-bold text-primary mb-0"><i class="bi bi-journal-text me-2"></i>Trade Log</h4>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <p id="trade-log-label" class="text-muted small mb-3"></p>
+            <div class="table-responsive" style="max-height: 400px;">
+                <table class="table table-dark table-hover table-sm align-middle" style="font-size: 0.8rem;">
+                    <thead class="sticky-top" style="background:#1f2833;"><tr><th>Time</th><th>Side</th><th>Entry</th><th>Exit</th><th>Size</th><th>PnL</th><th>Exit Reason</th></tr></thead>
+                    <tbody id="trade-log-body"><tr><td colspan="7" class="text-center text-muted py-4">Loading...</td></tr></tbody>
+                </table>
+            </div>
+        </div></div>
+    </div>
+
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
     <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
     
@@ -274,6 +306,9 @@
         const modal = new bootstrap.Modal(document.getElementById('orderModal'));
         const tpslModal = new bootstrap.Modal(document.getElementById('tpslModal'));
         const rebModal = new bootstrap.Modal(document.getElementById('rebalanceModal'));
+        const botFundsModal = new bootstrap.Modal(document.getElementById('botFundsModal'));
+        const tradeLogModal = new bootstrap.Modal(document.getElementById('tradeLogModal'));
+        let activeFundBotId = "";
 
         function renderChart(symbol) {
             document.getElementById('tv_chart_container').innerHTML = ''; 
@@ -515,6 +550,51 @@
             refresh(); // Return the locked funds to free balance immediately
         }
 
+        function openBotFunds(botId, pair, idleUsd) {
+            activeFundBotId = botId;
+            document.getElementById('fund-bot-label').innerText = `${pair} — Bot ${botId} (Idle: $${idleUsd.toFixed(2)})`;
+            document.getElementById('fund-amount').value = '';
+            botFundsModal.show();
+        }
+
+        async function submitBotFund(action) {
+            const amount = parseFloat(document.getElementById('fund-amount').value);
+            if (!amount || amount <= 0) return alert("Enter a valid amount.");
+            const res = await fetch(`/api/bots/${action}/${activeFundBotId}`, {
+                method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({amount})
+            });
+            const d = await res.json();
+            alert(d.message || d.error);
+            botFundsModal.hide();
+            loadBots(); refresh();
+        }
+
+        async function openTradeLog(botId, pair) {
+            document.getElementById('trade-log-label').innerText = `${pair} — Bot ${botId}`;
+            document.getElementById('trade-log-body').innerHTML = '<tr><td colspan="7" class="text-center text-muted py-4">Loading...</td></tr>';
+            tradeLogModal.show();
+            try {
+                const res = await fetch(`/api/bots/${botId}/trades`);
+                const trades = await res.json();
+                const body = document.getElementById('trade-log-body');
+                if (!trades.length) { body.innerHTML = '<tr><td colspan="7" class="text-center text-muted py-4">No trades recorded yet.</td></tr>'; return; }
+                body.innerHTML = trades.slice().reverse().map(t => {
+                    const pClass = t.pnl >= 0 ? 'text-success-custom' : 'text-danger-custom';
+                    const reasonBadge = t.exit_reason === 'STOP_LOSS' ? 'bg-danger' : t.exit_reason === 'TRAILING_STOP' ? 'bg-warning text-dark' : t.exit_reason === 'GRID_FLIP' ? 'bg-info text-dark' : 'bg-primary';
+                    const ts = t.timestamp ? t.timestamp.substring(0,16).replace('T',' ') : '';
+                    return `<tr>
+                        <td class="text-muted">${ts}</td>
+                        <td><span class="badge ${t.side==='LONG'?'text-success border border-success':'text-danger border border-danger'} bg-transparent">${t.side}</span></td>
+                        <td>$${t.entry_price.toLocaleString()}</td>
+                        <td>$${t.exit_price.toLocaleString()}</td>
+                        <td>${t.size}</td>
+                        <td class="${pClass} fw-bold">${t.pnl >= 0 ? '+' : ''}$${t.pnl.toFixed(4)}</td>
+                        <td><span class="badge ${reasonBadge}" style="font-size:0.6rem;">${t.exit_reason}</span></td>
+                    </tr>`;
+                }).join('');
+            } catch(e) { document.getElementById('trade-log-body').innerHTML = '<tr><td colspan="7" class="text-center text-danger py-4">Error loading trades.</td></tr>'; }
+        }
+
         async function loadBots() {
             try {
                 const r = await fetch('/api/bots');
@@ -530,14 +610,20 @@
                     const statusClass = b.status === 'RUNNING' ? 'bg-success text-dark' : 'bg-danger';
                     const pnl = b.live_pnl || 0; 
                     const pnlClass = pnl >= 0 ? 'text-success-custom' : 'text-danger-custom';
+                    const s = b.stats || {};
+                    const winRate = s.win_rate || 0;
+                    const wrClass = winRate >= 50 ? 'text-success-custom' : winRate > 0 ? 'text-danger-custom' : 'text-muted';
+                    const totalPnl = s.total_pnl || 0;
+                    const tpClass = totalPnl >= 0 ? 'text-success-custom' : 'text-danger-custom';
+                    const netVal = b.net_value || b.allocated_usd;
 
                     let actionButtons = '';
                     if (b.status === 'RUNNING') {
                         actionButtons = `<button class="btn btn-sm btn-outline-danger" onclick="stopBot('${id}')"><i class="bi bi-stop-circle"></i> STOP</button>`;
                     } else {
                         actionButtons = `
-                            <button class="btn btn-sm btn-outline-success me-2" onclick="restartBot('${id}')"><i class="bi bi-play-circle"></i> RESTART</button>
-                            <button class="btn btn-sm btn-outline-secondary" onclick="deleteBot('${id}')"><i class="bi bi-trash"></i> DELETE</button>
+                            <button class="btn btn-sm btn-outline-success me-1" onclick="restartBot('${id}')"><i class="bi bi-play-circle"></i></button>
+                            <button class="btn btn-sm btn-outline-secondary" onclick="deleteBot('${id}')"><i class="bi bi-trash"></i></button>
                         `;
                     }
 
@@ -548,12 +634,50 @@
                                 <div><h6 class="fw-bold mb-0 text-white">${b.pair}</h6><span class="badge bg-dark border border-secondary" style="font-size:0.6rem">${b.strategy} BOT</span></div>
                                 <div class="text-end"><span class="badge ${statusClass} mb-1">${b.status}</span><br><small class="text-muted" style="font-size: 0.6rem;">ID: ${id}</small></div>
                             </div>
-                            <div class="d-flex justify-content-between small border-top border-secondary pt-2 mt-2">
-                                <div><span class="text-muted d-block" style="font-size: 0.65rem;">SANDBOX USD</span><b class="text-white">$${b.current_usd.toFixed(2)}</b></div>
-                                <div class="text-end"><span class="text-muted d-block" style="font-size: 0.65rem;">ASSET HELD</span><b class="text-white">${b.asset_held.toFixed(6)}</b></div>
+
+                            <!-- ACCOUNT BALANCES -->
+                            <div class="d-flex justify-content-between small border-top border-secondary pt-2 mt-1">
+                                <div><span class="text-muted d-block" style="font-size: 0.6rem;">NET VALUE</span><b class="text-white">$${netVal.toFixed(2)}</b></div>
+                                <div class="text-center"><span class="text-muted d-block" style="font-size: 0.6rem;">IDLE USD</span><b class="text-white">$${b.current_usd.toFixed(2)}</b></div>
+                                <div class="text-end"><span class="text-muted d-block" style="font-size: 0.6rem;">ASSET HELD</span><b class="text-white">${b.asset_held.toFixed(6)}</b></div>
                             </div>
-                            <div class="d-flex justify-content-between align-items-end mt-3">
-                                <div><span class="text-muted d-block" style="font-size: 0.65rem;">NET PNL (LIVE)</span><b class="${pnlClass}">${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}</b></div>
+
+                            <!-- LIVE PNL -->
+                            <div class="d-flex justify-content-between align-items-center border-top border-secondary pt-2 mt-2">
+                                <div><span class="text-muted d-block" style="font-size: 0.6rem;">UNREALIZED PNL</span><b class="${pnlClass}">${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}</b></div>
+                                <div class="text-end"><span class="text-muted d-block" style="font-size: 0.6rem;">REALIZED PNL</span><b class="${tpClass}">${totalPnl >= 0 ? '+' : ''}$${totalPnl.toFixed(2)}</b></div>
+                            </div>
+
+                            <!-- STATS ROW -->
+                            <div class="border-top border-secondary pt-2 mt-2" style="font-size:0.7rem;">
+                                <div class="d-flex justify-content-between mb-1">
+                                    <span class="text-muted">Trades</span><span class="text-white fw-bold">${s.total_trades || 0}</span>
+                                </div>
+                                <div class="d-flex justify-content-between mb-1">
+                                    <span class="text-muted">Win / Loss</span>
+                                    <span><span class="text-success-custom fw-bold">${s.winning_trades || 0}</span> <span class="text-muted">/</span> <span class="text-danger-custom fw-bold">${s.losing_trades || 0}</span></span>
+                                </div>
+                                <div class="d-flex justify-content-between mb-1">
+                                    <span class="text-muted">Win Rate</span><span class="${wrClass} fw-bold">${winRate.toFixed(1)}%</span>
+                                </div>
+                                <div class="d-flex justify-content-between mb-1">
+                                    <span class="text-muted">Stopped Out</span><span class="text-warning-custom fw-bold">${s.stopped_out || 0}</span>
+                                </div>
+                                <div class="d-flex justify-content-between mb-1">
+                                    <span class="text-muted">Best / Worst</span>
+                                    <span><span class="text-success-custom">+$${(s.largest_win || 0).toFixed(2)}</span> <span class="text-muted">/</span> <span class="text-danger-custom">$${(s.largest_loss || 0).toFixed(2)}</span></span>
+                                </div>
+                                <div class="d-flex justify-content-between">
+                                    <span class="text-muted">Est. Fees</span><span class="text-muted">$${(s.total_fees_est || 0).toFixed(2)}</span>
+                                </div>
+                            </div>
+
+                            <!-- ACTION BUTTONS -->
+                            <div class="d-flex justify-content-between align-items-end border-top border-secondary pt-2 mt-2">
+                                <div class="d-flex gap-1">
+                                    <button class="btn btn-sm btn-outline-primary" onclick="openBotFunds('${id}', '${b.pair}', ${b.current_usd})" title="Deposit / Withdraw"><i class="bi bi-wallet2"></i></button>
+                                    <button class="btn btn-sm btn-outline-info" onclick="openTradeLog('${id}', '${b.pair}')" title="Trade Log"><i class="bi bi-journal-text"></i></button>
+                                </div>
                                 <div>${actionButtons}</div>
                             </div>
                         </div>
