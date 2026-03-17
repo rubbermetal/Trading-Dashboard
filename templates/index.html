@@ -59,7 +59,17 @@
                 <div class="row mt-4 mb-4">
                     <div class="col-lg-8 mb-3">
                         <div class="card card-custom p-2 h-100" style="min-height: 400px;">
-                            <div id="tv_chart_container" style="height:100%; width:100%"></div>
+                            <div class="d-flex justify-content-between align-items-center px-2 pt-1 pb-1">
+                                <span id="chart-pair-label" class="text-muted small fw-bold">BTC-USD</span>
+                                <div class="btn-group btn-group-sm" id="tf-buttons">
+                                    <button class="btn btn-outline-secondary btn-sm" onclick="switchTF('5m')">5m</button>
+                                    <button class="btn btn-outline-secondary btn-sm" onclick="switchTF('15m')">15m</button>
+                                    <button class="btn btn-outline-secondary btn-sm active" onclick="switchTF('1h')">1H</button>
+                                    <button class="btn btn-outline-secondary btn-sm" onclick="switchTF('6h')">6H</button>
+                                    <button class="btn btn-outline-secondary btn-sm" onclick="switchTF('1d')">1D</button>
+                                </div>
+                            </div>
+                            <div id="tv_chart_container" style="height:100%; width:100%; min-height:360px;"></div>
                         </div>
                     </div>
                     <div class="col-lg-4 mb-3">
@@ -294,8 +304,21 @@
         </div></div>
     </div>
 
+    <div class="modal fade" id="botChartModal" tabindex="-1">
+        <div class="modal-dialog modal-xl modal-dialog-centered"><div class="modal-content card-custom p-3 shadow-lg">
+            <div class="d-flex justify-content-between align-items-center mb-2">
+                <div>
+                    <h5 class="fw-bold text-primary mb-0" id="bot-chart-title"><i class="bi bi-graph-up me-2"></i>Bot Chart</h5>
+                    <small class="text-muted" id="bot-chart-subtitle"></small>
+                </div>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div id="bot-chart-container" style="height: 480px; width: 100%;"></div>
+        </div></div>
+    </div>
+
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
-    <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
+    <script src="https://unpkg.com/lightweight-charts@4.1.1/dist/lightweight-charts.standalone.production.js"></script>
     
     <script>
         let selPair = "", selSize = "", selSide = "", selType = "", selCurrentPx = 0;
@@ -308,18 +331,184 @@
         const rebModal = new bootstrap.Modal(document.getElementById('rebalanceModal'));
         const botFundsModal = new bootstrap.Modal(document.getElementById('botFundsModal'));
         const tradeLogModal = new bootstrap.Modal(document.getElementById('tradeLogModal'));
+        const botChartModal = new bootstrap.Modal(document.getElementById('botChartModal'));
         let activeFundBotId = "";
 
-        function renderChart(symbol) {
-            document.getElementById('tv_chart_container').innerHTML = ''; 
-            new TradingView.widget({
-                "autosize": true, "symbol": "COINBASE:" + symbol.replace('-PERP', '').replace('-USD', 'USD'),
-                "interval": "60", "timezone": "Etc/UTC", "theme": "dark", "style": "1", "locale": "en",
-                "enable_publishing": false, "backgroundColor": "#1f2833", "gridColor": "#45a29e22",
-                "hide_top_toolbar": false, "hide_legend": false, "save_image": false, "container_id": "tv_chart_container"
+        // Chart state
+        let mainChart = null;
+        let mainCandleSeries = null;
+        let mainVolumeSeries = null;
+        let chartPair = "BTC-USD";
+        let chartTF = "1h";
+
+        // Strategy -> native timeframe mapping
+        const STRATEGY_TF = { "QUAD": "15m", "QUAD_SUPER": "15m", "ORB": "5m", "GRID": "1h" };
+        const TF_LABELS = { "1m": "1m", "5m": "5m", "15m": "15m", "1h": "1H", "6h": "6H", "1d": "1D" };
+
+        // ==========================================
+        // LIGHTWEIGHT CHARTS ENGINE
+        // ==========================================
+        const CHART_COLORS = {
+            bg: '#1f2833',
+            text: '#adb5bd',
+            grid: '#45a29e22',
+            upBody: '#00d578',
+            downBody: '#ff4b5c',
+            upWick: '#00d578',
+            downWick: '#ff4b5c',
+            volUp: 'rgba(0,213,120,0.15)',
+            volDown: 'rgba(255,75,92,0.15)',
+            crosshair: '#66fcf1'
+        };
+
+        function createChart(container, height) {
+            return LightweightCharts.createChart(container, {
+                width: container.clientWidth,
+                height: height || container.clientHeight || 360,
+                layout: { background: { type: 'solid', color: CHART_COLORS.bg }, textColor: CHART_COLORS.text, fontFamily: 'sans-serif', fontSize: 11 },
+                grid: { vertLines: { color: CHART_COLORS.grid }, horzLines: { color: CHART_COLORS.grid } },
+                crosshair: { mode: LightweightCharts.CrosshairMode.Normal, vertLine: { color: CHART_COLORS.crosshair, width: 1, style: 2 }, horzLine: { color: CHART_COLORS.crosshair, width: 1, style: 2 } },
+                rightPriceScale: { borderColor: '#45a29e44' },
+                timeScale: { borderColor: '#45a29e44', timeVisible: true, secondsVisible: false },
+                handleScroll: true,
+                handleScale: true,
             });
         }
-        renderChart("BTCUSD");
+
+        function addCandleAndVolume(chart) {
+            const candles = chart.addCandlestickSeries({
+                upColor: CHART_COLORS.upBody, downColor: CHART_COLORS.downBody,
+                borderUpColor: CHART_COLORS.upBody, borderDownColor: CHART_COLORS.downBody,
+                wickUpColor: CHART_COLORS.upWick, wickDownColor: CHART_COLORS.downWick,
+            });
+            const volume = chart.addHistogramSeries({
+                priceFormat: { type: 'volume' },
+                priceScaleId: '',
+            });
+            volume.priceScale().applyOptions({ scaleMargins: { top: 0.85, bottom: 0 } });
+            return { candles, volume };
+        }
+
+        async function fetchCandles(pair, tf) {
+            try {
+                const r = await fetch(`/api/candles/${pair}/${tf}`);
+                const data = await r.json();
+                if (data.error) { console.error('Candle error:', data.error); return []; }
+                return data;
+            } catch (e) { console.error('Fetch candle error:', e); return []; }
+        }
+
+        function buildVolumeData(candles) {
+            return candles.map(c => ({
+                time: c.time,
+                value: c.volume,
+                color: c.close >= c.open ? CHART_COLORS.volUp : CHART_COLORS.volDown
+            }));
+        }
+
+        // ---- MAIN TRADING DESK CHART ----
+        async function renderChart(pair) {
+            chartPair = pair;
+            document.getElementById('chart-pair-label').innerText = pair;
+            const container = document.getElementById('tv_chart_container');
+            
+            if (mainChart) { mainChart.remove(); mainChart = null; }
+            mainChart = createChart(container);
+            const series = addCandleAndVolume(mainChart);
+            mainCandleSeries = series.candles;
+            mainVolumeSeries = series.volume;
+
+            const candles = await fetchCandles(pair, chartTF);
+            if (candles.length) {
+                mainCandleSeries.setData(candles);
+                mainVolumeSeries.setData(buildVolumeData(candles));
+                mainChart.timeScale().fitContent();
+            }
+
+            // Responsive resize
+            const ro = new ResizeObserver(() => { if (mainChart) mainChart.applyOptions({ width: container.clientWidth }); });
+            ro.observe(container);
+        }
+
+        function switchTF(tf) {
+            chartTF = tf;
+            // Update active button
+            document.querySelectorAll('#tf-buttons .btn').forEach(b => b.classList.remove('active'));
+            event.target.classList.add('active');
+            renderChart(chartPair);
+        }
+
+        // Initialize main chart
+        renderChart("BTC-USD");
+
+        // ---- BOT CHART (MODAL) ----
+        async function openBotChart(botId, pair, strategy) {
+            const tf = STRATEGY_TF[strategy] || '1h';
+            document.getElementById('bot-chart-title').innerHTML = `<i class="bi bi-graph-up me-2"></i>${pair}`;
+            document.getElementById('bot-chart-subtitle').innerText = `${strategy} Bot — ${TF_LABELS[tf] || tf} candles — ID: ${botId}`;
+            
+            botChartModal.show();
+            
+            // Small delay for modal to render so container has dimensions
+            await new Promise(r => setTimeout(r, 150));
+            
+            const container = document.getElementById('bot-chart-container');
+            container.innerHTML = '';
+            
+            const chart = createChart(container, 460);
+            const series = addCandleAndVolume(chart);
+
+            // Fetch candles
+            const candles = await fetchCandles(pair, tf);
+            if (candles.length) {
+                series.candles.setData(candles);
+                series.volume.setData(buildVolumeData(candles));
+            }
+
+            // Fetch trade log and overlay markers
+            try {
+                const r = await fetch(`/api/bots/${botId}/trades`);
+                const trades = await r.json();
+                if (trades.length) {
+                    const markers = trades.map(t => {
+                        const ts = Math.floor(new Date(t.timestamp).getTime() / 1000);
+                        // Find the nearest candle time (snap to candle boundary)
+                        let snapped = ts;
+                        if (candles.length) {
+                            const closest = candles.reduce((prev, curr) => Math.abs(curr.time - ts) < Math.abs(prev.time - ts) ? curr : prev);
+                            snapped = closest.time;
+                        }
+
+                        const isEntry = false; // trade log only records completed round-trips
+                        const isWin = t.pnl >= 0;
+                        const isSell = true; // these are exits
+
+                        return {
+                            time: snapped,
+                            position: t.side === 'LONG' ? 'aboveBar' : 'belowBar',
+                            color: isWin ? '#00d578' : '#ff4b5c',
+                            shape: t.side === 'LONG' ? 'arrowDown' : 'arrowUp',
+                            text: `${isWin ? '+' : ''}$${t.pnl.toFixed(2)} (${t.exit_reason})`
+                        };
+                    }).sort((a, b) => a.time - b.time);
+                    
+                    series.candles.setMarkers(markers);
+                }
+            } catch (e) { console.error('Trade log fetch error:', e); }
+
+            chart.timeScale().fitContent();
+
+            // Responsive
+            const ro = new ResizeObserver(() => chart.applyOptions({ width: container.clientWidth }));
+            ro.observe(container);
+
+            // Cleanup chart when modal closes
+            document.getElementById('botChartModal').addEventListener('hidden.bs.modal', function handler() {
+                chart.remove();
+                ro.disconnect();
+                document.getElementById('botChartModal').removeEventListener('hidden.bs.modal', handler);
+            });
+        }
 
         async function loadOrderBook(pair) {
             if(!pair) return;
@@ -631,7 +820,7 @@
                     <div class="col-12 col-md-6">
                         <div class="card card-custom p-3 shadow-sm h-100 position-relative border-${b.status === 'RUNNING' ? 'success' : 'secondary'}">
                             <div class="d-flex justify-content-between mb-2">
-                                <div><h6 class="fw-bold mb-0 text-white">${b.pair}</h6><span class="badge bg-dark border border-secondary" style="font-size:0.6rem">${b.strategy} BOT</span></div>
+                                <div><h6 class="fw-bold mb-0"><a href="#" class="text-decoration-none" style="color:#66fcf1;" onclick="event.preventDefault(); openBotChart('${id}','${b.pair}','${b.strategy}')">${b.pair}</a></h6><span class="badge bg-dark border border-secondary" style="font-size:0.6rem">${b.strategy} BOT</span></div>
                                 <div class="text-end"><span class="badge ${statusClass} mb-1">${b.status}</span><br><small class="text-muted" style="font-size: 0.6rem;">ID: ${id}</small></div>
                             </div>
 

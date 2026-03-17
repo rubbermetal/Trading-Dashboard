@@ -45,3 +45,45 @@ def get_book(pair):
         })
     except Exception as e:
         return jsonify(error=str(e))
+
+# ==========================================
+# CANDLES ENDPOINT FOR LIGHTWEIGHT CHARTS
+# ==========================================
+GRANULARITY_MAP = {
+    "1m":  {"cb": "ONE_MINUTE",      "seconds": 60},
+    "5m":  {"cb": "FIVE_MINUTE",     "seconds": 300},
+    "15m": {"cb": "FIFTEEN_MINUTE",  "seconds": 900},
+    "1h":  {"cb": "ONE_HOUR",        "seconds": 3600},
+    "6h":  {"cb": "SIX_HOURS",       "seconds": 21600},
+    "1d":  {"cb": "ONE_DAY",         "seconds": 86400},
+}
+
+@market_data_bp.route('/api/candles/<pair>/<granularity>')
+def get_candles(pair, granularity):
+    """Returns OHLCV candles for Lightweight Charts. Max 300 per Coinbase limit."""
+    g = GRANULARITY_MAP.get(granularity)
+    if not g:
+        return jsonify(error=f"Invalid granularity. Use: {', '.join(GRANULARITY_MAP.keys())}")
+    
+    try:
+        end_ts = int(time.time())
+        start_ts = end_ts - (300 * g['seconds'])
+        
+        res = client.get(f"/api/v3/brokerage/products/{pair}/candles", params={
+            "start": str(start_ts), "end": str(end_ts), "granularity": g['cb']
+        })
+        candles = res.get('candles', [])
+        
+        # Coinbase returns newest-first; Lightweight Charts needs oldest-first
+        parsed = sorted([{
+            "time": int(c['start']),
+            "open": float(c['open']),
+            "high": float(c['high']),
+            "low": float(c['low']),
+            "close": float(c['close']),
+            "volume": float(c.get('volume', 0))
+        } for c in candles], key=lambda x: x['time'])
+        
+        return jsonify(parsed)
+    except Exception as e:
+        return jsonify(error=str(e))
