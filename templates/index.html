@@ -238,7 +238,7 @@
                             
                             <div class="mb-3">
                                 <label class="small text-muted mb-1">ASSET PAIR</label>
-                                <input type="text" id="bot-pair" class="form-control bg-dark border-secondary text-white" placeholder="e.g. BTC-USD" style="text-transform: uppercase;">
+                                <input type="text" id="bot-pair" class="form-control bg-dark border-secondary text-white" placeholder="e.g. BTC-USD" style="text-transform: uppercase;" oninput="previewGrid()">
                             </div>
                             
                             <div class="mb-3">
@@ -267,7 +267,7 @@
                             
                             <div class="mb-4">
                                 <label class="small text-muted mb-1">ALLOCATED CAPITAL (USD)</label>
-                                <input type="number" id="bot-amount" class="form-control bg-dark border-secondary text-white" placeholder="e.g. 100" step="any">
+                                <input type="number" id="bot-amount" class="form-control bg-dark border-secondary text-white" placeholder="e.g. 100" step="any" oninput="previewGrid()">
                                 <small class="text-warning mt-1 d-block" style="font-size: 0.65rem;">This amount will be locked in the bot's virtual sandbox.</small>
                             </div>
 
@@ -1159,7 +1159,17 @@
             if (strat === 'GRID') previewGrid();
         }
 
+        let _gridPreviewTimer = null;
         async function previewGrid() {
+            // Only run for GRID strategy
+            if (document.getElementById('bot-strategy').value !== 'GRID') return;
+            
+            // Debounce: wait 400ms after last keystroke
+            clearTimeout(_gridPreviewTimer);
+            _gridPreviewTimer = setTimeout(_doPreviewGrid, 400);
+        }
+
+        async function _doPreviewGrid() {
             const pair = document.getElementById('bot-pair').value.toUpperCase();
             const capital = parseFloat(document.getElementById('bot-amount').value) || 0;
             const stepPct = parseFloat(document.getElementById('grid-step-pct').value) || 0.6;
@@ -1167,7 +1177,7 @@
             const mode = document.getElementById('grid-mode').value;
             const previewDiv = document.getElementById('grid-preview');
 
-            if (!pair || capital <= 0) { previewDiv.style.display = 'none'; return; }
+            if (!pair || !pair.includes('-') || capital <= 0) { previewDiv.style.display = 'none'; return; }
 
             try {
                 const res = await fetch(`/api/bots/grid_preview`, {
