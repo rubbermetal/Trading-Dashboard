@@ -61,13 +61,25 @@
                         <div class="card card-custom p-2 h-100" style="min-height: 400px;">
                             <div class="d-flex justify-content-between align-items-center px-2 pt-1 pb-1">
                                 <span id="chart-pair-label" class="text-muted small fw-bold">BTC-USD</span>
-                                <div class="btn-group btn-group-sm" id="tf-buttons">
-                                    <button class="btn btn-outline-secondary btn-sm" onclick="switchTF('5m')">5m</button>
-                                    <button class="btn btn-outline-secondary btn-sm" onclick="switchTF('15m')">15m</button>
-                                    <button class="btn btn-outline-secondary btn-sm active" onclick="switchTF('1h')">1H</button>
-                                    <button class="btn btn-outline-secondary btn-sm" onclick="switchTF('6h')">6H</button>
-                                    <button class="btn btn-outline-secondary btn-sm" onclick="switchTF('1d')">1D</button>
+                                <div class="d-flex align-items-center gap-2">
+                                    <div class="btn-group btn-group-sm" id="tf-buttons">
+                                        <button class="btn btn-outline-secondary btn-sm" onclick="switchTF('5m')">5m</button>
+                                        <button class="btn btn-outline-secondary btn-sm active" onclick="switchTF('15m')">15m</button>
+                                        <button class="btn btn-outline-secondary btn-sm" onclick="switchTF('1h')">1H</button>
+                                        <button class="btn btn-outline-secondary btn-sm" onclick="switchTF('6h')">6H</button>
+                                        <button class="btn btn-outline-secondary btn-sm" onclick="switchTF('1d')">1D</button>
+                                    </div>
+                                    <button class="btn btn-sm btn-outline-info fw-bold" id="scanner-toggle-btn" onclick="toggleScanner()"><i class="bi bi-broadcast me-1"></i>SCANNER</button>
                                 </div>
+                            </div>
+                            <div id="overlay-controls" class="d-none d-flex gap-1 flex-wrap px-2 pb-1">
+                                <button class="btn btn-sm btn-outline-warning overlay-btn" data-group="ema" onclick="toggleOverlayGroup('ema', this)">EMA</button>
+                                <button class="btn btn-sm btn-outline-purple overlay-btn" data-group="bb" onclick="toggleOverlayGroup('bb', this)" style="color:#9B59B6; border-color:#9B59B6;">BB</button>
+                                <button class="btn btn-sm btn-outline-info overlay-btn" data-group="kc" onclick="toggleOverlayGroup('kc', this)">KC</button>
+                                <button class="btn btn-sm btn-outline-success overlay-btn" data-group="ichi" onclick="toggleOverlayGroup('ichi', this)">ICHI</button>
+                                <button class="btn btn-sm btn-outline-primary overlay-btn" data-group="gator" onclick="toggleOverlayGroup('gator', this)">GATOR</button>
+                                <button class="btn btn-sm btn-outline-danger overlay-btn" data-group="tar" onclick="toggleOverlayGroup('tar', this)">TAR</button>
+                                <button class="btn btn-sm btn-outline-light overlay-btn" data-group="alma" onclick="toggleOverlayGroup('alma', this)">ALMA</button>
                             </div>
                             <div id="tv_chart_container" style="height:100%; width:100%; min-height:360px;"></div>
                         </div>
@@ -98,6 +110,22 @@
                                 <hr class="my-2 border-secondary">
                                 <div class="text-success" id="bids-list"></div>
                             </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- SCANNER DASHBOARD (hidden by default) -->
+                <div id="scanner-dashboard" class="d-none mb-4">
+                    <div class="card card-custom p-3 shadow-sm">
+                        <div class="d-flex justify-content-between align-items-center mb-2">
+                            <h6 class="fw-bold mb-0" style="color:#66fcf1;"><i class="bi bi-broadcast me-2"></i>SCANNER DASHBOARD</h6>
+                            <div id="confluence-badge" class="badge bg-secondary px-3 py-2" style="font-size:0.8rem;">LOADING...</div>
+                        </div>
+                        <div class="table-responsive">
+                            <table class="table table-dark table-sm table-hover mb-0" style="font-size:0.7rem; white-space:nowrap;">
+                                <thead id="scanner-header"></thead>
+                                <tbody id="scanner-body"></tbody>
+                            </table>
                         </div>
                     </div>
                 </div>
@@ -339,11 +367,29 @@
         let mainCandleSeries = null;
         let mainVolumeSeries = null;
         let chartPair = "BTC-USD";
-        let chartTF = "1h";
+        let chartTF = "15m";
 
         // Strategy -> native timeframe mapping
         const STRATEGY_TF = { "QUAD": "15m", "QUAD_SUPER": "15m", "ORB": "5m", "GRID": "1h" };
         const TF_LABELS = { "1m": "1m", "5m": "5m", "15m": "15m", "1h": "1H", "6h": "6H", "1d": "1D" };
+
+        // Scanner state
+        let scannerActive = false;
+        let scannerData = null;
+        let overlayLines = {};     // {name: seriesObject}
+        let activeGroups = {};     // {groupName: true}
+        let rawCandles = null;     // uncolored candles for toggle off
+
+        // Overlay group definitions: which series keys + line styles
+        const OVERLAY_GROUPS = {
+            ema:   { series: [{key:'ema20',color:'#FFD700',w:1},{key:'ema50',color:'#FFA500',w:1},{key:'ema200',color:'#4169E1',w:2}] },
+            bb:    { series: [{key:'bb_upper',color:'#9B59B6',w:1,dash:true},{key:'bb_lower',color:'#9B59B6',w:1,dash:true},{key:'bb_mid',color:'#9B59B6',w:1}] },
+            kc:    { series: [{key:'kc_upper',color:'#3498DB',w:1,dash:true},{key:'kc_lower',color:'#3498DB',w:1,dash:true}] },
+            ichi:  { series: [{key:'ichi_tenkan',color:'#E74C3C',w:1},{key:'ichi_kijun',color:'#2ECC71',w:1},{key:'ichi_span_a',color:'rgba(46,204,113,0.4)',w:1},{key:'ichi_span_b',color:'rgba(231,76,60,0.4)',w:1}] },
+            gator: { series: [{key:'gator_jaw',color:'#3498DB',w:1},{key:'gator_teeth',color:'#E74C3C',w:1},{key:'gator_lips',color:'#2ECC71',w:1}] },
+            tar:   { series: [{key:'tar',color:'#FF4444',w:2}] },
+            alma:  { series: [{key:'alma_fast',color:'#2ECC71',w:1},{key:'alma_slow',color:'#E74C3C',w:1}] },
+        };
 
         // ==========================================
         // LIGHTWEIGHT CHARTS ENGINE
@@ -412,6 +458,9 @@
             document.getElementById('chart-pair-label').innerText = pair;
             const container = document.getElementById('tv_chart_container');
             
+            // Clear existing overlays when chart rebuilds
+            overlayLines = {};
+            
             if (mainChart) { mainChart.remove(); mainChart = null; }
             mainChart = createChart(container);
             const series = addCandleAndVolume(mainChart);
@@ -420,6 +469,7 @@
 
             const candles = await fetchCandles(pair, chartTF);
             if (candles.length) {
+                rawCandles = candles;  // Store uncolored candles for scanner toggle off
                 mainCandleSeries.setData(candles);
                 mainVolumeSeries.setData(buildVolumeData(candles));
                 mainChart.timeScale().fitContent();
@@ -428,6 +478,11 @@
             // Responsive resize
             const ro = new ResizeObserver(() => { if (mainChart) mainChart.applyOptions({ width: container.clientWidth }); });
             ro.observe(container);
+
+            // If scanner is active, reload scanner data for new pair/TF
+            if (scannerActive) {
+                await loadScanner();
+            }
         }
 
         function switchTF(tf) {
@@ -508,6 +563,193 @@
                 ro.disconnect();
                 document.getElementById('botChartModal').removeEventListener('hidden.bs.modal', handler);
             });
+        }
+
+        // ==========================================
+        // SCANNER ENGINE
+        // ==========================================
+        async function toggleScanner() {
+            scannerActive = !scannerActive;
+            const btn = document.getElementById('scanner-toggle-btn');
+            const dash = document.getElementById('scanner-dashboard');
+            const controls = document.getElementById('overlay-controls');
+
+            if (scannerActive) {
+                btn.classList.remove('btn-outline-info');
+                btn.classList.add('btn-info', 'text-dark');
+                controls.classList.remove('d-none');
+                dash.classList.remove('d-none');
+                await loadScanner();
+            } else {
+                btn.classList.remove('btn-info', 'text-dark');
+                btn.classList.add('btn-outline-info');
+                controls.classList.add('d-none');
+                dash.classList.add('d-none');
+                // Remove all overlays
+                removeAllOverlays();
+                // Restore original candle colors
+                if (rawCandles && mainCandleSeries) {
+                    mainCandleSeries.setData(rawCandles);
+                }
+                scannerData = null;
+            }
+        }
+
+        async function loadScanner() {
+            document.getElementById('confluence-badge').innerText = 'SCANNING...';
+            document.getElementById('confluence-badge').className = 'badge bg-secondary px-3 py-2';
+            try {
+                const r = await fetch(`/api/scanner/${chartPair}`);
+                scannerData = await r.json();
+                if (scannerData.error) { console.error('Scanner error:', scannerData.error); return; }
+
+                // Apply volume-colored candles
+                if (scannerData.candles && mainCandleSeries) {
+                    mainCandleSeries.setData(scannerData.candles.map(c => ({
+                        time: c.time, open: c.open, high: c.high, low: c.low, close: c.close,
+                        color: c.color, borderColor: c.color, wickColor: c.color
+                    })));
+                    // Update volume too
+                    if (mainVolumeSeries) {
+                        mainVolumeSeries.setData(scannerData.candles.map(c => ({
+                            time: c.time, value: c.volume,
+                            color: c.close >= c.open ? 'rgba(0,213,120,0.15)' : 'rgba(255,75,92,0.15)'
+                        })));
+                    }
+                    mainChart.timeScale().fitContent();
+                }
+
+                // Re-apply any active overlays with fresh data
+                Object.keys(activeGroups).forEach(g => {
+                    removeOverlayGroup(g);
+                    addOverlayGroup(g);
+                });
+
+                // Render dashboard
+                renderScannerDashboard(scannerData.dashboard);
+
+                // Confluence badge
+                const conf = scannerData.confluence;
+                const badge = document.getElementById('confluence-badge');
+                badge.innerText = `${conf.signal}  (Bull: ${conf.bull_count}/4 | Bear: ${conf.bear_count}/4)`;
+                badge.className = 'badge px-3 py-2';
+                if (conf.signal === 'STRONG BUY') badge.classList.add('bg-success', 'text-dark');
+                else if (conf.signal === 'STRONG SELL') badge.classList.add('bg-danger');
+                else badge.classList.add('bg-secondary');
+
+            } catch (e) { console.error('Scanner load error:', e); }
+        }
+
+        function renderScannerDashboard(rows) {
+            if (!rows || !rows.length) return;
+
+            // Header
+            let hdr = '<tr><th style="position:sticky;left:0;background:#1f2833;z-index:1;">TF</th>';
+            hdr += '<th>Avg</th><th>High</th><th>Low</th>';
+            hdr += '<th>Vol</th><th>AvgVol</th><th>Delta</th><th>RVWAP</th>';
+            hdr += '<th>RSI</th><th>StK</th><th>StD</th><th>CCI</th><th>MFI</th>';
+            hdr += '<th>ADX</th><th>ROC</th><th>MOM</th><th>MACD</th><th>Hist</th><th>Tar</th><th>E20/50</th><th>E50/200</th>';
+            hdr += '<th>ATR</th><th>STDEV</th><th>Z-Scr</th></tr>';
+            document.getElementById('scanner-header').innerHTML = hdr;
+
+            // Rows
+            const body = rows.map(r => {
+                const v = (key, fmt) => {
+                    const val = r[key];
+                    if (val == null) return '<td class="text-muted">-</td>';
+                    if (fmt === 'vol') return `<td>${fmtVol(val)}</td>`;
+                    if (fmt === 'price') return `<td>${fmtPx(val)}</td>`;
+                    return `<td>${typeof val === 'number' ? val.toFixed(2) : val}</td>`;
+                };
+                const dirCell = (val) => {
+                    if (val == null) return '<td class="text-muted">-</td>';
+                    const cls = val > 0 ? 'text-success-custom' : 'text-danger-custom';
+                    return `<td class="${cls} fw-bold">${val.toFixed(2)}</td>`;
+                };
+                const gradCell = (val, lo, hi) => {
+                    if (val == null) return '<td class="text-muted">-</td>';
+                    const pct = Math.max(0, Math.min(1, (val - lo) / (hi - lo)));
+                    const bg = pct > 0.6 ? 'rgba(0,230,118,0.3)' : pct < 0.4 ? 'rgba(255,82,82,0.3)' : '';
+                    return `<td style="background:${bg};" class="fw-bold">${val.toFixed(1)}</td>`;
+                };
+                const stateCell = (val, goodVal, goodColor, badColor) => {
+                    if (!val) return '<td class="text-muted">-</td>';
+                    const isGood = val === goodVal;
+                    return `<td class="fw-bold" style="background:${isGood ? goodColor : badColor};">${val}</td>`;
+                };
+
+                return `<tr>
+                    <td class="fw-bold" style="position:sticky;left:0;background:#1f2833;z-index:1;color:#66fcf1;">${r.label}</td>
+                    ${v('avg','price')}${v('high','price')}${v('low','price')}
+                    ${v('vol','vol')}${v('vol_avg','vol')}${dirCell(r.delta)}${v('vwap','price')}
+                    ${gradCell(r.rsi, 30, 70)}${v('stoch_k')}${v('stoch_d')}${gradCell(r.cci, -100, 100)}${gradCell(r.mfi, 20, 80)}
+                    <td class="${r.adx > 25 ? 'fw-bold' : 'text-muted'}" style="${r.adx > 25 ? 'background:rgba(0,230,118,0.2);' : ''}">${r.adx != null ? r.adx.toFixed(1) : '-'}</td>
+                    ${dirCell(r.roc)}${dirCell(r.momentum)}${dirCell(r.macd)}
+                    <td style="background:${r.macd_hist > 0 ? 'rgba(0,230,118,0.2)' : r.macd_hist < 0 ? 'rgba(255,82,82,0.2)' : ''};">${r.macd_hist != null ? r.macd_hist.toFixed(2) : '-'}</td>
+                    ${stateCell(r.tar_state, 'ABOVE', 'rgba(0,230,118,0.3)', 'rgba(255,82,82,0.3)')}
+                    ${stateCell(r.ema_cross, 'BULL', 'rgba(0,230,118,0.4)', 'rgba(255,82,82,0.4)')}
+                    ${stateCell(r.ema_golden, 'GOLD', 'rgba(255,215,0,0.4)', 'rgba(0,0,0,0.6)')}
+                    ${v('atr','price')}${v('stdev','price')}${gradCell(r.z_score, -2, 2)}
+                </tr>`;
+            }).join('');
+            document.getElementById('scanner-body').innerHTML = body;
+        }
+
+        function fmtVol(v) { return v >= 1e6 ? (v/1e6).toFixed(1)+'M' : v >= 1e3 ? (v/1e3).toFixed(1)+'K' : v.toFixed(0); }
+        function fmtPx(v) { return v >= 100 ? v.toFixed(2) : v >= 1 ? v.toFixed(4) : v.toFixed(6); }
+
+        // --- Overlay Toggle Logic ---
+        function toggleOverlayGroup(name, btn) {
+            if (activeGroups[name]) {
+                removeOverlayGroup(name);
+                delete activeGroups[name];
+                if (btn) { btn.classList.remove('active'); btn.style.opacity = '0.6'; }
+            } else {
+                addOverlayGroup(name);
+                activeGroups[name] = true;
+                if (btn) { btn.classList.add('active'); btn.style.opacity = '1'; }
+            }
+        }
+
+        function addOverlayGroup(name) {
+            if (!scannerData || !scannerData.overlays || !mainChart) return;
+            const group = OVERLAY_GROUPS[name];
+            if (!group) return;
+
+            group.series.forEach(s => {
+                const data = scannerData.overlays[s.key];
+                if (!data || !data.length) return;
+                const line = mainChart.addLineSeries({
+                    color: s.color,
+                    lineWidth: s.w || 1,
+                    lineStyle: s.dash ? 2 : 0,
+                    priceLineVisible: false,
+                    lastValueVisible: false,
+                    crosshairMarkerVisible: false,
+                });
+                line.setData(data);
+                overlayLines[s.key] = line;
+            });
+        }
+
+        function removeOverlayGroup(name) {
+            const group = OVERLAY_GROUPS[name];
+            if (!group || !mainChart) return;
+            group.series.forEach(s => {
+                if (overlayLines[s.key]) {
+                    try { mainChart.removeSeries(overlayLines[s.key]); } catch(e) {}
+                    delete overlayLines[s.key];
+                }
+            });
+        }
+
+        function removeAllOverlays() {
+            Object.keys(overlayLines).forEach(key => {
+                try { mainChart.removeSeries(overlayLines[key]); } catch(e) {}
+            });
+            overlayLines = {};
+            activeGroups = {};
+            document.querySelectorAll('.overlay-btn').forEach(b => { b.classList.remove('active'); b.style.opacity = '0.6'; });
         }
 
         async function loadOrderBook(pair) {

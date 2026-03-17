@@ -4,6 +4,7 @@ from routes.portfolio import portfolio_bp
 from routes.trading import trading_bp
 from routes.market_data import market_data_bp
 from routes.bot_manager import bot_manager_bp
+from routes.scanner import scanner_bp
 
 app = Flask(__name__)
 
@@ -13,6 +14,7 @@ app.register_blueprint(portfolio_bp)
 app.register_blueprint(trading_bp)
 app.register_blueprint(market_data_bp)
 app.register_blueprint(bot_manager_bp)
+app.register_blueprint(scanner_bp)
 
 @app.route('/')
 def home(): 

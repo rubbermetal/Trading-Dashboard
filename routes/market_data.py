@@ -53,6 +53,7 @@ GRANULARITY_MAP = {
     "1m":  {"cb": "ONE_MINUTE",      "seconds": 60},
     "5m":  {"cb": "FIVE_MINUTE",     "seconds": 300},
     "15m": {"cb": "FIFTEEN_MINUTE",  "seconds": 900},
+    "30m": {"cb": "THIRTY_MINUTE",   "seconds": 1800},
     "1h":  {"cb": "ONE_HOUR",        "seconds": 3600},
     "6h":  {"cb": "SIX_HOURS",       "seconds": 21600},
     "1d":  {"cb": "ONE_DAY",         "seconds": 86400},
