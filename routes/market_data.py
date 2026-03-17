@@ -4,6 +4,54 @@ from shared import client
 
 market_data_bp = Blueprint('market_data', __name__)
 
+# ==========================================
+# PRODUCT LIST CACHE
+# ==========================================
+_product_cache = {"data": None, "ts": 0}
+CACHE_TTL = 3600  # Refresh product list once per hour
+
+@market_data_bp.route('/api/products')
+def get_products():
+    """Returns all tradeable Coinbase products, grouped by type. Cached for 1 hour."""
+    now = time.time()
+    if _product_cache["data"] and (now - _product_cache["ts"]) < CACHE_TTL:
+        return jsonify(_product_cache["data"])
+
+    try:
+        res = client.get("/api/v3/brokerage/products", params={"limit": 5000})
+        products = res.get('products', [])
+
+        spot, deriv = [], []
+        for p in products:
+            pid = p.get('product_id', '')
+            status = p.get('status', '').upper()
+            if status != 'ONLINE':
+                continue
+            ptype = p.get('product_type', 'SPOT').upper()
+            entry = {
+                "id": pid,
+                "base": p.get('base_currency_id', ''),
+                "quote": p.get('quote_currency_id', ''),
+                "price": float(p.get('price', 0)),
+                "type": ptype
+            }
+            if ptype == 'SPOT':
+                # Only include USD and USDC quote pairs
+                if entry['quote'] in ('USD', 'USDC'):
+                    spot.append(entry)
+            else:
+                deriv.append(entry)
+
+        spot.sort(key=lambda x: x['id'])
+        deriv.sort(key=lambda x: x['id'])
+
+        result = {"spot": spot, "derivatives": deriv}
+        _product_cache["data"] = result
+        _product_cache["ts"] = now
+        return jsonify(result)
+    except Exception as e:
+        return jsonify(error=str(e))
+
 @market_data_bp.route('/api/orderbook/<pair>')
 def get_book(pair):
     try:

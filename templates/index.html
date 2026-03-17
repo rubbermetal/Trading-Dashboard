@@ -42,9 +42,16 @@
         <div class="tab-content" id="terminalTabsContent">
             
             <div class="tab-pane fade show active" id="trade-panel" role="tabpanel">
-                <div class="input-group input-group-lg mb-4 shadow">
-                    <input type="text" id="asset-search" class="form-control bg-dark text-white border-secondary" placeholder="Search to Trade & Chart (e.g., BTC, SOL-PERP)...">
-                    <button class="btn btn-primary px-4" onclick="handleSearch()">SEARCH</button>
+                <div class="d-flex gap-2 mb-4 align-items-center">
+                    <select id="pair-select" class="form-select bg-dark text-white border-secondary" style="max-width:280px;" onchange="onPairSelect(this.value)">
+                        <option value="">Loading pairs...</option>
+                    </select>
+                    <input type="text" id="pair-filter" class="form-control bg-dark text-white border-secondary" placeholder="Filter pairs..." style="max-width:200px;" oninput="filterPairs(this.value)">
+                    <div class="btn-group btn-group-sm">
+                        <button class="btn btn-outline-secondary btn-sm active" id="filter-all" onclick="setTypeFilter('ALL')">ALL</button>
+                        <button class="btn btn-outline-secondary btn-sm" id="filter-spot" onclick="setTypeFilter('SPOT')">SPOT</button>
+                        <button class="btn btn-outline-secondary btn-sm" id="filter-deriv" onclick="setTypeFilter('DERIV')">PERPS</button>
+                    </div>
                 </div>
 
                 <div class="text-center mb-5">
@@ -85,11 +92,50 @@
                         </div>
                     </div>
                     <div class="col-lg-4 mb-3">
-                        <div class="card card-custom p-3 h-100">
-                            <h6 class="fw-bold text-primary mb-3"><i class="bi bi-fire me-2"></i>LIQUIDITY HEATMAP</h6>
+                        <!-- EMBEDDED TRADE PANEL -->
+                        <div class="card card-custom p-3 mb-3">
+                            <div class="d-flex justify-content-between align-items-center mb-2">
+                                <div>
+                                    <span id="trade-type-badge" class="badge bg-primary" style="font-size:0.65rem;">SPOT</span>
+                                    <span id="trade-pair-label" class="fw-bold ms-1" style="color:#66fcf1;">BTC-USD</span>
+                                </div>
+                                <h5 id="trade-live-price" class="fw-bold mb-0">$0.00</h5>
+                            </div>
+                            <div class="row g-2 mb-2">
+                                <div class="col-6">
+                                    <select id="trade-order-type" class="form-select form-select-sm bg-dark text-white border-secondary" onchange="toggleEmbeddedOrderUI()">
+                                        <option value="MARKET">Market</option>
+                                        <option value="LIMIT">Limit</option>
+                                    </select>
+                                </div>
+                                <div class="col-6 d-none" id="trade-limit-box">
+                                    <input type="number" id="trade-limit-px" class="form-control form-control-sm bg-dark border-secondary text-white" placeholder="Limit Price" step="any">
+                                </div>
+                            </div>
+                            <div class="mb-2">
+                                <label class="small text-muted mb-1" id="trade-amt-label">AMOUNT (USD)</label>
+                                <input type="number" id="trade-amt" class="form-control form-control-sm bg-dark border-secondary text-white" placeholder="Amount" step="any">
+                            </div>
+                            <div class="row g-2 mb-2">
+                                <div class="col-6"><button class="btn btn-success btn-sm w-100 fw-bold py-2" onclick="sendEmbeddedOrder('BUY')">BUY</button></div>
+                                <div class="col-6"><button class="btn btn-danger btn-sm w-100 fw-bold py-2" onclick="sendEmbeddedOrder('SELL')">SELL</button></div>
+                            </div>
+                            <div class="border-top border-secondary pt-2">
+                                <label class="small text-warning-custom fw-bold mb-1" style="font-size:0.65rem;"><i class="bi bi-activity"></i> TRAILING STOP (%)</label>
+                                <div class="input-group input-group-sm">
+                                    <input type="number" id="trade-trail-pct" class="form-control bg-dark border-secondary text-white" placeholder="e.g. 2.0" step="0.1">
+                                    <input type="text" id="trade-trail-size" class="form-control bg-dark border-secondary text-white" placeholder="Size" style="max-width:80px;">
+                                    <button class="btn btn-warning btn-sm fw-bold text-dark" onclick="sendTrailingStop()">SET</button>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- ORDER BOOK -->
+                        <div class="card card-custom p-3">
+                            <h6 class="fw-bold text-primary mb-2" style="font-size:0.8rem;"><i class="bi bi-fire me-2"></i>LIQUIDITY HEATMAP</h6>
                             <small class="text-muted mb-2 d-block" id="book-pair-label">No Active Position</small>
                             <div id="book-feed">
-                                <div class="mb-3">
+                                <div class="mb-2">
                                     <div class="d-flex justify-content-between small fw-bold mb-1">
                                         <span class="text-success-custom" id="bid-pct-label">50% Bids</span>
                                         <span class="text-danger-custom" id="ask-pct-label">50% Asks</span>
@@ -99,7 +145,7 @@
                                         <div id="ask-bar" class="progress-ask" style="width: 50%;"></div>
                                     </div>
                                 </div>
-                                <div class="p-2 rounded mb-3" style="background: #16171d;">
+                                <div class="p-2 rounded mb-2" style="background: #16171d;">
                                     <small class="text-muted d-block mb-1" style="font-size:0.65rem;">NEAREST WHALE WALLS</small>
                                     <div class="d-flex justify-content-between small">
                                         <span class="text-danger-custom fw-bold" id="sell-wall">Sell: $0.00</span>
@@ -273,21 +319,6 @@
         </div></div>
     </div>
 
-    <div class="modal fade" id="orderModal" tabindex="-1">
-        <div class="modal-dialog modal-dialog-centered"><div class="modal-content card-custom p-4 shadow-lg">
-            <div class="text-center">
-                <div id="m-type" class="badge bg-primary mb-2">SPOT</div>
-                <h2 id="m-price" class="fw-bold mb-0">$0.00</h2>
-                <p id="m-pair" class="text-muted small mb-4"></p>
-                <select id="m-order-type" class="form-select mb-3 bg-dark text-white border-secondary" onchange="toggleOrderUI()"><option value="MARKET">Market</option><option value="LIMIT">Limit</option></select>
-                <div id="m-limit-box" class="mb-3 d-none text-start"><label class="small text-muted mb-1">LIMIT PRICE</label><input type="number" id="m-limit-px" class="form-control bg-dark border-secondary text-white" step="any"></div>
-                <div class="mb-4 text-start"><label class="small text-muted mb-1" id="m-amt-label">AMOUNT (USD)</label><input type="number" id="m-amt" class="form-control bg-dark border-secondary text-white" step="any"></div>
-                <div class="row g-2 mb-4"><div class="col-6"><button class="btn btn-success w-100 py-3 fw-bold" onclick="sendOrder('BUY')">BUY</button></div><div class="col-6"><button class="btn btn-danger w-100 py-3 fw-bold" onclick="sendOrder('SELL')">SELL</button></div></div>
-                <div class="pt-3 border-top border-secondary text-start"><label class="small text-warning-custom fw-bold mb-2"><i class="bi bi-activity"></i> TRAILING STOP LOSS (%)</label><div class="input-group"><input type="number" id="trail-pct" class="form-control bg-dark border-secondary text-white" placeholder="e.g. 2.0" step="0.1"><button class="btn btn-warning fw-bold text-dark" onclick="setTrailingStop()">ACTIVATE</button></div></div>
-            </div>
-        </div></div>
-    </div>
-
     <div class="modal fade" id="tpslModal" tabindex="-1">
         <div class="modal-dialog modal-dialog-centered"><div class="modal-content card-custom p-4 shadow-lg">
             <div class="text-center">
@@ -349,12 +380,17 @@
     <script src="https://unpkg.com/lightweight-charts@4.1.1/dist/lightweight-charts.standalone.production.js"></script>
     
     <script>
-        let selPair = "", selSize = "", selSide = "", selType = "", selCurrentPx = 0;
-        let activeBookPair = ""; 
         let currentData = { positions: [], history: [], total_value: 0.0, rebalance: [], rebalance_configured: false, trails: [], free_usd: 0.0, bot_locked_usd: 0.0 };
         let indicatorState = {}; 
         
-        const modal = new bootstrap.Modal(document.getElementById('orderModal'));
+        // Active pair state (tied to chart)
+        let activePairType = 'SPOT';  // SPOT or FUTURE
+        let activePairPrice = 0;
+        
+        // Product list cache
+        let allProducts = [];
+        let activeTypeFilter = 'ALL';
+
         const tpslModal = new bootstrap.Modal(document.getElementById('tpslModal'));
         const rebModal = new bootstrap.Modal(document.getElementById('rebalanceModal'));
         const botFundsModal = new bootstrap.Modal(document.getElementById('botFundsModal'));
@@ -473,6 +509,13 @@
                 mainCandleSeries.setData(candles);
                 mainVolumeSeries.setData(buildVolumeData(candles));
                 mainChart.timeScale().fitContent();
+                
+                // Update trade panel with latest candle close
+                const lastPx = candles[candles.length - 1].close;
+                activePairPrice = lastPx;
+                const prod = allProducts.find(p => p.id === pair);
+                activePairType = prod ? prod.type : 'SPOT';
+                updateTradePanel(pair, lastPx, activePairType);
             }
 
             // Responsive resize
@@ -493,8 +536,144 @@
             renderChart(chartPair);
         }
 
+        // ==========================================
+        // PRODUCT LIST & PAIR SELECTOR
+        // ==========================================
+        async function loadProducts() {
+            try {
+                const r = await fetch('/api/products');
+                const data = await r.json();
+                if (data.error) { console.error('Products error:', data.error); return; }
+                allProducts = [];
+                (data.spot || []).forEach(p => allProducts.push({...p, group: 'SPOT'}));
+                (data.derivatives || []).forEach(p => allProducts.push({...p, group: 'DERIV'}));
+                renderPairSelect();
+            } catch (e) { console.error('Failed to load products:', e); }
+        }
+
+        function renderPairSelect(filter = '') {
+            const sel = document.getElementById('pair-select');
+            const f = filter.toUpperCase();
+            let filtered = allProducts;
+            if (activeTypeFilter === 'SPOT') filtered = filtered.filter(p => p.group === 'SPOT');
+            else if (activeTypeFilter === 'DERIV') filtered = filtered.filter(p => p.group !== 'SPOT');
+            if (f) filtered = filtered.filter(p => p.id.toUpperCase().includes(f));
+
+            const spotPairs = filtered.filter(p => p.group === 'SPOT');
+            const derivPairs = filtered.filter(p => p.group !== 'SPOT');
+
+            let html = `<option value="">Select a pair...</option>`;
+            if (spotPairs.length) {
+                html += `<optgroup label="SPOT (${spotPairs.length})">`;
+                spotPairs.forEach(p => html += `<option value="${p.id}" ${p.id === chartPair ? 'selected' : ''}>${p.id}</option>`);
+                html += `</optgroup>`;
+            }
+            if (derivPairs.length) {
+                html += `<optgroup label="DERIVATIVES (${derivPairs.length})">`;
+                derivPairs.forEach(p => html += `<option value="${p.id}" ${p.id === chartPair ? 'selected' : ''}>${p.id}</option>`);
+                html += `</optgroup>`;
+            }
+            sel.innerHTML = html;
+        }
+
+        function filterPairs(val) { renderPairSelect(val); }
+
+        function setTypeFilter(type) {
+            activeTypeFilter = type;
+            document.querySelectorAll('#filter-all,#filter-spot,#filter-deriv').forEach(b => b.classList.remove('active'));
+            document.getElementById(type === 'ALL' ? 'filter-all' : type === 'SPOT' ? 'filter-spot' : 'filter-deriv').classList.add('active');
+            renderPairSelect(document.getElementById('pair-filter').value);
+        }
+
+        function onPairSelect(val) {
+            if (!val) return;
+            const prod = allProducts.find(p => p.id === val);
+            activePairType = prod ? prod.type : 'SPOT';
+            activePairPrice = prod ? prod.price : 0;
+            renderChart(val);
+            loadOrderBook(val);
+            updateTradePanel(val, activePairPrice, activePairType);
+        }
+
+        // ==========================================
+        // EMBEDDED TRADE PANEL
+        // ==========================================
+        function updateTradePanel(pair, price, type) {
+            document.getElementById('trade-pair-label').innerText = pair || 'N/A';
+            document.getElementById('trade-live-price').innerText = price ? `$${Number(price).toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:6})}` : '$0.00';
+            const badge = document.getElementById('trade-type-badge');
+            badge.innerText = (type || 'SPOT').toUpperCase();
+            badge.className = type === 'SPOT' ? 'badge bg-primary' : 'badge bg-warning text-dark';
+            badge.style.fontSize = '0.65rem';
+        }
+
+        function toggleEmbeddedOrderUI() {
+            const isLimit = document.getElementById('trade-order-type').value === 'LIMIT';
+            document.getElementById('trade-limit-box').classList.toggle('d-none', !isLimit);
+            document.getElementById('trade-amt-label').innerText = isLimit ? 'SIZE (UNITS)' : 'AMOUNT (USD)';
+        }
+
+        async function sendEmbeddedOrder(side) {
+            const pair = chartPair;
+            if (!pair) return alert('Select a pair first.');
+            const orderType = document.getElementById('trade-order-type').value;
+            const amount = document.getElementById('trade-amt').value;
+            const limitPx = document.getElementById('trade-limit-px').value;
+            if (!amount || parseFloat(amount) <= 0) return alert('Enter a valid amount.');
+
+            const payload = { pair, side, order_type: orderType, amount, limit_price: limitPx };
+            try {
+                const res = await fetch('/api/trade', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload) });
+                const d = await res.json();
+                alert(d.message || d.error);
+                document.getElementById('trade-amt').value = '';
+                refresh(); loadAllOrders();
+            } catch (e) { alert('Network error placing order.'); }
+        }
+
+        async function sendTrailingStop() {
+            const pair = chartPair;
+            const pct = document.getElementById('trade-trail-pct').value;
+            const size = document.getElementById('trade-trail-size').value;
+            if (!pct || !size) return alert('Enter trail % and position size.');
+            try {
+                const res = await fetch('/api/trail', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ pair, pct, size, cur_px: activePairPrice }) });
+                const d = await res.json();
+                alert(d.message || d.error);
+                document.getElementById('trade-trail-pct').value = '';
+                document.getElementById('trade-trail-size').value = '';
+                refresh();
+            } catch (e) { alert('Network error.'); }
+        }
+
+        // ==========================================
+        // TP/SL FUNCTIONS
+        // ==========================================
+        let tpslPair = '', tpslSize = '', tpslSide = '', tpslType = '';
+
+        function openTPSL(pair, size, side, type) {
+            tpslPair = pair; tpslSize = size; tpslSide = side; tpslType = type;
+            document.getElementById('tpsl-pair').innerText = `${pair} — ${size} units (${side})`;
+            document.getElementById('tp-price').value = '';
+            document.getElementById('sl-price').value = '';
+            tpslModal.show();
+        }
+
+        async function submitTPSL() {
+            const tp = document.getElementById('tp-price').value;
+            const sl = document.getElementById('sl-price').value;
+            if (!tp && !sl) return alert('Set at least one target.');
+            try {
+                const res = await fetch('/api/tpsl', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ pair: tpslPair, size: tpslSize, side: tpslSide, type: tpslType, tp_price: tp || null, sl_price: sl || null }) });
+                const d = await res.json();
+                alert(d.message || d.error);
+                tpslModal.hide(); refresh(); loadAllOrders();
+            } catch (e) { alert('Network error.'); }
+        }
+
         // Initialize main chart
         renderChart("BTC-USD");
+        loadProducts();
 
         // ---- BOT CHART (MODAL) ----
         async function openBotChart(botId, pair, strategy) {
@@ -793,9 +972,19 @@
                 currentData.positions.forEach(p => { if (indicatorState[p.asset] === undefined) loadIndicator(p.asset, p.type); });
                 document.getElementById('live-dot').className = "badge bg-success rounded-pill";
                 renderDashboard();
-                if(!activeBookPair && currentData.positions.length > 0) activeBookPair = currentData.positions[0].type === 'SPOT' ? `${currentData.positions[0].asset}-USD` : currentData.positions[0].asset;
-                if(activeBookPair) loadOrderBook(activeBookPair);
-                loadBots(); 
+                if(chartPair) loadOrderBook(chartPair);
+                loadBots();
+                // Update embedded trade panel with fresh price from positions
+                if (chartPair) {
+                    const match = currentData.positions.find(p => {
+                        const pairId = p.type === 'SPOT' ? `${p.asset}-USD` : p.asset;
+                        return pairId === chartPair;
+                    });
+                    if (match) {
+                        activePairPrice = match.price;
+                        updateTradePanel(chartPair, match.price, match.type);
+                    }
+                }
             } catch (e) { document.getElementById('live-dot').className = "badge bg-danger rounded-pill"; }
         }
 
@@ -851,7 +1040,7 @@
                         </div>
                         <div class="d-flex justify-content-between gap-2 mt-auto">
                             <button class="btn btn-sm btn-outline-warning rounded-pill flex-grow-1" style="font-size:0.75rem;" onclick="openTPSL('${tradePair}','${i.size}','${i.side}','${i.type}')">TP/SL</button>
-                            <button class="btn btn-sm btn-outline-primary rounded-pill flex-grow-1" style="font-size:0.75rem;" onclick="openM('${tradePair}',${i.price},'${i.type}','${i.size}')">TRADE</button>
+                            <button class="btn btn-sm btn-outline-primary rounded-pill flex-grow-1" style="font-size:0.75rem;" onclick="loadPairOnChart('${tradePair}',${i.price},'${i.type}')">TRADE</button>
                             <button class="btn btn-sm btn-danger rounded-pill flex-grow-1" style="font-size:0.75rem;" onclick="closePos('${tradePair}','${i.size}','${i.side}','${i.type}')">CLOSE</button>
                         </div>
                     </div>
@@ -1174,35 +1363,18 @@
         // ==========================================
         // MANUAL TRADING LOGIC
         // ==========================================
-        async function handleSearch() {
-            const s = document.getElementById('asset-search').value;
-            if(!s) return;
-            const res = await fetch(`/api/search/${s}`); const d = await res.json();
-            if(d.success) {
-                renderChart(d.symbol);
-                activeBookPair = d.symbol;         
-                loadOrderBook(activeBookPair);     
-                openM(d.symbol, d.price, d.type, '0');
-            } else alert("Asset not found.");
-        }
-
-        function openM(p, px, t, size) { 
-            selPair = p; selCurrentPx = px; selSize = size;
-            document.getElementById('m-price').innerText = `$${px.toLocaleString()}`; 
-            document.getElementById('m-pair').innerText = p; document.getElementById('m-type').innerText = t; 
-            modal.show(); 
-        }
-
-        function toggleOrderUI() { 
-            const isL = document.getElementById('m-order-type').value === 'LIMIT'; 
-            document.getElementById('m-limit-box').classList.toggle('d-none', !isL); document.getElementById('m-amt-label').innerText = isL ? "SIZE (UNITS)" : "AMOUNT (USD)"; 
-        }
-
-        async function sendOrder(s) {
-            const payload = { pair: selPair, side: s, order_type: document.getElementById('m-order-type').value, amount: document.getElementById('m-amt').value, limit_price: document.getElementById('m-limit-px').value };
-            const res = await fetch('/api/trade', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload) });
-            const d = await res.json(); alert(d.message || d.error); modal.hide(); refresh();
-            loadAllOrders(); // refresh the orders page just in case
+        function loadPairOnChart(pair, price, type) {
+            chartPair = pair;
+            activePairType = type;
+            activePairPrice = price;
+            // Sync the dropdown
+            const sel = document.getElementById('pair-select');
+            if (sel.querySelector(`option[value="${pair}"]`)) sel.value = pair;
+            renderChart(pair);
+            loadOrderBook(pair);
+            updateTradePanel(pair, price, type);
+            // Scroll to top to see chart
+            document.getElementById('trade-panel').scrollIntoView({behavior:'smooth'});
         }
 
         async function closePos(pair, size, side, type) {
