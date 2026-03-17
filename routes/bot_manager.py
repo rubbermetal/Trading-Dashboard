@@ -14,6 +14,33 @@ bot_manager_bp = Blueprint('bot_manager', __name__)
 BOTS_FILE = "bots.json"
 
 # ==========================================
+# TIMEFRAME CONFIGURATION
+# ==========================================
+# Coinbase granularity key -> (API string, seconds per candle)
+TF_MAP = {
+    "1m":  ("ONE_MINUTE",      60),
+    "5m":  ("FIVE_MINUTE",     300),
+    "15m": ("FIFTEEN_MINUTE",  900),
+    "30m": ("THIRTY_MINUTE",   1800),
+    "1h":  ("ONE_HOUR",        3600),
+    "6h":  ("SIX_HOURS",       21600),
+    "1d":  ("ONE_DAY",         86400),
+}
+
+# Strategy -> default timeframe
+STRATEGY_DEFAULT_TF = {
+    "QUAD":       "15m",
+    "QUAD_SUPER": "15m",
+    "ORB":        "5m",
+    "GRID":       "1h",
+}
+
+def get_bot_tf(bot):
+    """Returns (cb_granularity_string, seconds) for a bot's configured timeframe."""
+    tf_key = bot.get('timeframe', STRATEGY_DEFAULT_TF.get(bot.get('strategy', ''), '15m'))
+    return TF_MAP.get(tf_key, TF_MAP['15m'])
+
+# ==========================================
 # DERIVATIVE SIZING & MULTIPLIER LOGIC
 # ==========================================
 def is_derivative(pair):
@@ -156,11 +183,12 @@ def run_bot(bot_id):
 # STRATEGY EXECUTORS
 # ==========================================
 def execute_orb(bot_id, bot, pair):
+    cb_gran, tf_sec = get_bot_tf(bot)
     end_ts = int(time.time())
-    start_ts = end_ts - (288 * 300) 
+    start_ts = end_ts - (288 * tf_sec) 
     
     try:
-        res = client.get(f"/api/v3/brokerage/products/{pair}/candles", params={"start": str(start_ts), "end": str(end_ts), "granularity": "FIVE_MINUTE"})
+        res = client.get(f"/api/v3/brokerage/products/{pair}/candles", params={"start": str(start_ts), "end": str(end_ts), "granularity": cb_gran})
         candles = res.get('candles', [])
     except Exception as e:
         return
@@ -302,10 +330,11 @@ def execute_orb(bot_id, bot, pair):
         except Exception as e: print(f"Exit failed: {e}")
 
 def execute_quad(bot_id, bot, pair, mode='STANDARD'):
+    cb_gran, tf_sec = get_bot_tf(bot)
     end_ts = int(time.time())
-    start_ts = end_ts - (250 * 900) 
+    start_ts = end_ts - (250 * tf_sec) 
     try:
-        res = client.get(f"/api/v3/brokerage/products/{pair}/candles", params={"start": str(start_ts), "end": str(end_ts), "granularity": "FIFTEEN_MINUTE"})
+        res = client.get(f"/api/v3/brokerage/products/{pair}/candles", params={"start": str(start_ts), "end": str(end_ts), "granularity": cb_gran})
         candles = res.get('candles', [])
     except Exception as e: return
     if len(candles) < 200: return 
@@ -490,19 +519,19 @@ threading.Thread(target=start_user_ws, daemon=True).start()
 # REFACTORED GRID INITIALIZER
 # ==========================================
 def execute_grid_bot(bot_id, bot, pair):
-    """Initializes the grid. Ongoing tracking is now handled purely by the WS engine."""
+    """Initializes the grid with mode-aware order placement. WS engine handles ongoing flips."""
     settings = bot.get('settings', {})
     
     # 1. Fetch Constraints & Increments
+    cb_gran, tf_sec = get_bot_tf(bot)
     end_ts = int(time.time())
-    start_ts = end_ts - (100 * 3600) 
+    start_ts = end_ts - (100 * tf_sec) 
     try:
-        res = client.get(f"/api/v3/brokerage/products/{pair}/candles", params={"start": str(start_ts), "end": str(end_ts), "granularity": "ONE_HOUR"})
+        res = client.get(f"/api/v3/brokerage/products/{pair}/candles", params={"start": str(start_ts), "end": str(end_ts), "granularity": cb_gran})
         candles = res.get('candles', [])
         p_info = client.get_product(product_id=pair)
         cur_px = float(p_info.price)
         
-        # Pull exact exchange precision markers
         base_inc = getattr(p_info, 'base_increment', '0.00000001')
         quote_inc = getattr(p_info, 'quote_increment', '0.01')
     except Exception as e: return
@@ -521,6 +550,8 @@ def execute_grid_bot(bot_id, bot, pair):
     lower = settings.get('lower_price')
     upper = settings.get('upper_price')
     grid_count = settings.get('grid_count')
+    mode = settings.get('mode', 'LONG').upper()
+    step_pct = settings.get('step_pct', 0.6) / 100.0  # Convert to decimal
 
     signal, reason = calculate_advanced_grid(df, lower, upper, grid_count, inventory_pct)
     
@@ -528,59 +559,142 @@ def execute_grid_bot(bot_id, bot, pair):
         print(f"[GRID BOT | {pair}] {reason}")
         return 
 
-    # 2. Grid Array Initialization
+    # 2. Grid Array Initialization (only runs once)
     if 'active_grids' not in settings:
-        step = (upper - lower) / grid_count
-        levels = [lower + (i * step) for i in range(grid_count + 1)]
-        
+        step = cur_px * step_pct  # Step based on percentage, not range division
         active_grids = []
-        chunk_size_usd = bot['current_usd'] / grid_count 
         
-        # Store constraints globally for the WS thread to use later
+        # Store constraints for WS thread
         settings['base_inc'] = str(base_inc)
         settings['quote_inc'] = str(quote_inc)
         
-        for price in levels:
-            if price < cur_px:
-                if deriv_flag:
-                    grid_qty = int(chunk_size_usd / (price * mult))
-                    if grid_qty < 1: continue 
+        # Determine which levels to place based on mode
+        buy_levels = []   # Prices below current where we place BUY limits
+        sell_levels = []   # Prices above current where we place SELL limits
+        
+        # Generate levels from floor to ceiling at step intervals
+        level = lower
+        while level <= upper:
+            if level < cur_px * 0.999:  # Below current price
+                buy_levels.append(level)
+            elif level > cur_px * 1.001:  # Above current price
+                sell_levels.append(level)
+            level += step
+        
+        # Filter by mode
+        if mode == 'LONG':
+            sell_levels = []
+        elif mode == 'SHORT':
+            buy_levels = []
+            if not deriv_flag:
+                print(f"[GRID BOT | {pair}] WARNING: SHORT mode on spot requires asset inventory.")
+        # BOTH: use both lists as-is
+        
+        total_orders = len(buy_levels) + len(sell_levels)
+        if total_orders == 0:
+            print(f"[GRID BOT | {pair}] No valid grid levels in range. Check floor/ceiling.")
+            return
+            
+        chunk_size_usd = bot['current_usd'] / total_orders
+        
+        # --- Place BUY orders below price ---
+        for price in buy_levels:
+            if deriv_flag:
+                grid_qty = int(chunk_size_usd / (price * mult))
+                if grid_qty < 1: continue
+            else:
+                grid_qty = float(chunk_size_usd * 0.99) / price
+
+            str_price = snap_to_increment(price, quote_inc)
+            str_qty = snap_to_increment(grid_qty, base_inc)
+            if float(str_qty) <= 0: continue
+
+            oid = str(uuid.uuid4())
+            try:
+                api_res = client.limit_order_gtc_buy(
+                    client_order_id=oid, product_id=pair,
+                    base_size=str_qty, limit_price=str_price, post_only=True
+                )
+                success = getattr(api_res, 'success', False) or (isinstance(api_res, dict) and api_res.get('success', False))
+                fail_reason = getattr(api_res, 'failure_reason', '') or (isinstance(api_res, dict) and api_res.get('failure_reason', ''))
+                if success or fail_reason == 'UNKNOWN_FAILURE_REASON':
+                    active_grids.append({"price": float(str_price), "side": "BUY", "oid": oid})
                 else:
-                    quote_sz = chunk_size_usd * 0.99
-                    grid_qty = float(quote_sz) / price
-
-                # Snapped Strings
-                str_price = snap_to_increment(price, quote_inc)
-                str_qty = snap_to_increment(grid_qty, base_inc)
-                
-                if float(str_qty) <= 0: continue
-
-                oid = str(uuid.uuid4())
-                try:
-                    # TIF GTC Buy
-                    api_res = client.limit_order_gtc_buy(
-                        client_order_id=oid, 
-                        product_id=pair, 
-                        base_size=str_qty, 
-                        limit_price=str_price, 
-                        post_only=True
-                    )
+                    print(f"[GRID INIT] BUY Blocked at {str_price}: {fail_reason}")
+            except Exception as e: print(f"[GRID INIT] BUY Exception at {str_price}: {e}")
+        
+        # --- Place SELL orders above price ---
+        if sell_levels:
+            if deriv_flag:
+                # Derivatives: place sells directly, no inventory needed
+                for price in sell_levels:
+                    grid_qty = int(chunk_size_usd / (price * mult))
+                    if grid_qty < 1: continue
                     
-                    success = getattr(api_res, 'success', False) or (isinstance(api_res, dict) and api_res.get('success', False))
-                    fail_reason = getattr(api_res, 'failure_reason', '') or (isinstance(api_res, dict) and api_res.get('failure_reason', ''))
-                    
-                    if success or fail_reason == 'UNKNOWN_FAILURE_REASON':
-                        active_grids.append({"price": float(str_price), "side": "BUY", "oid": oid})
-                    else:
-                        print(f"[GRID INIT ERROR] Blocked: {fail_reason}")
-                except Exception as e: print(f"[GRID INIT EXCEPTION]: {e}")
+                    str_price = snap_to_increment(price, quote_inc)
+                    str_qty = snap_to_increment(grid_qty, base_inc)
+                    if float(str_qty) <= 0: continue
+
+                    oid = str(uuid.uuid4())
+                    try:
+                        api_res = client.limit_order_gtc_sell(
+                            client_order_id=oid, product_id=pair,
+                            base_size=str_qty, limit_price=str_price, post_only=True
+                        )
+                        success = getattr(api_res, 'success', False) or (isinstance(api_res, dict) and api_res.get('success', False))
+                        fail_reason = getattr(api_res, 'failure_reason', '') or (isinstance(api_res, dict) and api_res.get('failure_reason', ''))
+                        if success or fail_reason == 'UNKNOWN_FAILURE_REASON':
+                            active_grids.append({"price": float(str_price), "side": "SELL", "oid": oid})
+                        else:
+                            print(f"[GRID INIT] SELL Blocked at {str_price}: {fail_reason}")
+                    except Exception as e: print(f"[GRID INIT] SELL Exception at {str_price}: {e}")
+            else:
+                # Spot: market buy inventory first, then place sell limits
+                total_sell_qty = sum(float(chunk_size_usd * 0.99) / p for p in sell_levels)
+                total_sell_cost = total_sell_qty * cur_px
                 
+                if total_sell_cost <= bot['current_usd'] * 0.95:
+                    try:
+                        buy_oid = str(uuid.uuid4())
+                        client.market_order_buy(
+                            client_order_id=buy_oid, product_id=pair,
+                            quote_size=str(round(total_sell_cost * 0.99, 2))
+                        )
+                        bot['asset_held'] += total_sell_qty
+                        bot['current_usd'] -= total_sell_cost
+                        print(f"[GRID INIT] Market bought {total_sell_qty:.6f} inventory for sell grid")
+                        time.sleep(1)  # Let fill settle
+                        
+                        for price in sell_levels:
+                            grid_qty = float(chunk_size_usd * 0.99) / price
+                            str_price = snap_to_increment(price, quote_inc)
+                            str_qty = snap_to_increment(grid_qty, base_inc)
+                            if float(str_qty) <= 0: continue
+
+                            oid = str(uuid.uuid4())
+                            try:
+                                api_res = client.limit_order_gtc_sell(
+                                    client_order_id=oid, product_id=pair,
+                                    base_size=str_qty, limit_price=str_price, post_only=True
+                                )
+                                success = getattr(api_res, 'success', False) or (isinstance(api_res, dict) and api_res.get('success', False))
+                                fail_reason = getattr(api_res, 'failure_reason', '') or (isinstance(api_res, dict) and api_res.get('failure_reason', ''))
+                                if success or fail_reason == 'UNKNOWN_FAILURE_REASON':
+                                    active_grids.append({"price": float(str_price), "side": "SELL", "oid": oid})
+                                else:
+                                    print(f"[GRID INIT] SELL Blocked at {str_price}: {fail_reason}")
+                            except Exception as e: print(f"[GRID INIT] SELL Exception at {str_price}: {e}")
+                    except Exception as e:
+                        print(f"[GRID INIT] Inventory buy failed: {e}. Skipping sell side.")
+                else:
+                    print(f"[GRID INIT] Insufficient capital for sell-side inventory. Skipping sell grid.")
+        
         if active_grids:
             bot['settings']['active_grids'] = active_grids
             bot['settings']['step_size'] = step
-            bot['settings']['chunk_size'] = chunk_size_usd 
+            bot['settings']['chunk_size'] = chunk_size_usd
             save_bots()
-            print(f"[GRID BOT] Sent {len(active_grids)} Limit GTC Maker levels to engine.")
+            print(f"[GRID BOT] Deployed {len(active_grids)} levels ({mode} mode, {step_pct*100:.1f}% step)")
             
     # REST Monitoring loop is deliberately bypassed; handoff to WS Listener complete.
 
@@ -612,6 +726,11 @@ def get_bots():
         b_copy['live_pnl'] = pnl
         b_copy['net_value'] = net_val
         
+        # Ensure timeframe exists (migration for pre-upgrade bots)
+        if 'timeframe' not in bot:
+            bot['timeframe'] = STRATEGY_DEFAULT_TF.get(bot.get('strategy', ''), '15m')
+        b_copy['timeframe'] = bot['timeframe']
+        
         # Ensure stats exist (migration for pre-upgrade bots)
         stats = ensure_stats(bot)
         b_copy['stats'] = stats.copy()
@@ -634,18 +753,85 @@ def get_bot_trades(bot_id):
     stats = ensure_stats(ACTIVE_BOTS[bot_id])
     return jsonify(stats.get('trade_log', []))
 
+# ==========================================
+# GRID PREVIEW / AUTO-CALCULATOR
+# ==========================================
+@bot_manager_bp.route('/api/bots/grid_preview', methods=['POST'])
+def grid_preview():
+    """Calculates grid parameters for preview before deployment."""
+    d = request.json
+    pair = d.get('pair', '')
+    capital = float(d.get('capital', 0))
+    step_pct = float(d.get('step_pct', 0.6)) / 100.0  # Convert to decimal
+    min_order_usd = float(d.get('min_order_usd', 5))
+    mode = d.get('mode', 'BOTH').upper()
+
+    if capital <= 0 or not pair:
+        return jsonify(error="Invalid pair or capital.")
+
+    try:
+        p = client.get_product(product_id=pair)
+        cur_px = float(p.price)
+    except:
+        return jsonify(error="Could not fetch price for pair.")
+
+    if cur_px <= 0:
+        return jsonify(error="Invalid price.")
+
+    # Grid count from capital / min order
+    grid_count = max(2, int(capital / min_order_usd))
+    per_order_usd = capital / grid_count
+    step_usd = cur_px * step_pct
+
+    # Floor/ceiling based on mode
+    if mode == 'LONG':
+        # All grids below current price
+        lower_price = cur_px - (grid_count * step_usd)
+        upper_price = cur_px
+    elif mode == 'SHORT':
+        # All grids above current price
+        lower_price = cur_px
+        upper_price = cur_px + (grid_count * step_usd)
+    else:
+        # BOTH: split evenly around price
+        half = grid_count // 2
+        lower_price = cur_px - (half * step_usd)
+        upper_price = cur_px + ((grid_count - half) * step_usd)
+
+    # Estimated profit per grid flip (step_pct - fee)
+    # Maker fee ~0.4% round-trip on Advanced; user sets step to cover it
+    profit_per_flip = per_order_usd * step_pct  # Gross profit per flip
+
+    return jsonify({
+        "current_price": round(cur_px, 6),
+        "grid_count": grid_count,
+        "lower_price": round(lower_price, 2),
+        "upper_price": round(upper_price, 2),
+        "step_usd": round(step_usd, 4),
+        "step_pct": round(step_pct * 100, 2),
+        "per_order_usd": round(per_order_usd, 2),
+        "profit_per_flip": round(profit_per_flip, 4),
+        "mode": mode
+    })
+
 @bot_manager_bp.route('/api/bots/start', methods=['POST'])
 def start_bot():
     d = request.json
+    strategy = d['strategy'].upper()
+    tf = d.get('timeframe', STRATEGY_DEFAULT_TF.get(strategy, '15m'))
+    if tf not in TF_MAP:
+        tf = STRATEGY_DEFAULT_TF.get(strategy, '15m')
+    
     bot_id = str(uuid.uuid4())[:8]
     ACTIVE_BOTS[bot_id] = {
         "pair": d['pair'].upper(),
-        "strategy": d['strategy'].upper(),
+        "strategy": strategy,
         "status": "RUNNING",
         "allocated_usd": float(d['amount']),
         "current_usd": float(d['amount']),
         "asset_held": 0.0,
         "position_side": "FLAT",
+        "timeframe": tf,
         "settings": d.get('settings', {}),
         "stats": new_bot_stats(),
         "created_at": datetime.now(timezone.utc).isoformat()
@@ -654,7 +840,21 @@ def start_bot():
     ACTIVE_BOTS[bot_id]['stats']['deposits'] = float(d['amount'])
     save_bots()
     threading.Thread(target=run_bot, args=(bot_id,), daemon=True).start()
-    return jsonify(success=True, message="Bot started!")
+    return jsonify(success=True, message=f"Bot started on {tf} timeframe!")
+
+@bot_manager_bp.route('/api/bots/timeframe/<bot_id>', methods=['POST'])
+def update_bot_tf(bot_id):
+    """Update a bot's timeframe. Takes effect on the next strategy cycle (15s)."""
+    if bot_id not in ACTIVE_BOTS:
+        return jsonify(success=False, error="Bot not found.")
+    d = request.json
+    tf = d.get('timeframe', '')
+    if tf not in TF_MAP:
+        return jsonify(success=False, error=f"Invalid timeframe. Use: {', '.join(TF_MAP.keys())}")
+    
+    ACTIVE_BOTS[bot_id]['timeframe'] = tf
+    save_bots()
+    return jsonify(success=True, message=f"Timeframe updated to {tf}. Active on next cycle.")
 
 @bot_manager_bp.route('/api/bots/stop/<bot_id>', methods=['POST'])
 def stop_bot(bot_id):

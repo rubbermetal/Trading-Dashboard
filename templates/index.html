@@ -250,6 +250,20 @@
                                     <option value="GRID">Grid Bot (Ranging Cashflow)</option>
                                 </select>
                             </div>
+
+                            <div class="mb-3">
+                                <label class="small text-muted mb-1">TIMEFRAME</label>
+                                <select id="bot-timeframe" class="form-select form-select-sm bg-dark text-white border-secondary">
+                                    <option value="1m">1 Minute</option>
+                                    <option value="5m">5 Minutes</option>
+                                    <option value="15m" selected>15 Minutes</option>
+                                    <option value="30m">30 Minutes</option>
+                                    <option value="1h">1 Hour</option>
+                                    <option value="6h">6 Hours</option>
+                                    <option value="1d">1 Day</option>
+                                </select>
+                                <small class="text-muted mt-1 d-block" style="font-size: 0.6rem;">Default set by strategy. Can be changed after deployment.</small>
+                            </div>
                             
                             <div class="mb-4">
                                 <label class="small text-muted mb-1">ALLOCATED CAPITAL (USD)</label>
@@ -261,18 +275,42 @@
                                 <h6 class="text-muted small fw-bold mb-3">GRID PARAMETERS</h6>
                                 <div class="row g-2">
                                     <div class="col-6">
-                                        <label class="small text-muted mb-1">Lower Price</label>
-                                        <input type="number" id="grid-lower" class="form-control form-control-sm bg-dark border-secondary text-white" step="any">
+                                        <label class="small text-muted mb-1">STEP % (FEE BREAKEVEN)</label>
+                                        <input type="number" id="grid-step-pct" class="form-control form-control-sm bg-dark border-secondary text-white" value="0.6" step="0.1" min="0.1" oninput="previewGrid()">
                                     </div>
                                     <div class="col-6">
-                                        <label class="small text-muted mb-1">Upper Price</label>
-                                        <input type="number" id="grid-upper" class="form-control form-control-sm bg-dark border-secondary text-white" step="any">
+                                        <label class="small text-muted mb-1">MIN ORDER (USD)</label>
+                                        <input type="number" id="grid-min-order" class="form-control form-control-sm bg-dark border-secondary text-white" value="5" step="1" min="1" oninput="previewGrid()">
                                     </div>
                                     <div class="col-12 mt-2">
-                                        <label class="small text-muted mb-1">Number of Grids</label>
-                                        <input type="number" id="grid-count" class="form-control form-control-sm bg-dark border-secondary text-white" value="10">
+                                        <label class="small text-muted mb-1">MODE</label>
+                                        <select id="grid-mode" class="form-select form-select-sm bg-dark text-white border-secondary" onchange="previewGrid()">
+                                            <option value="BOTH">BOTH (Buy below + Sell above)</option>
+                                            <option value="LONG">LONG ONLY (Buy dips below price)</option>
+                                            <option value="SHORT">SHORT ONLY (Sell rallies above price — Perps only)</option>
+                                        </select>
+                                    </div>
+                                    <div class="col-6 mt-2">
+                                        <label class="small text-muted mb-1">FLOOR (AUTO)</label>
+                                        <input type="number" id="grid-lower" class="form-control form-control-sm bg-dark border-secondary text-white" step="any">
+                                    </div>
+                                    <div class="col-6 mt-2">
+                                        <label class="small text-muted mb-1">CEILING (AUTO)</label>
+                                        <input type="number" id="grid-upper" class="form-control form-control-sm bg-dark border-secondary text-white" step="any">
                                     </div>
                                 </div>
+                                <div id="grid-preview" class="mt-2 p-2 rounded" style="background:#16171d; font-size:0.65rem; display:none;">
+                                    <div class="d-flex justify-content-between text-muted mb-1">
+                                        <span>GRIDS: <b class="text-white" id="gp-count">-</b></span>
+                                        <span>STEP: <b class="text-white" id="gp-step">-</b></span>
+                                        <span>RANGE: <b class="text-white" id="gp-range">-</b></span>
+                                    </div>
+                                    <div class="d-flex justify-content-between text-muted">
+                                        <span>PER ORDER: <b class="text-white" id="gp-per-order">-</b></span>
+                                        <span>PROFIT/FLIP: <b class="text-success-custom" id="gp-profit">-</b></span>
+                                    </div>
+                                </div>
+                                <small class="text-muted mt-2 d-block" style="font-size:0.55rem;">0.6% step = breakeven with maker fees. Floor/Ceiling auto-set from price but can be overridden.</small>
                             </div>
 
                             <button class="btn btn-success w-100 py-3 fw-bold mt-auto" onclick="deployBot()">INITIALIZE BOT</button>
@@ -676,8 +714,8 @@
         loadProducts();
 
         // ---- BOT CHART (MODAL) ----
-        async function openBotChart(botId, pair, strategy) {
-            const tf = STRATEGY_TF[strategy] || '1h';
+        async function openBotChart(botId, pair, strategy, botTf) {
+            const tf = botTf || STRATEGY_TF[strategy] || '1h';
             document.getElementById('bot-chart-title').innerHTML = `<i class="bi bi-graph-up me-2"></i>${pair}`;
             document.getElementById('bot-chart-subtitle').innerText = `${strategy} Bot — ${TF_LABELS[tf] || tf} candles — ID: ${botId}`;
             
@@ -1111,39 +1149,89 @@
         // ==========================================
         // BOT MANAGER LOGIC
         // ==========================================
+        const STRATEGY_DEFAULT_TFS = { QUAD: '15m', QUAD_SUPER: '15m', ORB: '5m', GRID: '1h' };
+
         function toggleBotSettings() {
             const strat = document.getElementById('bot-strategy').value;
             document.getElementById('grid-settings').classList.toggle('d-none', strat !== 'GRID');
+            const defaultTf = STRATEGY_DEFAULT_TFS[strat] || '15m';
+            document.getElementById('bot-timeframe').value = defaultTf;
+            if (strat === 'GRID') previewGrid();
+        }
+
+        async function previewGrid() {
+            const pair = document.getElementById('bot-pair').value.toUpperCase();
+            const capital = parseFloat(document.getElementById('bot-amount').value) || 0;
+            const stepPct = parseFloat(document.getElementById('grid-step-pct').value) || 0.6;
+            const minOrder = parseFloat(document.getElementById('grid-min-order').value) || 5;
+            const mode = document.getElementById('grid-mode').value;
+            const previewDiv = document.getElementById('grid-preview');
+
+            if (!pair || capital <= 0) { previewDiv.style.display = 'none'; return; }
+
+            try {
+                const res = await fetch(`/api/bots/grid_preview`, {
+                    method: 'POST', headers: {'Content-Type':'application/json'},
+                    body: JSON.stringify({ pair, capital, step_pct: stepPct, min_order_usd: minOrder, mode })
+                });
+                const d = await res.json();
+                if (d.error) { previewDiv.style.display = 'none'; return; }
+
+                document.getElementById('grid-lower').value = d.lower_price;
+                document.getElementById('grid-upper').value = d.upper_price;
+                document.getElementById('gp-count').innerText = d.grid_count;
+                document.getElementById('gp-step').innerText = `$${d.step_usd.toFixed(2)} (${stepPct}%)`;
+                document.getElementById('gp-range').innerText = `$${d.lower_price.toFixed(2)} — $${d.upper_price.toFixed(2)}`;
+                document.getElementById('gp-per-order').innerText = `$${d.per_order_usd.toFixed(2)}`;
+                document.getElementById('gp-profit').innerText = `~$${d.profit_per_flip.toFixed(4)}/flip`;
+                previewDiv.style.display = 'block';
+            } catch (e) { previewDiv.style.display = 'none'; }
         }
 
         async function deployBot() {
             const pair = document.getElementById('bot-pair').value.toUpperCase();
             let amount = parseFloat(document.getElementById('bot-amount').value);
             const strategy = document.getElementById('bot-strategy').value;
+            const timeframe = document.getElementById('bot-timeframe').value;
             
             if (!pair || !amount || amount <= 0) return alert("Please enter a valid asset pair and allocation amount.");
             if (!pair.includes('-')) document.getElementById('bot-pair').value = pair + '-USD';
 
-            const payload = { pair: document.getElementById('bot-pair').value, strategy: strategy, amount: amount, settings: {} };
+            const payload = { pair: document.getElementById('bot-pair').value, strategy: strategy, amount: amount, timeframe: timeframe, settings: {} };
             
             if (strategy === 'GRID') {
+                const lower = parseFloat(document.getElementById('grid-lower').value);
+                const upper = parseFloat(document.getElementById('grid-upper').value);
+                const stepPct = parseFloat(document.getElementById('grid-step-pct').value) || 0.6;
+                const minOrder = parseFloat(document.getElementById('grid-min-order').value) || 5;
+                const mode = document.getElementById('grid-mode').value;
+                
+                if (!lower || !upper || upper <= lower) return alert("Invalid floor/ceiling. Run the preview first.");
+                
+                // Grid count derived from capital and min order size
+                const gridCount = Math.floor(amount / minOrder);
+                if (gridCount < 2) return alert("Need at least 2 grid levels. Increase capital or lower min order.");
+
                 payload.settings = {
-                    lower_price: parseFloat(document.getElementById('grid-lower').value),
-                    upper_price: parseFloat(document.getElementById('grid-upper').value),
-                    grid_count: parseInt(document.getElementById('grid-count').value)
+                    lower_price: lower,
+                    upper_price: upper,
+                    grid_count: gridCount,
+                    step_pct: stepPct,
+                    min_order_usd: minOrder,
+                    mode: mode
                 };
-                if (!payload.settings.lower_price || !payload.settings.upper_price) return alert("Please set Grid limits.");
             }
 
-            if(!confirm(`Deploy ${strategy} bot on ${payload.pair} with $${amount}? This will lock funds into the bot's sandbox.`)) return;
+            if(!confirm(`Deploy ${strategy} bot on ${payload.pair} (${timeframe}) with $${amount}? This will lock funds into the bot's sandbox.`)) return;
 
             const res = await fetch('/api/bots/start', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload) });
             const d = await res.json();
             alert(d.message || d.error);
             document.getElementById('bot-pair').value = '';
             document.getElementById('bot-amount').value = '';
+            document.getElementById('grid-preview').style.display = 'none';
             loadBots();
-            refresh(); // Update the free USD balance immediately
+            refresh();
         }
 
         async function stopBot(botId) {
@@ -1159,6 +1247,17 @@
             const d = await res.json();
             alert(d.message || d.error);
             loadBots();
+        }
+
+        async function changeBotTF(botId, newTf) {
+            try {
+                const res = await fetch(`/api/bots/timeframe/${botId}`, {
+                    method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({timeframe: newTf})
+                });
+                const d = await res.json();
+                if (!d.success) alert(d.error);
+                // No alert on success — the dropdown already shows the new value
+            } catch (e) { alert('Network error updating timeframe.'); }
         }
 
         async function deleteBot(botId) {
@@ -1236,6 +1335,7 @@
                     const totalPnl = s.total_pnl || 0;
                     const tpClass = totalPnl >= 0 ? 'text-success-custom' : 'text-danger-custom';
                     const netVal = b.net_value || b.allocated_usd;
+                    const botTf = b.timeframe || STRATEGY_DEFAULT_TFS[b.strategy] || '15m';
 
                     let actionButtons = '';
                     if (b.status === 'RUNNING') {
@@ -1247,11 +1347,20 @@
                         `;
                     }
 
+                    // Build TF options for inline changer
+                    const tfOpts = ['1m','5m','15m','30m','1h','6h','1d'].map(t => 
+                        `<option value="${t}" ${t===botTf?'selected':''}>${t.toUpperCase()}</option>`
+                    ).join('');
+
                     return `
                     <div class="col-12 col-md-6">
                         <div class="card card-custom p-3 shadow-sm h-100 position-relative border-${b.status === 'RUNNING' ? 'success' : 'secondary'}">
                             <div class="d-flex justify-content-between mb-2">
-                                <div><h6 class="fw-bold mb-0"><a href="#" class="text-decoration-none" style="color:#66fcf1;" onclick="event.preventDefault(); openBotChart('${id}','${b.pair}','${b.strategy}')">${b.pair}</a></h6><span class="badge bg-dark border border-secondary" style="font-size:0.6rem">${b.strategy} BOT</span></div>
+                                <div>
+                                    <h6 class="fw-bold mb-0"><a href="#" class="text-decoration-none" style="color:#66fcf1;" onclick="event.preventDefault(); openBotChart('${id}','${b.pair}','${b.strategy}','${botTf}')">${b.pair}</a></h6>
+                                    <span class="badge bg-dark border border-secondary" style="font-size:0.6rem">${b.strategy} BOT</span>
+                                    <select class="d-inline-block ms-1 bg-dark text-white border-secondary rounded" style="font-size:0.55rem; padding:1px 4px; border:1px solid #45a29e; cursor:pointer;" onchange="changeBotTF('${id}', this.value)">${tfOpts}</select>
+                                </div>
                                 <div class="text-end"><span class="badge ${statusClass} mb-1">${b.status}</span><br><small class="text-muted" style="font-size: 0.6rem;">ID: ${id}</small></div>
                             </div>
 
