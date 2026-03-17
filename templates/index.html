@@ -290,6 +290,12 @@
                                             <option value="SHORT">SHORT ONLY (Sell rallies above price — Perps only)</option>
                                         </select>
                                     </div>
+                                    <div class="col-12 mt-2">
+                                        <div class="form-check form-switch">
+                                            <input class="form-check-input" type="checkbox" id="grid-follow" checked>
+                                            <label class="form-check-label small text-muted" for="grid-follow">FOLLOW MODE — Grid slides to track price movement</label>
+                                        </div>
+                                    </div>
                                     <div class="col-6 mt-2">
                                         <label class="small text-muted mb-1">FLOOR (AUTO)</label>
                                         <input type="number" id="grid-lower" class="form-control form-control-sm bg-dark border-secondary text-white" step="any">
@@ -1228,7 +1234,8 @@
                     grid_count: gridCount,
                     step_pct: stepPct,
                     min_order_usd: minOrder,
-                    mode: mode
+                    mode: mode,
+                    follow: document.getElementById('grid-follow').checked
                 };
             }
 
@@ -1266,8 +1273,17 @@
                 });
                 const d = await res.json();
                 if (!d.success) alert(d.error);
-                // No alert on success — the dropdown already shows the new value
             } catch (e) { alert('Network error updating timeframe.'); }
+        }
+
+        async function toggleGridFollow(botId, enabled) {
+            try {
+                const res = await fetch(`/api/bots/follow/${botId}`, {
+                    method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({follow: enabled})
+                });
+                const d = await res.json();
+                if (!d.success) alert(d.error);
+            } catch (e) { alert('Network error toggling follow.'); }
         }
 
         async function deleteBot(botId) {
@@ -1410,6 +1426,16 @@
                                     <span class="text-muted">Est. Fees</span><span class="text-muted">$${(s.total_fees_est || 0).toFixed(2)}</span>
                                 </div>
                             </div>
+
+                            ${b.strategy === 'GRID' ? `
+                            <!-- GRID CONTROLS -->
+                            <div class="d-flex justify-content-between align-items-center border-top border-secondary pt-2 mt-2" style="font-size:0.7rem;">
+                                <div class="form-check form-switch mb-0">
+                                    <input class="form-check-input" type="checkbox" ${(b.settings && b.settings.follow) ? 'checked' : ''} onchange="toggleGridFollow('${id}', this.checked)">
+                                    <label class="form-check-label text-muted">Follow</label>
+                                </div>
+                                ${(b.settings && b.settings.halted_reason) ? `<span class="badge bg-danger" style="font-size:0.55rem;" title="${b.settings.halted_reason}"><i class="bi bi-exclamation-triangle me-1"></i>HALTED</span>` : `<span class="badge bg-dark border border-secondary" style="font-size:0.55rem;">${(b.settings && b.settings.active_grids) ? b.settings.active_grids.length + ' levels' : 'Deploying...'}</span>`}
+                            </div>` : ''}
 
                             <!-- ACTION BUTTONS -->
                             <div class="d-flex justify-content-between align-items-end border-top border-secondary pt-2 mt-2">

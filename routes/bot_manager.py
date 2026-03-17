@@ -4,6 +4,7 @@ import time
 import uuid
 import threading
 import pandas as pd
+import pandas_ta as ta
 from decimal import Decimal, ROUND_DOWN
 from flask import Blueprint, jsonify, request
 from datetime import datetime, timezone
@@ -516,13 +517,288 @@ def start_user_ws():
 threading.Thread(target=start_user_ws, daemon=True).start()
 
 # ==========================================
-# REFACTORED GRID INITIALIZER
+# GRID HELPERS
+# ==========================================
+def cancel_order_safe(order_id):
+    """Attempts to cancel an order, returns True on success."""
+    try:
+        res = client.cancel_orders(order_ids=[order_id])
+        results = res.get('results', []) if isinstance(res, dict) else getattr(res, 'results', [])
+        if results:
+            r = results[0] if isinstance(results[0], dict) else results[0]
+            return r.get('success', False) if isinstance(r, dict) else getattr(r, 'success', False)
+        return False
+    except Exception as e:
+        print(f"[GRID] Cancel failed for {order_id}: {e}")
+        return False
+
+def place_grid_buy(pair, price, chunk_usd, base_inc, quote_inc, deriv_flag, mult):
+    """Places a single grid buy order. Returns grid dict or None."""
+    if deriv_flag:
+        grid_qty = int(chunk_usd / (price * mult))
+        if grid_qty < 1: return None
+    else:
+        grid_qty = float(chunk_usd * 0.99) / price
+
+    str_price = snap_to_increment(price, quote_inc)
+    str_qty = snap_to_increment(grid_qty, base_inc)
+    if float(str_qty) <= 0: return None
+
+    oid = str(uuid.uuid4())
+    try:
+        api_res = client.limit_order_gtc_buy(
+            client_order_id=oid, product_id=pair,
+            base_size=str_qty, limit_price=str_price, post_only=True
+        )
+        success = getattr(api_res, 'success', False) or (isinstance(api_res, dict) and api_res.get('success', False))
+        fail_reason = getattr(api_res, 'failure_reason', '') or (isinstance(api_res, dict) and api_res.get('failure_reason', ''))
+        if success or fail_reason == 'UNKNOWN_FAILURE_REASON':
+            return {"price": float(str_price), "side": "BUY", "oid": oid}
+        else:
+            print(f"[GRID] BUY rejected at {str_price}: {fail_reason}")
+    except Exception as e:
+        print(f"[GRID] BUY exception at {str_price}: {e}")
+    return None
+
+def place_grid_sell(pair, price, qty_or_chunk, base_inc, quote_inc, deriv_flag, mult, use_chunk=False, chunk_usd=0):
+    """Places a single grid sell order. Returns grid dict or None."""
+    if use_chunk:
+        if deriv_flag:
+            grid_qty = int(chunk_usd / (price * mult))
+            if grid_qty < 1: return None
+        else:
+            grid_qty = float(chunk_usd * 0.99) / price
+    else:
+        grid_qty = qty_or_chunk
+
+    str_price = snap_to_increment(price, quote_inc)
+    str_qty = snap_to_increment(grid_qty, base_inc)
+    if float(str_qty) <= 0: return None
+
+    oid = str(uuid.uuid4())
+    try:
+        api_res = client.limit_order_gtc_sell(
+            client_order_id=oid, product_id=pair,
+            base_size=str_qty, limit_price=str_price, post_only=True
+        )
+        success = getattr(api_res, 'success', False) or (isinstance(api_res, dict) and api_res.get('success', False))
+        fail_reason = getattr(api_res, 'failure_reason', '') or (isinstance(api_res, dict) and api_res.get('failure_reason', ''))
+        if success or fail_reason == 'UNKNOWN_FAILURE_REASON':
+            return {"price": float(str_price), "side": "SELL", "oid": oid}
+        else:
+            print(f"[GRID] SELL rejected at {str_price}: {fail_reason}")
+    except Exception as e:
+        print(f"[GRID] SELL exception at {str_price}: {e}")
+    return None
+
+# ==========================================
+# GRID EMERGENCY HALT
+# ==========================================
+def grid_emergency_halt(bot_id, bot, pair, cur_px, reason):
+    """Cancel all open grid orders and exit inventory via tight maker sell."""
+    settings = bot.get('settings', {})
+    active_grids = settings.get('active_grids', [])
+    base_inc = settings.get('base_inc', '0.00000001')
+    quote_inc = settings.get('quote_inc', '0.01')
+    mult = get_contract_multiplier(pair)
+    
+    print(f"[GRID HALT | {pair}] {reason} — Canceling all orders and closing inventory.")
+    
+    # 1. Cancel every open grid order
+    cancelled = 0
+    for grid in active_grids:
+        if cancel_order_safe(grid['oid']):
+            cancelled += 1
+    
+    print(f"[GRID HALT | {pair}] Cancelled {cancelled}/{len(active_grids)} orders.")
+    
+    # 2. Exit inventory if any
+    held = abs(bot.get('asset_held', 0))
+    if held > 0 and cur_px > 0:
+        # Place a maker sell slightly below current price (0.05%) to fill quickly without market slippage
+        exit_px = cur_px * 0.9995
+        str_price = snap_to_increment(exit_px, quote_inc)
+        str_qty = snap_to_increment(held, base_inc)
+        
+        if float(str_qty) > 0:
+            oid = str(uuid.uuid4())
+            try:
+                api_res = client.limit_order_gtc_sell(
+                    client_order_id=oid, product_id=pair,
+                    base_size=str_qty, limit_price=str_price, post_only=False  # IOC-like: allow taker to ensure fill
+                )
+                success = getattr(api_res, 'success', False) or (isinstance(api_res, dict) and api_res.get('success', False))
+                if success:
+                    est_return = held * float(str_price) * mult
+                    entry_px = bot.get('entry_price', cur_px)
+                    record_trade(bot, entry_px, float(str_price), held, 'LONG', 'EMERGENCY_HALT', pair, mult)
+                    bot['current_usd'] += est_return * 0.995
+                    bot['asset_held'] = 0.0
+                    print(f"[GRID HALT | {pair}] Emergency sell placed at {str_price} for {str_qty} units.")
+                else:
+                    print(f"[GRID HALT | {pair}] Emergency sell order failed. Inventory remains.")
+            except Exception as e:
+                print(f"[GRID HALT | {pair}] Emergency sell exception: {e}")
+    
+    # 3. Clear grid state so it can re-initialize when conditions improve
+    settings.pop('active_grids', None)
+    settings.pop('step_size', None)
+    settings.pop('chunk_size', None)
+    bot['settings']['halted_reason'] = reason
+    bot['settings']['halted_at'] = datetime.now(timezone.utc).isoformat()
+    save_bots()
+
+# ==========================================
+# GRID FOLLOW ENGINE
+# ==========================================
+def grid_follow(bot_id, bot, pair, cur_px, df):
+    """
+    Slides the grid window to follow price.
+    Cancels orders that are too far from price and deploys new ones near it.
+    """
+    settings = bot.get('settings', {})
+    active_grids = settings.get('active_grids', [])
+    step_size = settings.get('step_size', 0)
+    chunk_usd = settings.get('chunk_size', 0)
+    base_inc = settings.get('base_inc', '0.00000001')
+    quote_inc = settings.get('quote_inc', '0.01')
+    mode = settings.get('mode', 'LONG').upper()
+    deriv_flag = is_derivative(pair)
+    mult = get_contract_multiplier(pair)
+    
+    if not active_grids or step_size <= 0 or chunk_usd <= 0:
+        return
+    
+    # Determine the grid window boundaries
+    buy_grids = [g for g in active_grids if g['side'] == 'BUY']
+    sell_grids = [g for g in active_grids if g['side'] == 'SELL']
+    
+    all_prices = [g['price'] for g in active_grids]
+    if not all_prices:
+        return
+    
+    grid_low = min(all_prices)
+    grid_high = max(all_prices)
+    
+    # How many steps has price moved beyond the grid edges?
+    # We allow 1 step of buffer before triggering follow
+    changes_made = False
+    
+    # --- PRICE MOVED ABOVE GRID: Cancel lowest buys, add new levels above ---
+    if cur_px > grid_high + step_size and mode != 'SHORT':
+        # Find the lowest buy orders to recycle
+        stale = sorted(buy_grids, key=lambda g: g['price'])
+        # Recycle up to 2 orders per cycle to avoid API spam
+        to_recycle = stale[:min(2, len(stale))]
+        
+        for old_grid in to_recycle:
+            if cancel_order_safe(old_grid['oid']):
+                # Place a new buy one step below current price
+                new_buy_px = cur_px - step_size
+                # Avoid duplicates
+                existing_prices = {round(g['price'], 2) for g in active_grids}
+                while round(new_buy_px, 2) in existing_prices:
+                    new_buy_px -= step_size
+                
+                new_grid = place_grid_buy(pair, new_buy_px, chunk_usd, base_inc, quote_inc, deriv_flag, mult)
+                if new_grid:
+                    active_grids.remove(old_grid)
+                    active_grids.append(new_grid)
+                    changes_made = True
+                    print(f"[GRID FOLLOW | {pair}] Recycled BUY {old_grid['price']:.2f} → {new_buy_px:.2f}")
+                else:
+                    active_grids.remove(old_grid)
+                    changes_made = True
+    
+    # --- PRICE MOVED BELOW GRID: Cancel highest sells, add new levels below ---
+    elif cur_px < grid_low - step_size and mode != 'LONG':
+        stale = sorted(sell_grids, key=lambda g: -g['price'])
+        to_recycle = stale[:min(2, len(stale))]
+        
+        for old_grid in to_recycle:
+            if cancel_order_safe(old_grid['oid']):
+                new_sell_px = cur_px + step_size
+                existing_prices = {round(g['price'], 2) for g in active_grids}
+                while round(new_sell_px, 2) in existing_prices:
+                    new_sell_px += step_size
+                
+                new_grid = place_grid_sell(pair, new_sell_px, 0, base_inc, quote_inc, deriv_flag, mult,
+                                          use_chunk=True, chunk_usd=chunk_usd)
+                if new_grid:
+                    active_grids.remove(old_grid)
+                    active_grids.append(new_grid)
+                    changes_made = True
+                    print(f"[GRID FOLLOW | {pair}] Recycled SELL {old_grid['price']:.2f} → {new_sell_px:.2f}")
+                else:
+                    active_grids.remove(old_grid)
+                    changes_made = True
+    
+    # --- LONG MODE: Price moved below grid, recycle highest buys downward ---
+    elif cur_px < grid_low - step_size and mode == 'LONG':
+        stale = sorted(buy_grids, key=lambda g: -g['price'])
+        to_recycle = stale[:min(2, len(stale))]
+        
+        for old_grid in to_recycle:
+            if cancel_order_safe(old_grid['oid']):
+                new_buy_px = cur_px - step_size
+                existing_prices = {round(g['price'], 2) for g in active_grids}
+                while round(new_buy_px, 2) in existing_prices:
+                    new_buy_px -= step_size
+                
+                new_grid = place_grid_buy(pair, new_buy_px, chunk_usd, base_inc, quote_inc, deriv_flag, mult)
+                if new_grid:
+                    active_grids.remove(old_grid)
+                    active_grids.append(new_grid)
+                    changes_made = True
+                    print(f"[GRID FOLLOW | {pair}] Followed DOWN: BUY {old_grid['price']:.2f} → {new_buy_px:.2f}")
+                else:
+                    active_grids.remove(old_grid)
+                    changes_made = True
+    
+    # --- SHORT MODE: Price moved above grid, recycle lowest sells upward ---
+    elif cur_px > grid_high + step_size and mode == 'SHORT':
+        stale = sorted(sell_grids, key=lambda g: g['price'])
+        to_recycle = stale[:min(2, len(stale))]
+        
+        for old_grid in to_recycle:
+            if cancel_order_safe(old_grid['oid']):
+                new_sell_px = cur_px + step_size
+                existing_prices = {round(g['price'], 2) for g in active_grids}
+                while round(new_sell_px, 2) in existing_prices:
+                    new_sell_px += step_size
+                
+                new_grid = place_grid_sell(pair, new_sell_px, 0, base_inc, quote_inc, deriv_flag, mult,
+                                          use_chunk=True, chunk_usd=chunk_usd)
+                if new_grid:
+                    active_grids.remove(old_grid)
+                    active_grids.append(new_grid)
+                    changes_made = True
+                    print(f"[GRID FOLLOW | {pair}] Followed UP: SELL {old_grid['price']:.2f} → {new_sell_px:.2f}")
+                else:
+                    active_grids.remove(old_grid)
+                    changes_made = True
+    
+    if changes_made:
+        # Update floor/ceiling to reflect new grid window
+        remaining_prices = [g['price'] for g in active_grids]
+        if remaining_prices:
+            settings['lower_price'] = min(remaining_prices)
+            settings['upper_price'] = max(remaining_prices)
+        save_bots()
+
+# ==========================================
+# REFACTORED GRID EXECUTOR (3-STATE MACHINE)
 # ==========================================
 def execute_grid_bot(bot_id, bot, pair):
-    """Initializes the grid with mode-aware order placement. WS engine handles ongoing flips."""
+    """
+    Runs every 15s. Three states:
+    1. INIT: No active grids → deploy initial grid
+    2. FOLLOW: Grids exist, follow=True → slide window to track price
+    3. HALT: ADX/ATR adverse → cancel all, exit inventory
+    """
     settings = bot.get('settings', {})
     
-    # 1. Fetch Constraints & Increments
+    # 1. Fetch market data
     cb_gran, tf_sec = get_bot_tf(bot)
     end_ts = int(time.time())
     start_ts = end_ts - (100 * tf_sec) 
@@ -534,169 +810,144 @@ def execute_grid_bot(bot_id, bot, pair):
         
         base_inc = getattr(p_info, 'base_increment', '0.00000001')
         quote_inc = getattr(p_info, 'quote_increment', '0.01')
-    except Exception as e: return
+    except Exception as e:
+        print(f"[GRID BOT | {pair}] Data fetch error: {e}")
+        return
         
-    if len(candles) < 50: return
+    if len(candles) < 50:
+        print(f"[GRID BOT | {pair}] Only {len(candles)} candles, need 50. Waiting...")
+        return
         
     parsed = [{'start': int(c['start']), 'high': float(c['high']), 'low': float(c['low']), 'close': float(c['close']), 'volume': float(c['volume'])} for c in candles]
     df = pd.DataFrame(parsed).sort_values('start').reset_index(drop=True)
+    
+    # 2. Regime check
+    try:
+        adx_df = ta.adx(df['high'], df['low'], df['close'], length=14)
+        atr_series = ta.atr(df['high'], df['low'], df['close'], length=14)
+        curr_adx = float(adx_df.iloc[-1, 0]) if adx_df is not None and not adx_df.empty else 0.0
+        curr_atr = float(atr_series.iloc[-1]) if atr_series is not None and not atr_series.empty else 0.0
+    except:
+        curr_adx, curr_atr = 0.0, 0.0
+
+    active_grids = settings.get('active_grids')
+    has_grids = active_grids and len(active_grids) > 0
+    lower = settings.get('lower_price')
+    
+    # --- STATE: EMERGENCY HALT (only if grids are live) ---
+    if has_grids:
+        # ADX halt: strong trend detected
+        if curr_adx >= 25:
+            grid_emergency_halt(bot_id, bot, pair, cur_px, f"ADX={curr_adx:.1f} >= 25. Trend too strong.")
+            return
+        
+        # ATR tail-risk: price crashed > 2 ATR below floor
+        if lower and curr_atr > 0:
+            tail_level = lower - (2.0 * curr_atr)
+            if cur_px < tail_level:
+                grid_emergency_halt(bot_id, bot, pair, cur_px, f"Tail risk: price {cur_px:.2f} < {tail_level:.2f} (floor - 2*ATR)")
+                return
+    
+    # --- STATE: FOLLOW (grids exist, follow enabled) ---
+    if has_grids:
+        follow_enabled = settings.get('follow', False)
+        if follow_enabled:
+            grid_follow(bot_id, bot, pair, cur_px, df)
+        # Clear any previous halt state since we're running normally
+        settings.pop('halted_reason', None)
+        settings.pop('halted_at', None)
+        return
+    
+    # --- STATE: INIT (no active grids → deploy) ---
+    # Don't init during adverse conditions
+    if curr_adx >= 25:
+        print(f"[GRID BOT | {pair}] DORMANT: ADX={curr_adx:.1f} >= 25. Waiting to deploy.")
+        return
 
     deriv_flag = is_derivative(pair)
     mult = get_contract_multiplier(pair)
-
-    inventory_value = bot['asset_held'] * cur_px * mult
-    inventory_pct = inventory_value / bot['allocated_usd'] if bot['allocated_usd'] > 0 else 0.0
-
-    lower = settings.get('lower_price')
+    
     upper = settings.get('upper_price')
     grid_count = settings.get('grid_count')
     mode = settings.get('mode', 'LONG').upper()
-    step_pct = settings.get('step_pct', 0.6) / 100.0  # Convert to decimal
+    step_pct = settings.get('step_pct', 0.6) / 100.0
 
-    signal, reason = calculate_advanced_grid(df, lower, upper, grid_count, inventory_pct)
+    if not lower or not upper or upper <= lower:
+        print(f"[GRID BOT | {pair}] Invalid floor/ceiling: {lower}/{upper}. Reconfigure.")
+        return
+
+    step = cur_px * step_pct
+    new_grids = []
     
-    if "HALT" in reason or "DORMANT" in reason:
-        print(f"[GRID BOT | {pair}] {reason}")
-        return 
-
-    # 2. Grid Array Initialization (only runs once)
-    if 'active_grids' not in settings:
-        step = cur_px * step_pct  # Step based on percentage, not range division
-        active_grids = []
+    settings['base_inc'] = str(base_inc)
+    settings['quote_inc'] = str(quote_inc)
+    
+    # Generate levels
+    buy_levels, sell_levels = [], []
+    level = lower
+    while level <= upper:
+        if level < cur_px * 0.999:
+            buy_levels.append(level)
+        elif level > cur_px * 1.001:
+            sell_levels.append(level)
+        level += step
+    
+    if mode == 'LONG':
+        sell_levels = []
+    elif mode == 'SHORT':
+        buy_levels = []
+        if not deriv_flag:
+            print(f"[GRID BOT | {pair}] WARNING: SHORT mode on spot requires inventory.")
+    
+    total_orders = len(buy_levels) + len(sell_levels)
+    if total_orders == 0:
+        print(f"[GRID BOT | {pair}] No valid levels in range.")
+        return
         
-        # Store constraints for WS thread
-        settings['base_inc'] = str(base_inc)
-        settings['quote_inc'] = str(quote_inc)
-        
-        # Determine which levels to place based on mode
-        buy_levels = []   # Prices below current where we place BUY limits
-        sell_levels = []   # Prices above current where we place SELL limits
-        
-        # Generate levels from floor to ceiling at step intervals
-        level = lower
-        while level <= upper:
-            if level < cur_px * 0.999:  # Below current price
-                buy_levels.append(level)
-            elif level > cur_px * 1.001:  # Above current price
-                sell_levels.append(level)
-            level += step
-        
-        # Filter by mode
-        if mode == 'LONG':
-            sell_levels = []
-        elif mode == 'SHORT':
-            buy_levels = []
-            if not deriv_flag:
-                print(f"[GRID BOT | {pair}] WARNING: SHORT mode on spot requires asset inventory.")
-        # BOTH: use both lists as-is
-        
-        total_orders = len(buy_levels) + len(sell_levels)
-        if total_orders == 0:
-            print(f"[GRID BOT | {pair}] No valid grid levels in range. Check floor/ceiling.")
-            return
+    chunk_size_usd = bot['current_usd'] / total_orders
+    
+    # Place BUY orders
+    for price in buy_levels:
+        g = place_grid_buy(pair, price, chunk_size_usd, base_inc, quote_inc, deriv_flag, mult)
+        if g: new_grids.append(g)
+    
+    # Place SELL orders
+    if sell_levels:
+        if deriv_flag:
+            for price in sell_levels:
+                g = place_grid_sell(pair, price, 0, base_inc, quote_inc, deriv_flag, mult,
+                                  use_chunk=True, chunk_usd=chunk_size_usd)
+                if g: new_grids.append(g)
+        else:
+            # Spot: buy inventory first
+            total_sell_qty = sum(float(chunk_size_usd * 0.99) / p for p in sell_levels)
+            total_sell_cost = total_sell_qty * cur_px
             
-        chunk_size_usd = bot['current_usd'] / total_orders
-        
-        # --- Place BUY orders below price ---
-        for price in buy_levels:
-            if deriv_flag:
-                grid_qty = int(chunk_size_usd / (price * mult))
-                if grid_qty < 1: continue
-            else:
-                grid_qty = float(chunk_size_usd * 0.99) / price
-
-            str_price = snap_to_increment(price, quote_inc)
-            str_qty = snap_to_increment(grid_qty, base_inc)
-            if float(str_qty) <= 0: continue
-
-            oid = str(uuid.uuid4())
-            try:
-                api_res = client.limit_order_gtc_buy(
-                    client_order_id=oid, product_id=pair,
-                    base_size=str_qty, limit_price=str_price, post_only=True
-                )
-                success = getattr(api_res, 'success', False) or (isinstance(api_res, dict) and api_res.get('success', False))
-                fail_reason = getattr(api_res, 'failure_reason', '') or (isinstance(api_res, dict) and api_res.get('failure_reason', ''))
-                if success or fail_reason == 'UNKNOWN_FAILURE_REASON':
-                    active_grids.append({"price": float(str_price), "side": "BUY", "oid": oid})
-                else:
-                    print(f"[GRID INIT] BUY Blocked at {str_price}: {fail_reason}")
-            except Exception as e: print(f"[GRID INIT] BUY Exception at {str_price}: {e}")
-        
-        # --- Place SELL orders above price ---
-        if sell_levels:
-            if deriv_flag:
-                # Derivatives: place sells directly, no inventory needed
-                for price in sell_levels:
-                    grid_qty = int(chunk_size_usd / (price * mult))
-                    if grid_qty < 1: continue
+            if total_sell_cost <= bot['current_usd'] * 0.95:
+                try:
+                    buy_oid = str(uuid.uuid4())
+                    client.market_order_buy(client_order_id=buy_oid, product_id=pair,
+                                          quote_size=str(round(total_sell_cost * 0.99, 2)))
+                    bot['asset_held'] += total_sell_qty
+                    bot['current_usd'] -= total_sell_cost
+                    print(f"[GRID INIT] Market bought {total_sell_qty:.6f} inventory for sell grid")
+                    time.sleep(1)
                     
-                    str_price = snap_to_increment(price, quote_inc)
-                    str_qty = snap_to_increment(grid_qty, base_inc)
-                    if float(str_qty) <= 0: continue
-
-                    oid = str(uuid.uuid4())
-                    try:
-                        api_res = client.limit_order_gtc_sell(
-                            client_order_id=oid, product_id=pair,
-                            base_size=str_qty, limit_price=str_price, post_only=True
-                        )
-                        success = getattr(api_res, 'success', False) or (isinstance(api_res, dict) and api_res.get('success', False))
-                        fail_reason = getattr(api_res, 'failure_reason', '') or (isinstance(api_res, dict) and api_res.get('failure_reason', ''))
-                        if success or fail_reason == 'UNKNOWN_FAILURE_REASON':
-                            active_grids.append({"price": float(str_price), "side": "SELL", "oid": oid})
-                        else:
-                            print(f"[GRID INIT] SELL Blocked at {str_price}: {fail_reason}")
-                    except Exception as e: print(f"[GRID INIT] SELL Exception at {str_price}: {e}")
+                    for price in sell_levels:
+                        qty = float(chunk_size_usd * 0.99) / price
+                        g = place_grid_sell(pair, price, qty, base_inc, quote_inc, deriv_flag, mult)
+                        if g: new_grids.append(g)
+                except Exception as e:
+                    print(f"[GRID INIT] Inventory buy failed: {e}")
             else:
-                # Spot: market buy inventory first, then place sell limits
-                total_sell_qty = sum(float(chunk_size_usd * 0.99) / p for p in sell_levels)
-                total_sell_cost = total_sell_qty * cur_px
-                
-                if total_sell_cost <= bot['current_usd'] * 0.95:
-                    try:
-                        buy_oid = str(uuid.uuid4())
-                        client.market_order_buy(
-                            client_order_id=buy_oid, product_id=pair,
-                            quote_size=str(round(total_sell_cost * 0.99, 2))
-                        )
-                        bot['asset_held'] += total_sell_qty
-                        bot['current_usd'] -= total_sell_cost
-                        print(f"[GRID INIT] Market bought {total_sell_qty:.6f} inventory for sell grid")
-                        time.sleep(1)  # Let fill settle
-                        
-                        for price in sell_levels:
-                            grid_qty = float(chunk_size_usd * 0.99) / price
-                            str_price = snap_to_increment(price, quote_inc)
-                            str_qty = snap_to_increment(grid_qty, base_inc)
-                            if float(str_qty) <= 0: continue
-
-                            oid = str(uuid.uuid4())
-                            try:
-                                api_res = client.limit_order_gtc_sell(
-                                    client_order_id=oid, product_id=pair,
-                                    base_size=str_qty, limit_price=str_price, post_only=True
-                                )
-                                success = getattr(api_res, 'success', False) or (isinstance(api_res, dict) and api_res.get('success', False))
-                                fail_reason = getattr(api_res, 'failure_reason', '') or (isinstance(api_res, dict) and api_res.get('failure_reason', ''))
-                                if success or fail_reason == 'UNKNOWN_FAILURE_REASON':
-                                    active_grids.append({"price": float(str_price), "side": "SELL", "oid": oid})
-                                else:
-                                    print(f"[GRID INIT] SELL Blocked at {str_price}: {fail_reason}")
-                            except Exception as e: print(f"[GRID INIT] SELL Exception at {str_price}: {e}")
-                    except Exception as e:
-                        print(f"[GRID INIT] Inventory buy failed: {e}. Skipping sell side.")
-                else:
-                    print(f"[GRID INIT] Insufficient capital for sell-side inventory. Skipping sell grid.")
-        
-        if active_grids:
-            bot['settings']['active_grids'] = active_grids
-            bot['settings']['step_size'] = step
-            bot['settings']['chunk_size'] = chunk_size_usd
-            save_bots()
-            print(f"[GRID BOT] Deployed {len(active_grids)} levels ({mode} mode, {step_pct*100:.1f}% step)")
-            
-    # REST Monitoring loop is deliberately bypassed; handoff to WS Listener complete.
+                print(f"[GRID INIT] Insufficient capital for sell inventory. Skipping sell side.")
+    
+    if new_grids:
+        bot['settings']['active_grids'] = new_grids
+        bot['settings']['step_size'] = step
+        bot['settings']['chunk_size'] = chunk_size_usd
+        save_bots()
+        print(f"[GRID BOT] Deployed {len(new_grids)} levels ({mode} mode, {step_pct*100:.1f}% step, follow={'ON' if settings.get('follow') else 'OFF'})")
 
 @bot_manager_bp.route('/api/bots', methods=['GET'])
 def get_bots():
@@ -855,6 +1106,20 @@ def update_bot_tf(bot_id):
     ACTIVE_BOTS[bot_id]['timeframe'] = tf
     save_bots()
     return jsonify(success=True, message=f"Timeframe updated to {tf}. Active on next cycle.")
+
+@bot_manager_bp.route('/api/bots/follow/<bot_id>', methods=['POST'])
+def update_bot_follow(bot_id):
+    """Toggle follow mode for a grid bot."""
+    if bot_id not in ACTIVE_BOTS:
+        return jsonify(success=False, error="Bot not found.")
+    bot = ACTIVE_BOTS[bot_id]
+    if bot.get('strategy') != 'GRID':
+        return jsonify(success=False, error="Follow mode is only available for GRID bots.")
+    d = request.json
+    follow = bool(d.get('follow', False))
+    bot.setdefault('settings', {})['follow'] = follow
+    save_bots()
+    return jsonify(success=True, message=f"Follow mode {'enabled' if follow else 'disabled'}.")
 
 @bot_manager_bp.route('/api/bots/stop/<bot_id>', methods=['POST'])
 def stop_bot(bot_id):
