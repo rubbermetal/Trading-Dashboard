@@ -213,3 +213,156 @@ def calculate_orb(df, pos_side="FLAT"):
         return "SHORT", f"Breakout Below 60m Low ({range_low}). SL at {midpoint}"
 
     return "HOLD", f"Ranging inside 60m Box ({range_low} - {range_high})"
+
+def calculate_trap(df, pos_side="FLAT", entry_stage=0, avg_entry=0.0, breakout_data=None):
+    """
+    TRAP Strategy: Consolidation Squeeze -> Momentum Breakout
+    
+    Entry Logic:
+    1. SMA 20 and SMA 200 must be flat (low slope)
+    2. SMA 20 and SMA 200 must be converged (within 1.5%)
+    3. Power candle breaks out of zone with body > 1x ATR
+    4. Close beyond zone edge + 0.5x ATR
+    5. Volume > 1.5x average confirms conviction
+    
+    Position Sizing:
+    - Stage 1: 25% on breakout candle
+    - Stage 2: 75% on first pullback (opposite color, body < 1x ATR, < 50% retrace)
+    
+    Exit:
+    - TP: 2.5% from avg entry
+    - SL: 1x ATR from avg entry (direction-aware)
+    """
+    if len(df) < 210:
+        return "HOLD", "Not enough data", {}
+
+    c = df['close']
+    o = df['open']
+    h = df['high']
+    l = df['low']
+
+    # --- Indicators ---
+    df['SMA_20'] = ta.sma(c, 20)
+    df['SMA_200'] = ta.sma(c, 200)
+    df['ATR'] = ta.atr(h, l, c, 14)
+    df['VOL_AVG'] = ta.sma(df['volume'], 20)
+
+    curr = df.iloc[-1]
+    prev = df.iloc[-2]
+
+    if pd.isna(curr['SMA_200']) or pd.isna(curr['ATR']) or curr['ATR'] <= 0:
+        return "HOLD", "Warming up indicators", {}
+
+    atr = curr['ATR']
+    sma20 = curr['SMA_20']
+    sma200 = curr['SMA_200']
+    vol_avg = curr['VOL_AVG'] if not pd.isna(curr['VOL_AVG']) else 0
+
+    # --- EXIT LOGIC (checked first) ---
+    if pos_side in ('LONG', 'SHORT') and avg_entry > 0:
+        if pos_side == 'LONG':
+            pnl_pct = (curr['close'] - avg_entry) / avg_entry
+            sl_price = avg_entry - atr
+            if curr['close'] <= sl_price:
+                return "EXIT_LONG", f"STOP LOSS: Price {curr['close']:.2f} hit ATR stop {sl_price:.2f}", {}
+            if pnl_pct >= 0.025:
+                return "EXIT_LONG", f"TAKE PROFIT: +{pnl_pct*100:.1f}% from entry {avg_entry:.2f}", {}
+        elif pos_side == 'SHORT':
+            pnl_pct = (avg_entry - curr['close']) / avg_entry
+            sl_price = avg_entry + atr
+            if curr['close'] >= sl_price:
+                return "EXIT_SHORT", f"STOP LOSS: Price {curr['close']:.2f} hit ATR stop {sl_price:.2f}", {}
+            if pnl_pct >= 0.025:
+                return "EXIT_SHORT", f"TAKE PROFIT: +{pnl_pct*100:.1f}% from entry {avg_entry:.2f}", {}
+
+    # --- STAGE 2: ADD to position on pullback ---
+    if pos_side != 'FLAT' and entry_stage == 1 and breakout_data:
+        bo_close = breakout_data.get('close', 0)
+        bo_open = breakout_data.get('open', 0)
+        bo_body = abs(bo_close - bo_open)
+
+        curr_body = abs(curr['close'] - curr['open'])
+        is_opposite_color = (pos_side == 'LONG' and curr['close'] < curr['open']) or \
+                           (pos_side == 'SHORT' and curr['close'] > curr['open'])
+
+        if is_opposite_color:
+            # Check: body < 1x ATR (not a substantial reversal)
+            body_ok = curr_body < atr
+            # Check: doesn't retrace > 50% of breakout
+            if pos_side == 'LONG':
+                retrace = (bo_close - curr['close']) / bo_body if bo_body > 0 else 999
+            else:
+                retrace = (curr['close'] - bo_close) / bo_body if bo_body > 0 else 999
+            retrace_ok = retrace < 0.5
+
+            if body_ok and retrace_ok:
+                return "ADD_LONG" if pos_side == 'LONG' else "ADD_SHORT", \
+                    f"ADD: Pullback candle retrace {retrace*100:.0f}%, body {curr_body:.2f} < ATR {atr:.2f}", {}
+            elif not body_ok:
+                return "HOLD", f"Pullback too strong (body {curr_body:.2f} >= ATR {atr:.2f}). Skipping add.", {}
+
+        return "HOLD", "Waiting for pullback candle to add position", {}
+
+    # --- STAGE 1: BREAKOUT DETECTION (only when FLAT) ---
+    if pos_side != 'FLAT':
+        return "HOLD", "In position, monitoring TP/SL", {}
+
+    # 1. SMA FLATNESS: slope of SMA over last 20 bars as percentage
+    sma20_start = df['SMA_20'].iloc[-21] if len(df) > 21 else df['SMA_20'].iloc[0]
+    sma200_start = df['SMA_200'].iloc[-21] if len(df) > 21 else df['SMA_200'].iloc[0]
+
+    sma20_slope = abs((sma20 - sma20_start) / sma20_start) if sma20_start > 0 else 999
+    sma200_slope = abs((sma200 - sma200_start) / sma200_start) if sma200_start > 0 else 999
+
+    if sma20_slope > 0.003:
+        return "HOLD", f"SMA20 not flat (slope: {sma20_slope*100:.2f}% > 0.3%)", {}
+    if sma200_slope > 0.0015:
+        return "HOLD", f"SMA200 not flat (slope: {sma200_slope*100:.2f}% > 0.15%)", {}
+
+    # 2. SMA CONVERGENCE: within 1.5% of each other
+    sma_gap = abs(sma20 - sma200) / max(sma20, sma200)
+    if sma_gap > 0.015:
+        return "HOLD", f"SMAs not converged (gap: {sma_gap*100:.1f}% > 1.5%)", {}
+
+    # 3. DEFINE THE TRAP ZONE
+    zone_upper = max(sma20, sma200)
+    zone_lower = min(sma20, sma200)
+    zone_mid = (zone_upper + zone_lower) / 2
+
+    # 4. POWER CANDLE CHECK
+    curr_body = abs(curr['close'] - curr['open'])
+    is_bull = curr['close'] > curr['open']
+    is_bear = curr['close'] < curr['open']
+
+    body_big = curr_body > atr
+    volume_confirmed = curr['volume'] > (vol_avg * 1.5) if vol_avg > 0 else False
+
+    if not body_big:
+        return "HOLD", f"No power candle (body {curr_body:.2f} < ATR {atr:.2f})", {}
+    if not volume_confirmed:
+        return "HOLD", f"Volume weak ({curr['volume']:.0f} < 1.5x avg {vol_avg:.0f})", {}
+
+    # 5. BREAKOUT DIRECTION
+    breakout_threshold_long = zone_upper + (0.5 * atr)
+    breakout_threshold_short = zone_lower - (0.5 * atr)
+
+    bo_data = {
+        'open': float(curr['open']),
+        'close': float(curr['close']),
+        'high': float(curr['high']),
+        'low': float(curr['low']),
+        'atr': float(atr)
+    }
+
+    if is_bull and curr['close'] > breakout_threshold_long:
+        return "BREAKOUT_LONG", \
+            f"TRAP BREAKOUT LONG: Close {curr['close']:.2f} > zone {zone_upper:.2f} + 0.5*ATR. Body={curr_body:.2f}, Vol={curr['volume']:.0f}", \
+            bo_data
+
+    if is_bear and curr['close'] < breakout_threshold_short:
+        return "BREAKOUT_SHORT", \
+            f"TRAP BREAKOUT SHORT: Close {curr['close']:.2f} < zone {zone_lower:.2f} - 0.5*ATR. Body={curr_body:.2f}, Vol={curr['volume']:.0f}", \
+            bo_data
+
+    return "HOLD", f"Consolidating in zone ({zone_lower:.2f} - {zone_upper:.2f}). Waiting for breakout.", {}
+

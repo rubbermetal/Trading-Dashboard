@@ -248,6 +248,7 @@
                                     <option value="QUAD_SUPER">Quad Super Signal (Extreme Reversals)</option>
                                     <option value="ORB">ORB (Midnight Breakout - Perps Only)</option>
                                     <option value="GRID">Grid Bot (Ranging Cashflow)</option>
+                                    <option value="TRAP">Trap (Consolidation Breakout)</option>
                                 </select>
                             </div>
 
@@ -408,15 +409,16 @@
     </div>
 
     <div class="modal fade" id="botChartModal" tabindex="-1">
-        <div class="modal-dialog modal-xl modal-dialog-centered"><div class="modal-content card-custom p-3 shadow-lg">
+        <div class="modal-dialog modal-fullscreen-sm-down modal-xl modal-dialog-centered"><div class="modal-content card-custom p-2 p-md-3 shadow-lg">
             <div class="d-flex justify-content-between align-items-center mb-2">
                 <div>
-                    <h5 class="fw-bold text-primary mb-0" id="bot-chart-title"><i class="bi bi-graph-up me-2"></i>Bot Chart</h5>
-                    <small class="text-muted" id="bot-chart-subtitle"></small>
+                    <h5 class="fw-bold text-primary mb-0" id="bot-chart-title" style="font-size:1rem;"><i class="bi bi-graph-up me-2"></i>Bot Chart</h5>
+                    <small class="text-muted" id="bot-chart-subtitle" style="font-size:0.6rem;"></small>
                 </div>
                 <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
             </div>
-            <div id="bot-chart-container" style="height: 480px; width: 100%;"></div>
+            <div id="bot-chart-container" style="width:100%; height:50vh; min-height:250px;"></div>
+            <div id="bot-chart-info" class="border-top border-secondary pt-2 mt-2" style="font-size:0.65rem;"></div>
         </div></div>
     </div>
 
@@ -450,7 +452,7 @@
         let chartTF = "15m";
 
         // Strategy -> native timeframe mapping
-        const STRATEGY_TF = { "QUAD": "15m", "QUAD_SUPER": "15m", "ORB": "5m", "GRID": "1h" };
+        const STRATEGY_TF = { "QUAD": "15m", "QUAD_SUPER": "15m", "ORB": "5m", "GRID": "1h", "TRAP": "15m" };
         const TF_LABELS = { "1m": "1m", "5m": "5m", "15m": "15m", "1h": "1H", "6h": "6H", "1d": "1D" };
 
         // Scanner state
@@ -549,12 +551,17 @@
 
             const candles = await fetchCandles(pair, chartTF);
             if (candles.length) {
-                rawCandles = candles;  // Store uncolored candles for scanner toggle off
+                rawCandles = candles;
                 mainCandleSeries.setData(candles);
                 mainVolumeSeries.setData(buildVolumeData(candles));
-                mainChart.timeScale().fitContent();
                 
-                // Update trade panel with latest candle close
+                // Show last 100 candles at readable zoom
+                const barsToShow = Math.min(100, candles.length);
+                mainChart.timeScale().setVisibleLogicalRange({
+                    from: candles.length - barsToShow,
+                    to: candles.length + 5
+                });
+                
                 const lastPx = candles[candles.length - 1].close;
                 activePairPrice = lastPx;
                 const prod = allProducts.find(p => p.id === pair);
@@ -723,17 +730,18 @@
         async function openBotChart(botId, pair, strategy, botTf) {
             const tf = botTf || STRATEGY_TF[strategy] || '1h';
             document.getElementById('bot-chart-title').innerHTML = `<i class="bi bi-graph-up me-2"></i>${pair}`;
-            document.getElementById('bot-chart-subtitle').innerText = `${strategy} Bot -- ${TF_LABELS[tf] || tf} candles -- ID: ${botId}`;
+            document.getElementById('bot-chart-subtitle').innerText = `${strategy} Bot -- ${(TF_LABELS[tf] || tf).toUpperCase()} -- ID: ${botId}`;
+            document.getElementById('bot-chart-info').innerHTML = '<span class="text-muted">Loading...</span>';
             
             botChartModal.show();
-            
-            // Small delay for modal to render so container has dimensions
-            await new Promise(r => setTimeout(r, 150));
+            await new Promise(r => setTimeout(r, 200));
             
             const container = document.getElementById('bot-chart-container');
             container.innerHTML = '';
             
-            const chart = createChart(container, 460);
+            // Use actual container dimensions
+            const chart = createChart(container, container.clientHeight || 300);
+            chart.applyOptions({ width: container.clientWidth });
             const series = addCandleAndVolume(chart);
 
             // Fetch candles
@@ -743,44 +751,160 @@
                 series.volume.setData(buildVolumeData(candles));
             }
 
-            // Fetch trade log and overlay markers
+            // Fetch bot data for grid levels, stats, and state
+            let botData = null;
+            try {
+                const br = await fetch('/api/bots');
+                const allBots = await br.json();
+                botData = allBots[botId];
+            } catch (e) { console.error('Bot data fetch error:', e); }
+
+            // --- GRID BOT: Draw levels, floor, ceiling as price lines (won't distort scale) ---
+            if (botData && strategy === 'GRID') {
+                const s = botData.settings || {};
+                const grids = s.active_grids || [];
+
+                // Floor
+                if (s.lower_price) {
+                    series.candles.createPriceLine({
+                        price: s.lower_price,
+                        color: 'rgba(0,213,120,0.6)',
+                        lineWidth: 1, lineStyle: 2,
+                        axisLabelVisible: true,
+                        title: 'FLOOR',
+                    });
+                }
+
+                // Ceiling
+                if (s.upper_price) {
+                    series.candles.createPriceLine({
+                        price: s.upper_price,
+                        color: 'rgba(255,75,92,0.6)',
+                        lineWidth: 1, lineStyle: 2,
+                        axisLabelVisible: true,
+                        title: 'CEIL',
+                    });
+                }
+
+                // Individual grid levels
+                grids.forEach(g => {
+                    series.candles.createPriceLine({
+                        price: g.price,
+                        color: g.side === 'BUY' ? 'rgba(0,213,120,0.3)' : 'rgba(255,75,92,0.3)',
+                        lineWidth: 1, lineStyle: 1,
+                        axisLabelVisible: false,
+                        title: '',
+                    });
+                });
+            }
+
+            // --- ALL BOTS: Entry price line if in position ---
+            if (botData && botData.position_side !== 'FLAT') {
+                const entryPx = (strategy === 'TRAP' && botData.avg_entry) ? botData.avg_entry : botData.entry_price;
+                if (entryPx) {
+                    series.candles.createPriceLine({
+                        price: entryPx,
+                        color: '#FFD700',
+                        lineWidth: 2, lineStyle: 0,
+                        axisLabelVisible: true,
+                        title: strategy === 'TRAP' ? 'AVG' : 'ENTRY',
+                    });
+                }
+            }
+
+            // --- Trade markers ---
             try {
                 const r = await fetch(`/api/bots/${botId}/trades`);
                 const trades = await r.json();
                 if (trades.length) {
-                    const markers = trades.map(t => {
-                        const ts = Math.floor(new Date(t.timestamp).getTime() / 1000);
-                        // Find the nearest candle time (snap to candle boundary)
-                        let snapped = ts;
+                    const markers = [];
+                    trades.forEach(t => {
+                        const exitTs = Math.floor(new Date(t.timestamp).getTime() / 1000);
+                        let exitSnapped = exitTs;
                         if (candles.length) {
-                            const closest = candles.reduce((prev, curr) => Math.abs(curr.time - ts) < Math.abs(prev.time - ts) ? curr : prev);
-                            snapped = closest.time;
+                            const closest = candles.reduce((prev, curr) => Math.abs(curr.time - exitTs) < Math.abs(prev.time - exitTs) ? curr : prev);
+                            exitSnapped = closest.time;
                         }
-
-                        const isEntry = false; // trade log only records completed round-trips
                         const isWin = t.pnl >= 0;
-                        const isSell = true; // these are exits
-
-                        return {
-                            time: snapped,
-                            position: t.side === 'LONG' ? 'aboveBar' : 'belowBar',
+                        markers.push({
+                            time: exitSnapped,
+                            position: 'aboveBar',
                             color: isWin ? '#00d578' : '#ff4b5c',
-                            shape: t.side === 'LONG' ? 'arrowDown' : 'arrowUp',
-                            text: `${isWin ? '+' : ''}$${t.pnl.toFixed(2)} (${t.exit_reason})`
-                        };
-                    }).sort((a, b) => a.time - b.time);
-                    
-                    series.candles.setMarkers(markers);
+                            shape: 'arrowDown',
+                            text: `${isWin ? '+' : ''}$${t.pnl.toFixed(2)}`
+                        });
+                    });
+                    const seen = {};
+                    const unique = markers.filter(m => { if (seen[m.time]) return false; seen[m.time] = true; return true; });
+                    series.candles.setMarkers(unique.sort((a, b) => a.time - b.time));
                 }
             } catch (e) { console.error('Trade log fetch error:', e); }
 
-            chart.timeScale().fitContent();
+            // --- INFO PANEL ---
+            const infoEl = document.getElementById('bot-chart-info');
+            if (botData) {
+                const s = botData.stats || {};
+                const settings = botData.settings || {};
+                const wr = s.win_rate || 0;
+                const wrClass = wr >= 50 ? 'text-success-custom' : wr > 0 ? 'text-danger-custom' : 'text-muted';
+                const tpnl = s.total_pnl || 0;
+                const tpClass = tpnl >= 0 ? 'text-success-custom' : 'text-danger-custom';
+                const pos = botData.position_side || 'FLAT';
+                const posClass = pos === 'LONG' ? 'text-success-custom' : pos === 'SHORT' ? 'text-danger-custom' : 'text-muted';
 
-            // Responsive
-            const ro = new ResizeObserver(() => chart.applyOptions({ width: container.clientWidth }));
+                let statusBadges = '';
+                if (strategy === 'GRID') {
+                    const grids = settings.active_grids || [];
+                    const buys = grids.filter(g => g.side === 'BUY').length;
+                    const sells = grids.filter(g => g.side === 'SELL').length;
+                    const followOn = settings.follow ? '<span class="badge bg-info text-dark">FOLLOW</span>' : '';
+                    const haltBadge = settings.halted ? '<span class="badge bg-danger">HALTED</span>' : '';
+                    const modeBadge = `<span class="badge bg-dark border border-secondary">${settings.mode || 'LONG'}</span>`;
+                    const stepBadge = `<span class="badge bg-dark border border-secondary">${settings.step_pct || 0.6}%</span>`;
+                    
+                    statusBadges = `<div class="d-flex gap-1 flex-wrap mb-1">${modeBadge}${stepBadge}${followOn}${haltBadge}<span class="badge bg-dark border border-success">${buys}B</span><span class="badge bg-dark border border-danger">${sells}S</span></div>`;
+                }
+
+                if (strategy === 'TRAP') {
+                    const stage = botData.entry_stage || 0;
+                    const stageBadge = stage === 0 ? '<span class="badge bg-dark border border-secondary">SCANNING</span>'
+                        : stage === 1 ? '<span class="badge bg-warning text-dark">STAGE 1 (25%)</span>'
+                        : '<span class="badge bg-success text-dark">STAGE 2 (100%)</span>';
+                    const avgE = botData.avg_entry ? `<span class="badge bg-dark border border-info">Avg $${Number(botData.avg_entry).toLocaleString()}</span>` : '';
+                    statusBadges = `<div class="d-flex gap-1 flex-wrap mb-1">${stageBadge}${avgE}</div>`;
+                }
+
+                infoEl.innerHTML = `${statusBadges}<div class="d-flex flex-wrap gap-3">
+                    <div><span class="text-muted">Pos</span> <b class="${posClass}">${pos}${botData.entry_price ? ' $' + Number(botData.entry_price).toLocaleString() : ''}</b></div>
+                    <div><span class="text-muted">USD</span> <b>$${(botData.current_usd || 0).toFixed(2)}</b></div>
+                    <div><span class="text-muted">Held</span> <b>${(botData.asset_held || 0).toFixed(6)}</b></div>
+                    <div><span class="text-muted">Trades</span> <b>${s.total_trades || 0}</b></div>
+                    <div><span class="text-muted">WR</span> <b class="${wrClass}">${wr.toFixed(0)}%</b></div>
+                    <div><span class="text-muted">PnL</span> <b class="${tpClass}">${tpnl >= 0 ? '+' : ''}$${tpnl.toFixed(2)}</b></div>
+                    <div><span class="text-muted">Unreal</span> <b class="${(botData.live_pnl||0) >= 0 ? 'text-success-custom' : 'text-danger-custom'}">${(botData.live_pnl||0) >= 0 ? '+' : ''}$${(botData.live_pnl||0).toFixed(2)}</b></div>
+                </div>`;
+            } else {
+                infoEl.innerHTML = '<span class="text-muted">Could not load bot data.</span>';
+            }
+
+            // Show last 80 candles instead of cramming all 300 on screen
+            if (candles.length > 0) {
+                const barsToShow = Math.min(80, candles.length);
+                chart.timeScale().setVisibleLogicalRange({
+                    from: candles.length - barsToShow,
+                    to: candles.length + 5
+                });
+            }
+
+            // Responsive resize
+            const ro = new ResizeObserver(() => {
+                if (chart) {
+                    chart.applyOptions({ width: container.clientWidth, height: container.clientHeight });
+                }
+            });
             ro.observe(container);
 
-            // Cleanup chart when modal closes
+            // Cleanup on close
             document.getElementById('botChartModal').addEventListener('hidden.bs.modal', function handler() {
                 chart.remove();
                 ro.disconnect();
@@ -839,7 +963,12 @@
                             color: c.close >= c.open ? 'rgba(0,213,120,0.15)' : 'rgba(255,75,92,0.15)'
                         })));
                     }
-                    mainChart.timeScale().fitContent();
+                    const sc = scannerData.candles;
+                    const barsToShow = Math.min(100, sc.length);
+                    mainChart.timeScale().setVisibleLogicalRange({
+                        from: sc.length - barsToShow,
+                        to: sc.length + 5
+                    });
                 }
 
                 // Re-apply any active overlays with fresh data
@@ -1155,7 +1284,7 @@
         // ==========================================
         // BOT MANAGER LOGIC
         // ==========================================
-        const STRATEGY_DEFAULT_TFS = { QUAD: '15m', QUAD_SUPER: '15m', ORB: '5m', GRID: '1h' };
+        const STRATEGY_DEFAULT_TFS = { QUAD: '15m', QUAD_SUPER: '15m', ORB: '5m', GRID: '1h', TRAP: '15m' };
 
         function toggleBotSettings() {
             const strat = document.getElementById('bot-strategy').value;

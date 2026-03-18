@@ -9,7 +9,7 @@ from decimal import Decimal, ROUND_DOWN
 from flask import Blueprint, jsonify, request
 from datetime import datetime, timezone
 from shared import client, ACTIVE_BOTS, new_bot_stats
-from strategies import calculate_quad_rotation, calculate_quad_super, calculate_orb, calculate_advanced_grid
+from strategies import calculate_quad_rotation, calculate_quad_super, calculate_orb, calculate_advanced_grid, calculate_trap
 
 bot_manager_bp = Blueprint('bot_manager', __name__)
 BOTS_FILE = "bots.json"
@@ -34,6 +34,7 @@ STRATEGY_DEFAULT_TF = {
     "QUAD_SUPER": "15m",
     "ORB":        "5m",
     "GRID":       "1h",
+    "TRAP":       "15m",
 }
 
 def get_bot_tf(bot):
@@ -175,6 +176,8 @@ def run_bot(bot_id):
                 execute_orb(bot_id, bot, pair)
             elif strategy == 'GRID':
                 execute_grid_bot(bot_id, bot, pair)
+            elif strategy == 'TRAP':
+                execute_trap(bot_id, bot, pair)
         except Exception as e:
             print(f"[BOT ENGINE] Error in {pair} {strategy} bot: {e}")
             
@@ -383,6 +386,200 @@ def execute_quad(bot_id, bot, pair, mode='STANDARD'):
             bot['position_side'] = 'FLAT'
             save_bots()
         except Exception as e: print(f"Order failed: {e}")
+
+# ==========================================
+# TRAP STRATEGY EXECUTOR
+# ==========================================
+def execute_trap(bot_id, bot, pair):
+    """
+    TRAP: Consolidation Squeeze -> Momentum Breakout
+    Two-stage entry (25% breakout, 75% pullback add).
+    TP 2.5%, SL 1x ATR.
+    """
+    cb_gran, tf_sec = get_bot_tf(bot)
+    end_ts = int(time.time())
+    start_ts = end_ts - (250 * tf_sec)
+    try:
+        res = client.get(f"/api/v3/brokerage/products/{pair}/candles", params={
+            "start": str(start_ts), "end": str(end_ts), "granularity": cb_gran
+        })
+        candles = res.get('candles', [])
+    except Exception as e:
+        print(f"[TRAP BOT | {pair}] Candle fetch error: {e}")
+        return
+    if len(candles) < 210: return
+
+    parsed = [{'start': int(c['start']), 'open': float(c['open']), 'high': float(c['high']),
+               'low': float(c['low']), 'close': float(c['close']), 'volume': float(c.get('volume', 0))}
+              for c in candles]
+    df = pd.DataFrame(parsed).sort_values('start').reset_index(drop=True)
+
+    pos_side = bot.get('position_side', 'FLAT')
+    entry_stage = bot.get('entry_stage', 0)
+    avg_entry = bot.get('avg_entry', 0.0)
+    breakout_data = bot.get('breakout_data', None)
+    current_px = float(df.iloc[-1]['close'])
+
+    deriv_flag = is_derivative(pair)
+    mult = get_contract_multiplier(pair)
+
+    signal, reason, bo_data = calculate_trap(df, pos_side, entry_stage, avg_entry, breakout_data)
+    print(f"[TRAP BOT | {pair}] {signal}: {reason}")
+
+    # --- BREAKOUT ENTRY (25% of capital) ---
+    if signal == 'BREAKOUT_LONG' and pos_side == 'FLAT' and bot['current_usd'] > 5.0:
+        # Spot only for longs
+        alloc = bot['current_usd'] * 0.25
+        if deriv_flag:
+            qty = int((alloc * 0.99) / (current_px * mult))
+            if qty < 1:
+                print(f"[TRAP BOT | {pair}] Insufficient for 1 contract at 25%")
+                return
+        else:
+            qty = round((alloc * 0.99) / current_px, 6)
+
+        try:
+            oid = str(uuid.uuid4())
+            if deriv_flag:
+                client.market_order_buy(client_order_id=oid, product_id=pair, base_size=str(qty))
+            else:
+                client.market_order_buy(client_order_id=oid, product_id=pair, quote_size=str(round(alloc * 0.99, 2)))
+
+            bot['asset_held'] = qty
+            bot['current_usd'] -= alloc
+            bot['position_side'] = 'LONG'
+            bot['entry_price'] = current_px
+            bot['avg_entry'] = current_px
+            bot['entry_stage'] = 1
+            bot['breakout_data'] = bo_data
+            save_bots()
+            print(f"[TRAP BOT | {pair}] LONG STAGE 1: 25% at {current_px:.2f}")
+        except Exception as e:
+            print(f"[TRAP BOT | {pair}] Stage 1 order failed: {e}")
+
+    elif signal == 'BREAKOUT_SHORT' and pos_side == 'FLAT' and bot['current_usd'] > 5.0:
+        if not deriv_flag:
+            print(f"[TRAP BOT | {pair}] Cannot short spot. Skipping.")
+            return
+
+        alloc = bot['current_usd'] * 0.25
+        qty = int((alloc * 0.99) / (current_px * mult))
+        if qty < 1:
+            print(f"[TRAP BOT | {pair}] Insufficient for 1 contract at 25%")
+            return
+
+        try:
+            oid = str(uuid.uuid4())
+            client.market_order_sell(client_order_id=oid, product_id=pair, base_size=str(qty))
+
+            bot['asset_held'] = -qty
+            bot['current_usd'] -= alloc
+            bot['position_side'] = 'SHORT'
+            bot['entry_price'] = current_px
+            bot['avg_entry'] = current_px
+            bot['entry_stage'] = 1
+            bot['breakout_data'] = bo_data
+            save_bots()
+            print(f"[TRAP BOT | {pair}] SHORT STAGE 1: 25% at {current_px:.2f}")
+        except Exception as e:
+            print(f"[TRAP BOT | {pair}] Stage 1 order failed: {e}")
+
+    # --- ADD TO POSITION (75% remaining) ---
+    elif signal == 'ADD_LONG' and pos_side == 'LONG' and entry_stage == 1 and bot['current_usd'] > 5.0:
+        alloc = bot['current_usd'] * 0.99  # Use remaining capital
+        if deriv_flag:
+            qty = int((alloc * 0.99) / (current_px * mult))
+            if qty < 1: return
+        else:
+            qty = round((alloc * 0.99) / current_px, 6)
+
+        try:
+            oid = str(uuid.uuid4())
+            if deriv_flag:
+                client.market_order_buy(client_order_id=oid, product_id=pair, base_size=str(qty))
+            else:
+                client.market_order_buy(client_order_id=oid, product_id=pair, quote_size=str(round(alloc * 0.99, 2)))
+
+            # Calculate new weighted average entry
+            old_size = abs(bot['asset_held'])
+            old_cost = old_size * bot['avg_entry']
+            new_cost = qty * current_px
+            total_size = old_size + qty
+            bot['avg_entry'] = (old_cost + new_cost) / total_size if total_size > 0 else current_px
+
+            bot['asset_held'] += qty
+            bot['current_usd'] = 0.0
+            bot['entry_stage'] = 2
+            save_bots()
+            print(f"[TRAP BOT | {pair}] LONG STAGE 2: +75% at {current_px:.2f}, avg {bot['avg_entry']:.2f}")
+        except Exception as e:
+            print(f"[TRAP BOT | {pair}] Stage 2 order failed: {e}")
+
+    elif signal == 'ADD_SHORT' and pos_side == 'SHORT' and entry_stage == 1 and bot['current_usd'] > 5.0:
+        if not deriv_flag: return
+
+        alloc = bot['current_usd'] * 0.99
+        qty = int((alloc * 0.99) / (current_px * mult))
+        if qty < 1: return
+
+        try:
+            oid = str(uuid.uuid4())
+            client.market_order_sell(client_order_id=oid, product_id=pair, base_size=str(qty))
+
+            old_size = abs(bot['asset_held'])
+            old_cost = old_size * bot['avg_entry']
+            new_cost = qty * current_px
+            total_size = old_size + qty
+            bot['avg_entry'] = (old_cost + new_cost) / total_size if total_size > 0 else current_px
+
+            bot['asset_held'] -= qty
+            bot['current_usd'] = 0.0
+            bot['entry_stage'] = 2
+            save_bots()
+            print(f"[TRAP BOT | {pair}] SHORT STAGE 2: +75% at {current_px:.2f}, avg {bot['avg_entry']:.2f}")
+        except Exception as e:
+            print(f"[TRAP BOT | {pair}] Stage 2 order failed: {e}")
+
+    # --- EXITS ---
+    elif signal == 'EXIT_LONG' and pos_side == 'LONG' and bot['asset_held'] > 0:
+        exit_reason = 'STOP_LOSS' if 'STOP' in reason.upper() else 'SIGNAL'
+        try:
+            oid = str(uuid.uuid4())
+            client.market_order_sell(client_order_id=oid, product_id=pair, base_size=str(abs(bot['asset_held'])))
+
+            record_trade(bot, bot['avg_entry'], current_px, abs(bot['asset_held']), 'LONG', exit_reason, pair, mult)
+
+            profit = (current_px - bot['avg_entry']) * abs(bot['asset_held']) * mult
+            bot['current_usd'] = bot['allocated_usd'] + (profit * 0.995)
+            bot['asset_held'] = 0.0
+            bot['position_side'] = 'FLAT'
+            bot['entry_stage'] = 0
+            bot['avg_entry'] = 0.0
+            bot.pop('breakout_data', None)
+            save_bots()
+            print(f"[TRAP BOT | {pair}] EXIT LONG: {reason}")
+        except Exception as e:
+            print(f"[TRAP BOT | {pair}] Exit failed: {e}")
+
+    elif signal == 'EXIT_SHORT' and pos_side == 'SHORT' and bot['asset_held'] < 0:
+        exit_reason = 'STOP_LOSS' if 'STOP' in reason.upper() else 'SIGNAL'
+        try:
+            oid = str(uuid.uuid4())
+            client.market_order_buy(client_order_id=oid, product_id=pair, base_size=str(abs(bot['asset_held'])))
+
+            record_trade(bot, bot['avg_entry'], current_px, abs(bot['asset_held']), 'SHORT', exit_reason, pair, mult)
+
+            profit = (bot['avg_entry'] - current_px) * abs(bot['asset_held']) * mult
+            bot['current_usd'] = bot['allocated_usd'] + (profit * 0.995)
+            bot['asset_held'] = 0.0
+            bot['position_side'] = 'FLAT'
+            bot['entry_stage'] = 0
+            bot['avg_entry'] = 0.0
+            bot.pop('breakout_data', None)
+            save_bots()
+            print(f"[TRAP BOT | {pair}] EXIT SHORT: {reason}")
+        except Exception as e:
+            print(f"[TRAP BOT | {pair}] Exit failed: {e}")
 
 # ==========================================
 # WS USER CHANNEL: REAL-TIME GRID TRACKER
