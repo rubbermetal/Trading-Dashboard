@@ -1281,9 +1281,10 @@
                 const res = await fetch(`/api/bots/follow/${botId}`, {
                     method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({follow: enabled})
                 });
+                if (!res.ok) { alert('Server error toggling follow: ' + res.status); return; }
                 const d = await res.json();
                 if (!d.success) alert(d.error);
-            } catch (e) { alert('Network error toggling follow.'); }
+            } catch (e) { alert('Network error toggling follow: ' + e.message); }
         }
 
         async function deleteBot(botId) {

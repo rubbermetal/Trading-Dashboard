@@ -339,7 +339,7 @@ def execute_quad(bot_id, bot, pair, mode='STANDARD'):
         candles = res.get('candles', [])
     except Exception as e: return
     if len(candles) < 200: return 
-    parsed = [{'start': int(c['start']), 'high': float(c['high']), 'low': float(c['low']), 'close': float(c['close'])} for c in candles]
+    parsed = [{'start': int(c['start']), 'open': float(c['open']), 'high': float(c['high']), 'low': float(c['low']), 'close': float(c['close'])} for c in candles]
     df = pd.DataFrame(parsed).sort_values('start').reset_index(drop=True)
     
     if mode == 'STANDARD': signal, reason = calculate_quad_rotation(df)
@@ -387,8 +387,14 @@ def execute_quad(bot_id, bot, pair, mode='STANDARD'):
 # ==========================================
 # WS USER CHANNEL: REAL-TIME GRID TRACKER
 # ==========================================
+# Deduplication: prevent WS and REST from double-processing the same fill
+_processed_fill_oids = set()
+
 def process_grid_fill(order_id, filled_size, filled_value, status, pair):
     """Processes real-time WS fills, calculates increments, and flips the grid order."""
+    if order_id in _processed_fill_oids:
+        return
+    
     changes_made = False
     for bot_id, bot in ACTIVE_BOTS.items():
         if bot.get('strategy') != 'GRID' or bot.get('status') != 'RUNNING': continue
@@ -399,6 +405,10 @@ def process_grid_fill(order_id, filled_size, filled_value, status, pair):
         
         for i, grid in enumerate(active_grids):
             if grid['oid'] == order_id and status == 'FILLED':
+                _processed_fill_oids.add(order_id)
+                # Keep set from growing unbounded
+                if len(_processed_fill_oids) > 500:
+                    _processed_fill_oids.clear()
                 changes_made = True
                 base_inc = settings.get('base_inc', '0.00000001')
                 quote_inc = settings.get('quote_inc', '0.01')
@@ -643,9 +653,18 @@ def grid_check_fills(bot_id, bot, pair):
         if not grid_oid:
             continue
         
+        # Skip if already processed by WS
+        if grid_oid in _processed_fill_oids:
+            continue
+        
         filled_match = filled_map.get(grid_oid)
         if not filled_match:
             continue
+        
+        # Mark as processed to prevent WS double-flip
+        _processed_fill_oids.add(grid_oid)
+        if len(_processed_fill_oids) > 500:
+            _processed_fill_oids.clear()
 
         filled_size = float(filled_match.get('filled_size', 0))
         avg_price = float(filled_match.get('average_filled_price', grid['price']))
@@ -1292,11 +1311,15 @@ def update_bot_follow(bot_id):
     bot = ACTIVE_BOTS[bot_id]
     if bot.get('strategy') != 'GRID':
         return jsonify(success=False, error="Follow mode is only available for GRID bots.")
-    d = request.json
-    follow = bool(d.get('follow', False))
-    bot.setdefault('settings', {})['follow'] = follow
-    save_bots()
-    return jsonify(success=True, message=f"Follow mode {'enabled' if follow else 'disabled'}.")
+    try:
+        d = request.json
+        follow = bool(d.get('follow', False))
+        bot.setdefault('settings', {})['follow'] = follow
+        save_bots()
+        msg = "Follow mode enabled." if follow else "Follow mode disabled."
+        return jsonify(success=True, message=msg)
+    except Exception as e:
+        return jsonify(success=False, error=str(e))
 
 @bot_manager_bp.route('/api/bots/stop/<bot_id>', methods=['POST'])
 def stop_bot(bot_id):
