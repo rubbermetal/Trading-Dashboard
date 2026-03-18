@@ -601,8 +601,13 @@ def process_grid_fill(order_id, filled_size, filled_value, status, pair):
         active_grids = settings.get('active_grids', [])
         
         for i, grid in enumerate(active_grids):
-            if grid['oid'] == order_id and status == 'FILLED':
+            # Match by EITHER our client_order_id OR Coinbase's server order_id
+            matched = (grid.get('oid') == order_id) or (grid.get('cb_oid') == order_id)
+            if matched and status == 'FILLED':
                 _processed_fill_oids.add(order_id)
+                # Also add the other ID to prevent REST double-processing
+                if grid.get('oid'): _processed_fill_oids.add(grid['oid'])
+                if grid.get('cb_oid'): _processed_fill_oids.add(grid['cb_oid'])
                 # Keep set from growing unbounded
                 if len(_processed_fill_oids) > 500:
                     _processed_fill_oids.clear()
@@ -610,77 +615,51 @@ def process_grid_fill(order_id, filled_size, filled_value, status, pair):
                 base_inc = settings.get('base_inc', '0.00000001')
                 quote_inc = settings.get('quote_inc', '0.01')
                 step_size = settings.get('step_size')
+                chunk_usd = settings.get('chunk_size', 0)
                 mult = get_contract_multiplier(pair)
                 deriv_flag = is_derivative(pair)
+                is_halted = settings.get('halted', False)
                 
-                print(f"[WS ENGINE] Flipped Order ID {order_id}. Initiating Maker Flip.")
+                print(f"[WS ENGINE] Fill detected: {grid['side']} at {grid['price']:.2f} (order {order_id[:8]}...)")
                 
                 if grid['side'] == 'BUY':
                     new_price = grid['price'] + step_size
-                    new_oid = str(uuid.uuid4())
+                    new_grid = place_grid_sell(pair, new_price, filled_size, base_inc, quote_inc, deriv_flag, mult)
                     
-                    str_price = snap_to_increment(new_price, quote_inc)
-                    str_qty = snap_to_increment(filled_size, base_inc)
-                    
-                    try:
-                        api_res = client.limit_order_gtc_sell(
-                            client_order_id=new_oid, 
-                            product_id=pair, 
-                            base_size=str_qty, 
-                            limit_price=str_price, 
-                            post_only=True
-                        )
-                        
-                        success = getattr(api_res, 'success', False) or (isinstance(api_res, dict) and api_res.get('success', False))
-                        fail_reason = getattr(api_res, 'failure_reason', '') or (isinstance(api_res, dict) and api_res.get('failure_reason', ''))
-                        
-                        if success or fail_reason == 'UNKNOWN_FAILURE_REASON':
-                            active_grids[i] = {"price": float(str_price), "side": "SELL", "oid": new_oid}
-                            bot['asset_held'] += float(str_qty)
-                            bot['current_usd'] -= float(filled_value)
-                        else:
-                            print(f"[WS GRID FLIP] Sell Rejected: {fail_reason}")
-                            
-                    except Exception as e: print(f"[WS GRID FLIP] Sell Exception: {e}")
+                    if new_grid:
+                        active_grids[i] = new_grid
+                        bot['asset_held'] += float(filled_size)
+                        bot['current_usd'] -= float(filled_value)
+                    else:
+                        print(f"[WS GRID FLIP] Sell placement failed at {new_price:.2f}")
+                        bot['asset_held'] += float(filled_size)
+                        bot['current_usd'] -= float(filled_value)
                     
                 elif grid['side'] == 'SELL':
-                    # A SELL fill completes a round-trip: bought at (price - step), sold at price
+                    # A SELL fill completes a round-trip
                     buy_price = grid['price'] - step_size
                     sell_price = grid['price']
                     record_trade(bot, buy_price, sell_price, filled_size, 'LONG', 'GRID_FLIP', pair, mult)
                     
-                    new_price = grid['price'] - step_size
-                    new_oid = str(uuid.uuid4())
-                    
-                    if deriv_flag:
-                        grid_qty = int(settings['chunk_size'] / (new_price * mult))
+                    if is_halted:
+                        # During halt: don't place new buys, just remove the grid
+                        try: active_grids.pop(i)
+                        except: pass
+                        bot['asset_held'] -= float(filled_size)
+                        bot['current_usd'] += float(filled_value)
+                        print(f"[WS ENGINE] SELL filled during halt. No new BUY.")
                     else:
-                        quote_sz = settings['chunk_size'] * 0.99
-                        grid_qty = float(quote_sz) / new_price
+                        new_price = grid['price'] - step_size
+                        new_grid = place_grid_buy(pair, new_price, chunk_usd, base_inc, quote_inc, deriv_flag, mult)
                         
-                    str_price = snap_to_increment(new_price, quote_inc)
-                    str_qty = snap_to_increment(grid_qty, base_inc)
-                    
-                    try:
-                        api_res = client.limit_order_gtc_buy(
-                            client_order_id=new_oid, 
-                            product_id=pair, 
-                            base_size=str_qty, 
-                            limit_price=str_price, 
-                            post_only=True
-                        )
-                        
-                        success = getattr(api_res, 'success', False) or (isinstance(api_res, dict) and api_res.get('success', False))
-                        fail_reason = getattr(api_res, 'failure_reason', '') or (isinstance(api_res, dict) and api_res.get('failure_reason', ''))
-                        
-                        if success or fail_reason == 'UNKNOWN_FAILURE_REASON':
-                            active_grids[i] = {"price": float(str_price), "side": "BUY", "oid": new_oid}
+                        if new_grid:
+                            active_grids[i] = new_grid
                             bot['asset_held'] -= float(filled_size)
                             bot['current_usd'] += float(filled_value)
                         else:
-                            print(f"[WS GRID FLIP] Buy Rejected: {fail_reason}")
-                            
-                    except Exception as e: print(f"[WS GRID FLIP] Buy Exception: {e}")
+                            print(f"[WS GRID FLIP] Buy placement failed at {new_price:.2f}")
+                            bot['asset_held'] -= float(filled_size)
+                            bot['current_usd'] += float(filled_value)
                     
     if changes_made:
         save_bots()
@@ -697,13 +676,18 @@ def start_user_ws():
                     if event.get('type') == 'update':
                         for order in event.get('orders', []):
                             if order.get('status') == 'FILLED':
-                                oid = order.get('client_order_id') or order.get('order_id')
+                                client_oid = order.get('client_order_id', '')
+                                server_oid = order.get('order_id', '')
                                 f_size = float(order.get('cumulative_quantity', 0))
                                 f_val = float(order.get('total_value_after_fees', 0))
                                 # Fallback value calculation if fees object is empty
                                 if f_val == 0: f_val = f_size * float(order.get('avg_price', 0))
                                 pair = order.get('product_id')
-                                process_grid_fill(oid, f_size, f_val, 'FILLED', pair)
+                                # Try matching by client_order_id first, then server order_id
+                                if client_oid:
+                                    process_grid_fill(client_oid, f_size, f_val, 'FILLED', pair)
+                                if server_oid:
+                                    process_grid_fill(server_oid, f_size, f_val, 'FILLED', pair)
             except Exception as e:
                 pass # Suppress noisy WS parsing errors
 
@@ -726,21 +710,92 @@ threading.Thread(target=start_user_ws, daemon=True).start()
 # ==========================================
 # GRID HELPERS
 # ==========================================
-def cancel_order_safe(order_id):
-    """Attempts to cancel an order, returns True on success."""
+def cancel_all_pair_orders(pair):
+    """
+    Nuclear option: fetch ALL open orders for a pair from Coinbase, cancel them all.
+    Returns the count of orders successfully cancelled.
+    This bypasses any ID mismatch issues by getting real order_ids from Coinbase.
+    """
+    cancelled = 0
     try:
-        res = client.cancel_orders(order_ids=[order_id])
-        results = res.get('results', []) if isinstance(res, dict) else getattr(res, 'results', [])
-        if results:
-            r = results[0] if isinstance(results[0], dict) else results[0]
-            return r.get('success', False) if isinstance(r, dict) else getattr(r, 'success', False)
-        return False
+        open_res = client.get("/api/v3/brokerage/orders/historical/batch", params={
+            "order_status": "OPEN",
+            "product_id": pair,
+            "limit": 100
+        })
+        open_orders = open_res.get('orders', [])
+        if not open_orders:
+            return 0
+
+        # Coinbase cancel API accepts batches of real order_ids
+        real_ids = [o['order_id'] for o in open_orders if o.get('order_id')]
+        if not real_ids:
+            return 0
+
+        # Cancel in batches of 10 (API limit safety)
+        for i in range(0, len(real_ids), 10):
+            batch = real_ids[i:i+10]
+            try:
+                res = client.cancel_orders(order_ids=batch)
+                results = res.get('results', []) if isinstance(res, dict) else getattr(res, 'results', [])
+                for r in results:
+                    r_dict = r if isinstance(r, dict) else r.__dict__ if hasattr(r, '__dict__') else {}
+                    if r_dict.get('success', False):
+                        cancelled += 1
+            except Exception as e:
+                print(f"[GRID] Batch cancel error: {e}")
+            time.sleep(0.2)  # Rate limit spacing
+
+        print(f"[GRID] cancel_all_pair_orders({pair}): {cancelled}/{len(real_ids)} cancelled")
     except Exception as e:
-        print(f"[GRID] Cancel failed for {order_id}: {e}")
-        return False
+        print(f"[GRID] cancel_all_pair_orders({pair}) fetch error: {e}")
+    return cancelled
+
+def cancel_order_safe(grid_entry):
+    """
+    Cancel a single grid order using its Coinbase-assigned order_id (cb_oid).
+    Falls back to looking up the order by client_order_id if cb_oid is missing.
+    Returns True on success.
+    """
+    cb_oid = grid_entry.get('cb_oid', '')
+    client_oid = grid_entry.get('oid', '')
+
+    # If we have the real Coinbase order_id, use it directly
+    if cb_oid:
+        try:
+            res = client.cancel_orders(order_ids=[cb_oid])
+            results = res.get('results', []) if isinstance(res, dict) else getattr(res, 'results', [])
+            if results:
+                r = results[0] if isinstance(results[0], dict) else results[0]
+                success = r.get('success', False) if isinstance(r, dict) else getattr(r, 'success', False)
+                if success:
+                    return True
+        except Exception as e:
+            print(f"[GRID] Cancel by cb_oid failed for {cb_oid}: {e}")
+
+    # Fallback: look up the real order_id from Coinbase by matching client_order_id
+    if client_oid:
+        try:
+            open_res = client.get("/api/v3/brokerage/orders/historical/batch", params={
+                "order_status": "OPEN",
+                "limit": 50
+            })
+            for o in open_res.get('orders', []):
+                if o.get('client_order_id') == client_oid:
+                    real_id = o.get('order_id')
+                    if real_id:
+                        res = client.cancel_orders(order_ids=[real_id])
+                        results = res.get('results', []) if isinstance(res, dict) else getattr(res, 'results', [])
+                        if results:
+                            r = results[0] if isinstance(results[0], dict) else results[0]
+                            return r.get('success', False) if isinstance(r, dict) else getattr(r, 'success', False)
+        except Exception as e:
+            print(f"[GRID] Cancel by client_oid lookup failed for {client_oid}: {e}")
+
+    return False
 
 def place_grid_buy(pair, price, chunk_usd, base_inc, quote_inc, deriv_flag, mult):
-    """Places a single grid buy order. Returns grid dict or None."""
+    """Places a single grid buy order. Returns grid dict with cb_oid or None."""
     if deriv_flag:
         grid_qty = int(chunk_usd / (price * mult))
         if grid_qty < 1: return None
@@ -760,7 +815,13 @@ def place_grid_buy(pair, price, chunk_usd, base_inc, quote_inc, deriv_flag, mult
         success = getattr(api_res, 'success', False) or (isinstance(api_res, dict) and api_res.get('success', False))
         fail_reason = getattr(api_res, 'failure_reason', '') or (isinstance(api_res, dict) and api_res.get('failure_reason', ''))
         if success or fail_reason == 'UNKNOWN_FAILURE_REASON':
-            return {"price": float(str_price), "side": "BUY", "oid": oid}
+            # Extract Coinbase's server-assigned order_id
+            cb_oid = ''
+            if isinstance(api_res, dict):
+                cb_oid = api_res.get('order_id', '') or api_res.get('success_response', {}).get('order_id', '')
+            else:
+                cb_oid = getattr(api_res, 'order_id', '') or getattr(getattr(api_res, 'success_response', None), 'order_id', '')
+            return {"price": float(str_price), "side": "BUY", "oid": oid, "cb_oid": cb_oid}
         else:
             print(f"[GRID] BUY rejected at {str_price}: {fail_reason}")
     except Exception as e:
@@ -768,7 +829,7 @@ def place_grid_buy(pair, price, chunk_usd, base_inc, quote_inc, deriv_flag, mult
     return None
 
 def place_grid_sell(pair, price, qty_or_chunk, base_inc, quote_inc, deriv_flag, mult, use_chunk=False, chunk_usd=0):
-    """Places a single grid sell order. Returns grid dict or None."""
+    """Places a single grid sell order. Returns grid dict with cb_oid or None."""
     if use_chunk:
         if deriv_flag:
             grid_qty = int(chunk_usd / (price * mult))
@@ -791,7 +852,13 @@ def place_grid_sell(pair, price, qty_or_chunk, base_inc, quote_inc, deriv_flag, 
         success = getattr(api_res, 'success', False) or (isinstance(api_res, dict) and api_res.get('success', False))
         fail_reason = getattr(api_res, 'failure_reason', '') or (isinstance(api_res, dict) and api_res.get('failure_reason', ''))
         if success or fail_reason == 'UNKNOWN_FAILURE_REASON':
-            return {"price": float(str_price), "side": "SELL", "oid": oid}
+            # Extract Coinbase's server-assigned order_id
+            cb_oid = ''
+            if isinstance(api_res, dict):
+                cb_oid = api_res.get('order_id', '') or api_res.get('success_response', {}).get('order_id', '')
+            else:
+                cb_oid = getattr(api_res, 'order_id', '') or getattr(getattr(api_res, 'success_response', None), 'order_id', '')
+            return {"price": float(str_price), "side": "SELL", "oid": oid, "cb_oid": cb_oid}
         else:
             print(f"[GRID] SELL rejected at {str_price}: {fail_reason}")
     except Exception as e:
@@ -847,19 +914,23 @@ def grid_check_fills(bot_id, bot, pair):
 
     for i, grid in enumerate(list(active_grids)):
         grid_oid = grid.get('oid', '')
-        if not grid_oid:
+        grid_cb_oid = grid.get('cb_oid', '')
+        
+        # Skip if already processed by WS (check both IDs)
+        if grid_oid in _processed_fill_oids or grid_cb_oid in _processed_fill_oids:
             continue
         
-        # Skip if already processed by WS
-        if grid_oid in _processed_fill_oids:
-            continue
-        
-        filled_match = filled_map.get(grid_oid)
+        # Match by either our client_order_id or Coinbase's server order_id
+        filled_match = filled_map.get(grid_oid) or filled_map.get(grid_cb_oid)
         if not filled_match:
             continue
         
-        # Mark as processed to prevent WS double-flip
-        _processed_fill_oids.add(grid_oid)
+        # Mark BOTH IDs as processed to prevent WS double-flip
+        if grid_oid: _processed_fill_oids.add(grid_oid)
+        if grid_cb_oid: _processed_fill_oids.add(grid_cb_oid)
+        # Also add the server order_id from the fill itself
+        fill_server_id = filled_match.get('order_id', '')
+        if fill_server_id: _processed_fill_oids.add(fill_server_id)
         if len(_processed_fill_oids) > 500:
             _processed_fill_oids.clear()
 
@@ -943,6 +1014,8 @@ def grid_emergency_halt(bot_id, bot, pair, cur_px, reason):
     """
     Cancel BUY orders only. Keep existing SELL orders to close inventory profitably.
     If holding inventory with no sell orders, place limit sells at entry + step to exit at profit.
+    
+    Uses Coinbase API to fetch real order_ids, ensuring cancels actually work.
     """
     settings = bot.get('settings', {})
     active_grids = settings.get('active_grids', [])
@@ -954,40 +1027,66 @@ def grid_emergency_halt(bot_id, bot, pair, cur_px, reason):
     
     print(f"[GRID HALT | {pair}] {reason}")
     
-    # 1. Cancel BUY orders only -- keep sells to close positions
-    buy_grids = [g for g in active_grids if g['side'] == 'BUY']
     sell_grids = [g for g in active_grids if g['side'] == 'SELL']
+    buy_grids = [g for g in active_grids if g['side'] == 'BUY']
     
+    # 1. Fetch ALL open orders for this pair from Coinbase to get real order_ids
     cancelled = 0
-    for grid in buy_grids:
-        if cancel_order_safe(grid['oid']):
-            cancelled += 1
+    try:
+        open_res = client.get("/api/v3/brokerage/orders/historical/batch", params={
+            "order_status": "OPEN",
+            "product_id": pair,
+            "limit": 100
+        })
+        open_orders = open_res.get('orders', [])
+        
+        # Build a set of our tracked sell client_order_ids so we DON'T cancel those
+        sell_oids = {g.get('oid', '') for g in sell_grids}
+        sell_cb_oids = {g.get('cb_oid', '') for g in sell_grids}
+        
+        # Cancel only orders that are NOT our tracked sells
+        buy_order_ids = []
+        for o in open_orders:
+            server_id = o.get('order_id', '')
+            client_id = o.get('client_order_id', '')
+            side = o.get('side', '').upper()
+            
+            # Skip if this is one of our tracked sell orders
+            if client_id in sell_oids or server_id in sell_cb_oids:
+                continue
+            # Cancel all BUY orders; also cancel any untracked orders (orphans)
+            if server_id:
+                buy_order_ids.append(server_id)
+        
+        # Cancel in batches
+        for i in range(0, len(buy_order_ids), 10):
+            batch = buy_order_ids[i:i+10]
+            try:
+                res = client.cancel_orders(order_ids=batch)
+                results = res.get('results', []) if isinstance(res, dict) else getattr(res, 'results', [])
+                for r in results:
+                    r_dict = r if isinstance(r, dict) else r.__dict__ if hasattr(r, '__dict__') else {}
+                    if r_dict.get('success', False):
+                        cancelled += 1
+            except Exception as e:
+                print(f"[GRID HALT] Batch cancel error: {e}")
+            time.sleep(0.2)
+            
+    except Exception as e:
+        print(f"[GRID HALT | {pair}] Failed to fetch open orders: {e}")
     
-    print(f"[GRID HALT | {pair}] Cancelled {cancelled}/{len(buy_grids)} BUY orders. Keeping {len(sell_grids)} SELL orders.")
+    print(f"[GRID HALT | {pair}] Cancelled {cancelled} BUY/orphan orders. Keeping {len(sell_grids)} SELL orders.")
     
     # 2. If we hold inventory but have no sell orders, place limit sells to exit
     held = abs(bot.get('asset_held', 0))
     if held > 0 and len(sell_grids) == 0 and step_size > 0:
-        # Place a sell at current price + half a step (tight but still profitable vs entry)
         exit_px = cur_px + (step_size * 0.5)
-        str_price = snap_to_increment(exit_px, quote_inc)
-        str_qty = snap_to_increment(held, base_inc)
-        
-        if float(str_qty) > 0:
-            oid = str(uuid.uuid4())
-            try:
-                api_res = client.limit_order_gtc_sell(
-                    client_order_id=oid, product_id=pair,
-                    base_size=str_qty, limit_price=str_price, post_only=True
-                )
-                success = getattr(api_res, 'success', False) or (isinstance(api_res, dict) and api_res.get('success', False))
-                if success or (isinstance(api_res, dict) and api_res.get('failure_reason', '') == 'UNKNOWN_FAILURE_REASON'):
-                    sell_grids.append({"price": float(str_price), "side": "SELL", "oid": oid})
-                    print(f"[GRID HALT | {pair}] Placed exit SELL at {str_price} for {str_qty} units.")
-                else:
-                    print(f"[GRID HALT | {pair}] Exit SELL rejected. Will retry next cycle.")
-            except Exception as e:
-                print(f"[GRID HALT | {pair}] Exit SELL exception: {e}")
+        exit_grid = place_grid_sell(pair, exit_px, held, base_inc, quote_inc, deriv_flag, mult)
+        if exit_grid:
+            sell_grids.append(exit_grid)
+            print(f"[GRID HALT | {pair}] Placed exit SELL at {exit_px:.2f} for {held:.8f} units.")
+        else:
+            print(f"[GRID HALT | {pair}] Exit SELL placement failed. Will retry next cycle.")
     
     # 3. Update active_grids to only contain remaining sells
     bot['settings']['active_grids'] = sell_grids if sell_grids else []
@@ -1040,7 +1139,7 @@ def grid_follow(bot_id, bot, pair, cur_px, df):
         to_recycle = stale[:min(2, len(stale))]
         
         for old_grid in to_recycle:
-            if cancel_order_safe(old_grid['oid']):
+            if cancel_order_safe(old_grid):
                 # Place a new buy one step below current price
                 new_buy_px = cur_px - step_size
                 # Avoid duplicates
@@ -1064,7 +1163,7 @@ def grid_follow(bot_id, bot, pair, cur_px, df):
         to_recycle = stale[:min(2, len(stale))]
         
         for old_grid in to_recycle:
-            if cancel_order_safe(old_grid['oid']):
+            if cancel_order_safe(old_grid):
                 new_sell_px = cur_px + step_size
                 existing_prices = {round(g['price'], 2) for g in active_grids}
                 while round(new_sell_px, 2) in existing_prices:
@@ -1087,7 +1186,7 @@ def grid_follow(bot_id, bot, pair, cur_px, df):
         to_recycle = stale[:min(2, len(stale))]
         
         for old_grid in to_recycle:
-            if cancel_order_safe(old_grid['oid']):
+            if cancel_order_safe(old_grid):
                 new_buy_px = cur_px - step_size
                 existing_prices = {round(g['price'], 2) for g in active_grids}
                 while round(new_buy_px, 2) in existing_prices:
@@ -1109,7 +1208,7 @@ def grid_follow(bot_id, bot, pair, cur_px, df):
         to_recycle = stale[:min(2, len(stale))]
         
         for old_grid in to_recycle:
-            if cancel_order_safe(old_grid['oid']):
+            if cancel_order_safe(old_grid):
                 new_sell_px = cur_px + step_size
                 existing_prices = {round(g['price'], 2) for g in active_grids}
                 while round(new_sell_px, 2) in existing_prices:
@@ -1187,43 +1286,57 @@ def execute_grid_bot(bot_id, bot, pair):
     lower = settings.get('lower_price')
     
     # --- STATE: HALTED (only process sell fills, no new buys) ---
-    if is_halted and has_grids:
-        # Still check fills so sell orders get processed
-        grid_check_fills(bot_id, bot, pair)
-        
-        # If all sells have filled (no more grids or only empty list), clear halt
-        remaining = settings.get('active_grids', [])
-        held = abs(bot.get('asset_held', 0))
-        
-        if not remaining and held < 0.000001:
-            settings.pop('halted', None)
-            settings.pop('halted_reason', None)
-            settings.pop('halted_at', None)
-            settings.pop('active_grids', None)
-            settings.pop('step_size', None)
-            settings.pop('chunk_size', None)
-            save_bots()
-            print(f"[GRID BOT | {pair}] Halt cleared -- all positions closed. Ready to re-deploy when conditions improve.")
-        elif held > 0 and not any(g['side'] == 'SELL' for g in remaining):
-            # Still holding inventory but no sell orders -- re-place exit sell
-            step_size = settings.get('step_size', cur_px * 0.006)
-            exit_px = cur_px + (step_size * 0.5)
-            str_price = snap_to_increment(exit_px, quote_inc)
-            str_qty = snap_to_increment(held, base_inc)
-            if float(str_qty) > 0:
-                oid = str(uuid.uuid4())
-                try:
-                    api_res = client.limit_order_gtc_sell(
-                        client_order_id=oid, product_id=pair,
-                        base_size=str_qty, limit_price=str_price, post_only=True
-                    )
-                    success = getattr(api_res, 'success', False) or (isinstance(api_res, dict) and api_res.get('success', False))
-                    if success or (isinstance(api_res, dict) and api_res.get('failure_reason', '') == 'UNKNOWN_FAILURE_REASON'):
-                        remaining.append({"price": float(str_price), "side": "SELL", "oid": oid})
-                        save_bots()
-                        print(f"[GRID HALT | {pair}] Re-placed exit SELL at {str_price}")
-                except Exception as e:
-                    print(f"[GRID HALT | {pair}] Exit SELL retry failed: {e}")
+    if is_halted:
+        if has_grids:
+            # Still check fills so sell orders get processed
+            grid_check_fills(bot_id, bot, pair)
+            
+            # If all sells have filled (no more grids or only empty list), clear halt
+            remaining = settings.get('active_grids', [])
+            held = abs(bot.get('asset_held', 0))
+            
+            if not remaining and held < 0.000001:
+                settings.pop('halted', None)
+                settings.pop('halted_reason', None)
+                settings.pop('halted_at', None)
+                settings.pop('active_grids', None)
+                settings.pop('step_size', None)
+                settings.pop('chunk_size', None)
+                save_bots()
+                print(f"[GRID BOT | {pair}] Halt cleared -- all positions closed. Ready to re-deploy when conditions improve.")
+            elif held > 0 and not any(g['side'] == 'SELL' for g in remaining):
+                # Still holding inventory but no sell orders -- re-place exit sell
+                step_size = settings.get('step_size', cur_px * 0.006)
+                exit_px = cur_px + (step_size * 0.5)
+                exit_grid = place_grid_sell(pair, exit_px, held, base_inc, quote_inc, is_derivative(pair), get_contract_multiplier(pair))
+                if exit_grid:
+                    remaining.append(exit_grid)
+                    save_bots()
+                    print(f"[GRID HALT | {pair}] Re-placed exit SELL at {exit_px:.2f}")
+                else:
+                    print(f"[GRID HALT | {pair}] Exit SELL retry failed.")
+        else:
+            # Halted with NO grids: check if inventory is fully cleared
+            held = abs(bot.get('asset_held', 0))
+            if held < 0.000001:
+                # All clear -- check if conditions have improved
+                if curr_adx < 25:
+                    settings.pop('halted', None)
+                    settings.pop('halted_reason', None)
+                    settings.pop('halted_at', None)
+                    save_bots()
+                    print(f"[GRID BOT | {pair}] Halt cleared (no inventory, ADX={curr_adx:.1f} < 25). Will re-deploy next cycle.")
+                else:
+                    print(f"[GRID BOT | {pair}] HALTED (no grids, no inventory). ADX={curr_adx:.1f} still >= 25. Waiting.")
+            else:
+                # Still holding inventory but lost track of sell orders -- re-place exit
+                step_size = settings.get('step_size', cur_px * 0.006)
+                exit_px = cur_px + (step_size * 0.5)
+                exit_grid = place_grid_sell(pair, exit_px, held, base_inc, quote_inc, is_derivative(pair), get_contract_multiplier(pair))
+                if exit_grid:
+                    settings['active_grids'] = [exit_grid]
+                    save_bots()
+                    print(f"[GRID HALT | {pair}] Re-placed exit SELL at {exit_px:.2f} for {held:.8f} orphaned inventory.")
         return
     
     # --- ALWAYS: Check fills on active grids (REST fallback) ---
@@ -1256,6 +1369,13 @@ def execute_grid_bot(bot_id, bot, pair):
     if curr_adx >= 25:
         print(f"[GRID BOT | {pair}] DORMANT: ADX={curr_adx:.1f} >= 25. Waiting to deploy.")
         return
+
+    # BUG 4 FIX: Before deploying ANY new grids, cancel ALL open orders for this pair.
+    # This sweeps orphans from failed cancels, previous halts, or interrupted deployments.
+    orphans_killed = cancel_all_pair_orders(pair)
+    if orphans_killed > 0:
+        print(f"[GRID INIT | {pair}] Swept {orphans_killed} orphan orders before deploying.")
+        time.sleep(0.5)  # Let Coinbase settle
 
     deriv_flag = is_derivative(pair)
     mult = get_contract_multiplier(pair)
