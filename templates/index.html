@@ -287,13 +287,13 @@
                                         <select id="grid-mode" class="form-select form-select-sm bg-dark text-white border-secondary" onchange="previewGrid()">
                                             <option value="BOTH">BOTH (Buy below + Sell above)</option>
                                             <option value="LONG">LONG ONLY (Buy dips below price)</option>
-                                            <option value="SHORT">SHORT ONLY (Sell rallies above price — Perps only)</option>
+                                            <option value="SHORT">SHORT ONLY (Sell rallies above price -- Perps only)</option>
                                         </select>
                                     </div>
                                     <div class="col-12 mt-2">
                                         <div class="form-check form-switch">
                                             <input class="form-check-input" type="checkbox" id="grid-follow" checked>
-                                            <label class="form-check-label small text-muted" for="grid-follow">FOLLOW MODE — Grid slides to track price movement</label>
+                                            <label class="form-check-label small text-muted" for="grid-follow">FOLLOW MODE -- Grid slides to track price movement</label>
                                         </div>
                                     </div>
                                     <div class="col-6 mt-2">
@@ -697,7 +697,7 @@
 
         function openTPSL(pair, size, side, type) {
             tpslPair = pair; tpslSize = size; tpslSide = side; tpslType = type;
-            document.getElementById('tpsl-pair').innerText = `${pair} — ${size} units (${side})`;
+            document.getElementById('tpsl-pair').innerText = `${pair} -- ${size} units (${side})`;
             document.getElementById('tp-price').value = '';
             document.getElementById('sl-price').value = '';
             tpslModal.show();
@@ -723,7 +723,7 @@
         async function openBotChart(botId, pair, strategy, botTf) {
             const tf = botTf || STRATEGY_TF[strategy] || '1h';
             document.getElementById('bot-chart-title').innerHTML = `<i class="bi bi-graph-up me-2"></i>${pair}`;
-            document.getElementById('bot-chart-subtitle').innerText = `${strategy} Bot — ${TF_LABELS[tf] || tf} candles — ID: ${botId}`;
+            document.getElementById('bot-chart-subtitle').innerText = `${strategy} Bot -- ${TF_LABELS[tf] || tf} candles -- ID: ${botId}`;
             
             botChartModal.show();
             
@@ -1197,7 +1197,7 @@
                 document.getElementById('grid-upper').value = d.upper_price;
                 document.getElementById('gp-count').innerText = d.grid_count;
                 document.getElementById('gp-step').innerText = `$${d.step_usd.toFixed(2)} (${stepPct}%)`;
-                document.getElementById('gp-range').innerText = `$${d.lower_price.toFixed(2)} — $${d.upper_price.toFixed(2)}`;
+                document.getElementById('gp-range').innerText = `$${d.lower_price.toFixed(2)} -- $${d.upper_price.toFixed(2)}`;
                 document.getElementById('gp-per-order').innerText = `$${d.per_order_usd.toFixed(2)}`;
                 document.getElementById('gp-profit').innerText = `~$${d.profit_per_flip.toFixed(4)}/flip`;
                 previewDiv.style.display = 'block';
@@ -1297,7 +1297,7 @@
 
         function openBotFunds(botId, pair, idleUsd) {
             activeFundBotId = botId;
-            document.getElementById('fund-bot-label').innerText = `${pair} — Bot ${botId} (Idle: $${idleUsd.toFixed(2)})`;
+            document.getElementById('fund-bot-label').innerText = `${pair} -- Bot ${botId} (Idle: $${idleUsd.toFixed(2)})`;
             document.getElementById('fund-amount').value = '';
             botFundsModal.show();
         }
@@ -1315,7 +1315,7 @@
         }
 
         async function openTradeLog(botId, pair) {
-            document.getElementById('trade-log-label').innerText = `${pair} — Bot ${botId}`;
+            document.getElementById('trade-log-label').innerText = `${pair} -- Bot ${botId}`;
             document.getElementById('trade-log-body').innerHTML = '<tr><td colspan="7" class="text-center text-muted py-4">Loading...</td></tr>';
             tradeLogModal.show();
             try {

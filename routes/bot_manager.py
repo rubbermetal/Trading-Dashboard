@@ -500,8 +500,8 @@ def start_user_ws():
             except Exception as e:
                 pass # Suppress noisy WS parsing errors
 
-        api_key = os.getenv('COINBASE_API_KEY', '')
-        api_secret = os.getenv('COINBASE_API_SECRET', '')
+        api_key = os.getenv('COINBASE_API_KEY_NAME', '')
+        api_secret = os.getenv('COINBASE_API_PRIVATE_KEY', '')
         
         if api_key and api_secret:
             ws_client = WSClient(api_key=api_key, api_secret=api_secret, on_message=on_message)
@@ -592,31 +592,168 @@ def place_grid_sell(pair, price, qty_or_chunk, base_inc, quote_inc, deriv_flag, 
     return None
 
 # ==========================================
-# GRID EMERGENCY HALT
+# REST-BASED FILL CHECKER (15s FALLBACK)
+# ==========================================
+def grid_check_fills(bot_id, bot, pair):
+    """
+    Single REST call to check all grid orders for fills.
+    If a BUY filled -> place SELL at price + step.
+    If a SELL filled -> record trade, place BUY at price - step.
+    """
+    settings = bot.get('settings', {})
+    active_grids = settings.get('active_grids', [])
+    if not active_grids:
+        return
+
+    step_size = settings.get('step_size', 0)
+    chunk_usd = settings.get('chunk_size', 0)
+    base_inc = settings.get('base_inc', '0.00000001')
+    quote_inc = settings.get('quote_inc', '0.01')
+    deriv_flag = is_derivative(pair)
+    mult = get_contract_multiplier(pair)
+    is_halted = settings.get('halted', False)
+
+    if step_size <= 0:
+        return
+
+    # One API call: fetch recent filled orders for this pair
+    try:
+        order_data = client.get("/api/v3/brokerage/orders/historical/batch", params={
+            "order_status": "FILLED",
+            "product_id": pair,
+            "limit": 50
+        })
+        filled_orders = order_data.get('orders', [])
+    except Exception as e:
+        print(f"[GRID REST | {pair}] Fill check API error: {e}")
+        return
+    
+    # Build lookup: client_order_id -> order data
+    filled_map = {}
+    for o in filled_orders:
+        coid = o.get('client_order_id', '')
+        oid = o.get('order_id', '')
+        if coid: filled_map[coid] = o
+        if oid: filled_map[oid] = o
+
+    changes_made = False
+
+    for i, grid in enumerate(list(active_grids)):
+        grid_oid = grid.get('oid', '')
+        if not grid_oid:
+            continue
+        
+        filled_match = filled_map.get(grid_oid)
+        if not filled_match:
+            continue
+
+        filled_size = float(filled_match.get('filled_size', 0))
+        avg_price = float(filled_match.get('average_filled_price', grid['price']))
+        filled_value = filled_size * avg_price
+        
+        if filled_size <= 0:
+            continue
+
+        print(f"[GRID REST | {pair}] Fill detected: {grid['side']} at {grid['price']:.2f}")
+
+        if grid['side'] == 'BUY':
+            # During halt: don't place new sells from buy fills if we want to just exit
+            # Actually we DO want to place the sell -- that's how we close the position profitably
+            new_price = grid['price'] + step_size
+            new_grid = place_grid_sell(pair, new_price, filled_size, base_inc, quote_inc, deriv_flag, mult)
+            
+            if new_grid:
+                # Find the index in the current list (may have shifted)
+                try:
+                    idx = active_grids.index(grid)
+                    active_grids[idx] = new_grid
+                except ValueError:
+                    active_grids.append(new_grid)
+                bot['asset_held'] += filled_size
+                bot['current_usd'] -= filled_value
+                changes_made = True
+                print(f"[GRID REST | {pair}] Flipped BUY -> SELL at {new_price:.2f}")
+            else:
+                # Remove the filled grid even if flip failed
+                try: active_grids.remove(grid)
+                except ValueError: pass
+                bot['asset_held'] += filled_size
+                bot['current_usd'] -= filled_value
+                changes_made = True
+                print(f"[GRID REST | {pair}] BUY filled but SELL flip failed. Inventory held.")
+
+        elif grid['side'] == 'SELL':
+            # Record completed round-trip
+            buy_price = grid['price'] - step_size
+            record_trade(bot, buy_price, grid['price'], filled_size, 'LONG', 'GRID_FLIP', pair, mult)
+
+            if is_halted:
+                # During halt: don't place new buys, just remove the grid
+                try: active_grids.remove(grid)
+                except ValueError: pass
+                bot['asset_held'] -= filled_size
+                bot['current_usd'] += filled_value
+                changes_made = True
+                print(f"[GRID REST | {pair}] SELL filled during halt. Position closed. No new BUY.")
+            else:
+                # Normal: flip to BUY
+                new_price = grid['price'] - step_size
+                new_grid = place_grid_buy(pair, new_price, chunk_usd, base_inc, quote_inc, deriv_flag, mult)
+                
+                if new_grid:
+                    try:
+                        idx = active_grids.index(grid)
+                        active_grids[idx] = new_grid
+                    except ValueError:
+                        active_grids.append(new_grid)
+                    bot['asset_held'] -= filled_size
+                    bot['current_usd'] += filled_value
+                    changes_made = True
+                    print(f"[GRID REST | {pair}] Flipped SELL -> BUY at {new_price:.2f}")
+                else:
+                    try: active_grids.remove(grid)
+                    except ValueError: pass
+                    bot['asset_held'] -= filled_size
+                    bot['current_usd'] += filled_value
+                    changes_made = True
+
+    if changes_made:
+        save_bots()
+
+# ==========================================
+# GRID EMERGENCY HALT (PRESERVES SELLS)
 # ==========================================
 def grid_emergency_halt(bot_id, bot, pair, cur_px, reason):
-    """Cancel all open grid orders and exit inventory via tight maker sell."""
+    """
+    Cancel BUY orders only. Keep existing SELL orders to close inventory profitably.
+    If holding inventory with no sell orders, place limit sells at entry + step to exit at profit.
+    """
     settings = bot.get('settings', {})
     active_grids = settings.get('active_grids', [])
     base_inc = settings.get('base_inc', '0.00000001')
     quote_inc = settings.get('quote_inc', '0.01')
+    step_size = settings.get('step_size', 0)
     mult = get_contract_multiplier(pair)
+    deriv_flag = is_derivative(pair)
     
-    print(f"[GRID HALT | {pair}] {reason} — Canceling all orders and closing inventory.")
+    print(f"[GRID HALT | {pair}] {reason}")
     
-    # 1. Cancel every open grid order
+    # 1. Cancel BUY orders only -- keep sells to close positions
+    buy_grids = [g for g in active_grids if g['side'] == 'BUY']
+    sell_grids = [g for g in active_grids if g['side'] == 'SELL']
+    
     cancelled = 0
-    for grid in active_grids:
+    for grid in buy_grids:
         if cancel_order_safe(grid['oid']):
             cancelled += 1
     
-    print(f"[GRID HALT | {pair}] Cancelled {cancelled}/{len(active_grids)} orders.")
+    print(f"[GRID HALT | {pair}] Cancelled {cancelled}/{len(buy_grids)} BUY orders. Keeping {len(sell_grids)} SELL orders.")
     
-    # 2. Exit inventory if any
+    # 2. If we hold inventory but have no sell orders, place limit sells to exit
     held = abs(bot.get('asset_held', 0))
-    if held > 0 and cur_px > 0:
-        # Place a maker sell slightly below current price (0.05%) to fill quickly without market slippage
-        exit_px = cur_px * 0.9995
+    if held > 0 and len(sell_grids) == 0 and step_size > 0:
+        # Place a sell at current price + half a step (tight but still profitable vs entry)
+        exit_px = cur_px + (step_size * 0.5)
         str_price = snap_to_increment(exit_px, quote_inc)
         str_qty = snap_to_increment(held, base_inc)
         
@@ -625,25 +762,20 @@ def grid_emergency_halt(bot_id, bot, pair, cur_px, reason):
             try:
                 api_res = client.limit_order_gtc_sell(
                     client_order_id=oid, product_id=pair,
-                    base_size=str_qty, limit_price=str_price, post_only=False  # IOC-like: allow taker to ensure fill
+                    base_size=str_qty, limit_price=str_price, post_only=True
                 )
                 success = getattr(api_res, 'success', False) or (isinstance(api_res, dict) and api_res.get('success', False))
-                if success:
-                    est_return = held * float(str_price) * mult
-                    entry_px = bot.get('entry_price', cur_px)
-                    record_trade(bot, entry_px, float(str_price), held, 'LONG', 'EMERGENCY_HALT', pair, mult)
-                    bot['current_usd'] += est_return * 0.995
-                    bot['asset_held'] = 0.0
-                    print(f"[GRID HALT | {pair}] Emergency sell placed at {str_price} for {str_qty} units.")
+                if success or (isinstance(api_res, dict) and api_res.get('failure_reason', '') == 'UNKNOWN_FAILURE_REASON'):
+                    sell_grids.append({"price": float(str_price), "side": "SELL", "oid": oid})
+                    print(f"[GRID HALT | {pair}] Placed exit SELL at {str_price} for {str_qty} units.")
                 else:
-                    print(f"[GRID HALT | {pair}] Emergency sell order failed. Inventory remains.")
+                    print(f"[GRID HALT | {pair}] Exit SELL rejected. Will retry next cycle.")
             except Exception as e:
-                print(f"[GRID HALT | {pair}] Emergency sell exception: {e}")
+                print(f"[GRID HALT | {pair}] Exit SELL exception: {e}")
     
-    # 3. Clear grid state so it can re-initialize when conditions improve
-    settings.pop('active_grids', None)
-    settings.pop('step_size', None)
-    settings.pop('chunk_size', None)
+    # 3. Update active_grids to only contain remaining sells
+    bot['settings']['active_grids'] = sell_grids if sell_grids else []
+    bot['settings']['halted'] = True
     bot['settings']['halted_reason'] = reason
     bot['settings']['halted_at'] = datetime.now(timezone.utc).isoformat()
     save_bots()
@@ -705,7 +837,7 @@ def grid_follow(bot_id, bot, pair, cur_px, df):
                     active_grids.remove(old_grid)
                     active_grids.append(new_grid)
                     changes_made = True
-                    print(f"[GRID FOLLOW | {pair}] Recycled BUY {old_grid['price']:.2f} → {new_buy_px:.2f}")
+                    print(f"[GRID FOLLOW | {pair}] Recycled BUY {old_grid['price']:.2f} -> {new_buy_px:.2f}")
                 else:
                     active_grids.remove(old_grid)
                     changes_made = True
@@ -728,7 +860,7 @@ def grid_follow(bot_id, bot, pair, cur_px, df):
                     active_grids.remove(old_grid)
                     active_grids.append(new_grid)
                     changes_made = True
-                    print(f"[GRID FOLLOW | {pair}] Recycled SELL {old_grid['price']:.2f} → {new_sell_px:.2f}")
+                    print(f"[GRID FOLLOW | {pair}] Recycled SELL {old_grid['price']:.2f} -> {new_sell_px:.2f}")
                 else:
                     active_grids.remove(old_grid)
                     changes_made = True
@@ -750,7 +882,7 @@ def grid_follow(bot_id, bot, pair, cur_px, df):
                     active_grids.remove(old_grid)
                     active_grids.append(new_grid)
                     changes_made = True
-                    print(f"[GRID FOLLOW | {pair}] Followed DOWN: BUY {old_grid['price']:.2f} → {new_buy_px:.2f}")
+                    print(f"[GRID FOLLOW | {pair}] Followed DOWN: BUY {old_grid['price']:.2f} -> {new_buy_px:.2f}")
                 else:
                     active_grids.remove(old_grid)
                     changes_made = True
@@ -773,7 +905,7 @@ def grid_follow(bot_id, bot, pair, cur_px, df):
                     active_grids.remove(old_grid)
                     active_grids.append(new_grid)
                     changes_made = True
-                    print(f"[GRID FOLLOW | {pair}] Followed UP: SELL {old_grid['price']:.2f} → {new_sell_px:.2f}")
+                    print(f"[GRID FOLLOW | {pair}] Followed UP: SELL {old_grid['price']:.2f} -> {new_sell_px:.2f}")
                 else:
                     active_grids.remove(old_grid)
                     changes_made = True
@@ -787,14 +919,17 @@ def grid_follow(bot_id, bot, pair, cur_px, df):
         save_bots()
 
 # ==========================================
-# REFACTORED GRID EXECUTOR (3-STATE MACHINE)
+# REFACTORED GRID EXECUTOR (4-STATE MACHINE)
 # ==========================================
 def execute_grid_bot(bot_id, bot, pair):
     """
-    Runs every 15s. Three states:
-    1. INIT: No active grids → deploy initial grid
-    2. FOLLOW: Grids exist, follow=True → slide window to track price
-    3. HALT: ADX/ATR adverse → cancel all, exit inventory
+    Runs every 15s. Four states:
+    1. HALTED: Adverse conditions hit -- only process remaining sell orders, no new buys
+    2. CHECK FILLS: Always check if any grid orders filled (REST fallback)
+    3. FOLLOW: Grids exist, follow=True -> slide window to track price
+    4. INIT: No active grids -> deploy initial grid
+    
+    Emergency halt triggers: ADX >= 25 or tail-risk (2 ATR below floor)
     """
     settings = bot.get('settings', {})
     
@@ -832,16 +967,62 @@ def execute_grid_bot(bot_id, bot, pair):
 
     active_grids = settings.get('active_grids')
     has_grids = active_grids and len(active_grids) > 0
+    is_halted = settings.get('halted', False)
     lower = settings.get('lower_price')
     
-    # --- STATE: EMERGENCY HALT (only if grids are live) ---
+    # --- STATE: HALTED (only process sell fills, no new buys) ---
+    if is_halted and has_grids:
+        # Still check fills so sell orders get processed
+        grid_check_fills(bot_id, bot, pair)
+        
+        # If all sells have filled (no more grids or only empty list), clear halt
+        remaining = settings.get('active_grids', [])
+        held = abs(bot.get('asset_held', 0))
+        
+        if not remaining and held < 0.000001:
+            settings.pop('halted', None)
+            settings.pop('halted_reason', None)
+            settings.pop('halted_at', None)
+            settings.pop('active_grids', None)
+            settings.pop('step_size', None)
+            settings.pop('chunk_size', None)
+            save_bots()
+            print(f"[GRID BOT | {pair}] Halt cleared -- all positions closed. Ready to re-deploy when conditions improve.")
+        elif held > 0 and not any(g['side'] == 'SELL' for g in remaining):
+            # Still holding inventory but no sell orders -- re-place exit sell
+            step_size = settings.get('step_size', cur_px * 0.006)
+            exit_px = cur_px + (step_size * 0.5)
+            str_price = snap_to_increment(exit_px, quote_inc)
+            str_qty = snap_to_increment(held, base_inc)
+            if float(str_qty) > 0:
+                oid = str(uuid.uuid4())
+                try:
+                    api_res = client.limit_order_gtc_sell(
+                        client_order_id=oid, product_id=pair,
+                        base_size=str_qty, limit_price=str_price, post_only=True
+                    )
+                    success = getattr(api_res, 'success', False) or (isinstance(api_res, dict) and api_res.get('success', False))
+                    if success or (isinstance(api_res, dict) and api_res.get('failure_reason', '') == 'UNKNOWN_FAILURE_REASON'):
+                        remaining.append({"price": float(str_price), "side": "SELL", "oid": oid})
+                        save_bots()
+                        print(f"[GRID HALT | {pair}] Re-placed exit SELL at {str_price}")
+                except Exception as e:
+                    print(f"[GRID HALT | {pair}] Exit SELL retry failed: {e}")
+        return
+    
+    # --- ALWAYS: Check fills on active grids (REST fallback) ---
     if has_grids:
-        # ADX halt: strong trend detected
+        grid_check_fills(bot_id, bot, pair)
+        # Re-read after fill check (grids may have changed)
+        active_grids = settings.get('active_grids', [])
+        has_grids = active_grids and len(active_grids) > 0
+    
+    # --- TRIGGER: Emergency halt check (only when grids are live and not already halted) ---
+    if has_grids and not is_halted:
         if curr_adx >= 25:
             grid_emergency_halt(bot_id, bot, pair, cur_px, f"ADX={curr_adx:.1f} >= 25. Trend too strong.")
             return
         
-        # ATR tail-risk: price crashed > 2 ATR below floor
         if lower and curr_atr > 0:
             tail_level = lower - (2.0 * curr_atr)
             if cur_px < tail_level:
@@ -853,13 +1034,9 @@ def execute_grid_bot(bot_id, bot, pair):
         follow_enabled = settings.get('follow', False)
         if follow_enabled:
             grid_follow(bot_id, bot, pair, cur_px, df)
-        # Clear any previous halt state since we're running normally
-        settings.pop('halted_reason', None)
-        settings.pop('halted_at', None)
         return
     
-    # --- STATE: INIT (no active grids → deploy) ---
-    # Don't init during adverse conditions
+    # --- STATE: INIT (no active grids -> deploy) ---
     if curr_adx >= 25:
         print(f"[GRID BOT | {pair}] DORMANT: ADX={curr_adx:.1f} >= 25. Waiting to deploy.")
         return
