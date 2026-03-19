@@ -1,26 +1,93 @@
 <!DOCTYPE html>
 <html lang="en" data-bs-theme="dark">
 <head>
-    <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Advanced Terminal</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.1/font/bootstrap-icons.css">
     <style>
-        body { background: #0b0c10; color: #fff; font-family: sans-serif; }
-        .card-custom { background: #1f2833; border: 1px solid #45a29e; border-radius: 12px; }
-        .indicator-tag { font-size: 0.65rem; padding: 2px 6px; border-radius: 4px; font-weight: bold; margin-right: 4px; cursor: help; }
-        .bull { background: #00d57822; color: #00d578; }
-        .bear { background: #ff4b5c22; color: #ff4b5c; }
-        .neu { background: #6c757d22; color: #adb5bd; }
-        .text-success-custom { color: #66fcf1; }
-        .text-danger-custom { color: #ff4b5c; }
-        .text-warning-custom { color: #ffc107; }
-        .book-row { font-family: monospace; font-size: 0.75rem; display: flex; justify-content: space-between; }
-        .nav-tabs .nav-link { color: #45a29e; border-radius: 12px 12px 0 0; }
-        .nav-tabs .nav-link.active { background-color: #1f2833; border-color: #45a29e; color: #66fcf1; }
-        .progress-bar-custom { height: 10px; border-radius: 5px; background: #333; display: flex; overflow: hidden; }
-        .progress-bid { background: #00d578; }
-        .progress-ask { background: #ff4b5c; }
+        body {
+            background: #0b0c10;
+            color: #fff;
+            font-family: sans-serif;
+        }
+
+        .card-custom {
+            background: #1f2833;
+            border: 1px solid #45a29e;
+            border-radius: 12px;
+        }
+
+        .indicator-tag {
+            font-size: 0.65rem;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-weight: bold;
+            margin-right: 4px;
+            cursor: help;
+        }
+
+        .bull {
+            background: #00d57822;
+            color: #00d578;
+        }
+
+        .bear {
+            background: #ff4b5c22;
+            color: #ff4b5c;
+        }
+
+        .neu {
+            background: #6c757d22;
+            color: #adb5bd;
+        }
+
+        .text-success-custom {
+            color: #66fcf1;
+        }
+
+        .text-danger-custom {
+            color: #ff4b5c;
+        }
+
+        .text-warning-custom {
+            color: #ffc107;
+        }
+
+        .book-row {
+            font-family: monospace;
+            font-size: 0.75rem;
+            display: flex;
+            justify-content: space-between;
+        }
+
+        .nav-tabs .nav-link {
+            color: #45a29e;
+            border-radius: 12px 12px 0 0;
+        }
+
+            .nav-tabs .nav-link.active {
+                background-color: #1f2833;
+                border-color: #45a29e;
+                color: #66fcf1;
+            }
+
+        .progress-bar-custom {
+            height: 10px;
+            border-radius: 5px;
+            background: #333;
+            display: flex;
+            overflow: hidden;
+        }
+
+        .progress-bid {
+            background: #00d578;
+        }
+
+        .progress-ask {
+            background: #ff4b5c;
+        }
     </style>
 </head>
 <body>
@@ -40,7 +107,7 @@
         </ul>
 
         <div class="tab-content" id="terminalTabsContent">
-            
+
             <div class="tab-pane fade show active" id="trade-panel" role="tabpanel">
                 <div class="d-flex gap-2 mb-4 align-items-center">
                     <select id="pair-select" class="form-select bg-dark text-white border-secondary" style="max-width:280px;" onchange="onPairSelect(this.value)">
@@ -235,12 +302,12 @@
                     <div class="col-lg-4 mb-4">
                         <div class="card card-custom p-4 h-100">
                             <h5 class="fw-bold text-success-custom mb-4"><i class="bi bi-robot me-2"></i>Deploy Bot</h5>
-                            
+
                             <div class="mb-3">
                                 <label class="small text-muted mb-1">ASSET PAIR</label>
                                 <input type="text" id="bot-pair" class="form-control bg-dark border-secondary text-white" placeholder="e.g. BTC-USD" style="text-transform: uppercase;" oninput="previewGrid()">
                             </div>
-                            
+
                             <div class="mb-3">
                                 <label class="small text-muted mb-1">STRATEGY</label>
                                 <select id="bot-strategy" class="form-select bg-dark text-white border-secondary" onchange="toggleBotSettings()">
@@ -265,7 +332,7 @@
                                 </select>
                                 <small class="text-muted mt-1 d-block" style="font-size: 0.6rem;">Default set by strategy. Can be changed after deployment.</small>
                             </div>
-                            
+
                             <div class="mb-4">
                                 <label class="small text-muted mb-1">ALLOCATED CAPITAL (USD)</label>
                                 <input type="number" id="bot-amount" class="form-control bg-dark border-secondary text-white" placeholder="e.g. 100" step="any" oninput="previewGrid()">
@@ -353,86 +420,96 @@
     </div>
 
     <div class="modal fade" id="rebalanceModal" tabindex="-1">
-        <div class="modal-dialog modal-dialog-centered"><div class="modal-content card-custom p-4 shadow-lg">
-            <h4 class="fw-bold text-warning mb-3">Configure Targets</h4>
-            <div id="reb-rows-container" class="mb-3"></div>
-            <button class="btn btn-sm btn-outline-primary w-100 mb-4 fw-bold" onclick="addRebRow('','')">+ ADD ASSET</button>
-            <div class="d-flex justify-content-between align-items-center border-top border-secondary pt-3 mb-3">
-                <span class="text-muted fw-bold">TOTAL:</span><span id="reb-total-calc" class="fw-bold fs-5">0%</span>
+        <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content card-custom p-4 shadow-lg">
+                <h4 class="fw-bold text-warning mb-3">Configure Targets</h4>
+                <div id="reb-rows-container" class="mb-3"></div>
+                <button class="btn btn-sm btn-outline-primary w-100 mb-4 fw-bold" onclick="addRebRow('','')">+ ADD ASSET</button>
+                <div class="d-flex justify-content-between align-items-center border-top border-secondary pt-3 mb-3">
+                    <span class="text-muted fw-bold">TOTAL:</span><span id="reb-total-calc" class="fw-bold fs-5">0%</span>
+                </div>
+                <button class="btn btn-warning w-100 py-2 fw-bold" onclick="saveRebalance()">SAVE CONFIGURATION</button>
             </div>
-            <button class="btn btn-warning w-100 py-2 fw-bold" onclick="saveRebalance()">SAVE CONFIGURATION</button>
-        </div></div>
+        </div>
     </div>
 
     <div class="modal fade" id="tpslModal" tabindex="-1">
-        <div class="modal-dialog modal-dialog-centered"><div class="modal-content card-custom p-4 shadow-lg">
-            <div class="text-center">
-                <h4 class="fw-bold mb-0 text-warning-custom">Manage Targets</h4>
-                <p id="tpsl-pair" class="text-muted small mb-4"></p>
-                <div class="mb-3 text-start"><label class="small text-success-custom fw-bold mb-1">TAKE PROFIT PRICE</label><input type="number" id="tp-price" class="form-control bg-dark border-secondary text-white" step="any"></div>
-                <div class="mb-4 text-start"><label class="small text-danger-custom fw-bold mb-1">STOP LOSS PRICE</label><input type="number" id="sl-price" class="form-control bg-dark border-secondary text-white" step="any"></div>
-                <button class="btn btn-primary w-100 py-3 fw-bold" onclick="submitTPSL()">SET TARGETS</button>
+        <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content card-custom p-4 shadow-lg">
+                <div class="text-center">
+                    <h4 class="fw-bold mb-0 text-warning-custom">Manage Targets</h4>
+                    <p id="tpsl-pair" class="text-muted small mb-4"></p>
+                    <div class="mb-3 text-start"><label class="small text-success-custom fw-bold mb-1">TAKE PROFIT PRICE</label><input type="number" id="tp-price" class="form-control bg-dark border-secondary text-white" step="any"></div>
+                    <div class="mb-4 text-start"><label class="small text-danger-custom fw-bold mb-1">STOP LOSS PRICE</label><input type="number" id="sl-price" class="form-control bg-dark border-secondary text-white" step="any"></div>
+                    <button class="btn btn-primary w-100 py-3 fw-bold" onclick="submitTPSL()">SET TARGETS</button>
+                </div>
             </div>
-        </div></div>
+        </div>
     </div>
 
     <div class="modal fade" id="botFundsModal" tabindex="-1">
-        <div class="modal-dialog modal-dialog-centered"><div class="modal-content card-custom p-4 shadow-lg">
-            <h4 class="fw-bold text-primary mb-1">Manage Bot Funds</h4>
-            <p id="fund-bot-label" class="text-muted small mb-4"></p>
-            <div class="mb-3">
-                <label class="small text-muted mb-1">AMOUNT (USD)</label>
-                <input type="number" id="fund-amount" class="form-control bg-dark border-secondary text-white" placeholder="e.g. 50" step="any">
+        <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content card-custom p-4 shadow-lg">
+                <h4 class="fw-bold text-primary mb-1">Manage Bot Funds</h4>
+                <p id="fund-bot-label" class="text-muted small mb-4"></p>
+                <div class="mb-3">
+                    <label class="small text-muted mb-1">AMOUNT (USD)</label>
+                    <input type="number" id="fund-amount" class="form-control bg-dark border-secondary text-white" placeholder="e.g. 50" step="any">
+                </div>
+                <div class="row g-2">
+                    <div class="col-6"><button class="btn btn-success w-100 py-3 fw-bold" onclick="submitBotFund('deposit')">DEPOSIT</button></div>
+                    <div class="col-6"><button class="btn btn-danger w-100 py-3 fw-bold" onclick="submitBotFund('withdraw')">WITHDRAW</button></div>
+                </div>
+                <small class="text-muted mt-3 d-block text-center" style="font-size:0.6rem;">Withdrawals are limited to idle USD not held in open positions.</small>
             </div>
-            <div class="row g-2">
-                <div class="col-6"><button class="btn btn-success w-100 py-3 fw-bold" onclick="submitBotFund('deposit')">DEPOSIT</button></div>
-                <div class="col-6"><button class="btn btn-danger w-100 py-3 fw-bold" onclick="submitBotFund('withdraw')">WITHDRAW</button></div>
-            </div>
-            <small class="text-muted mt-3 d-block text-center" style="font-size:0.6rem;">Withdrawals are limited to idle USD not held in open positions.</small>
-        </div></div>
+        </div>
     </div>
 
     <div class="modal fade" id="tradeLogModal" tabindex="-1">
-        <div class="modal-dialog modal-lg modal-dialog-centered modal-dialog-scrollable"><div class="modal-content card-custom p-4 shadow-lg">
-            <div class="d-flex justify-content-between align-items-center mb-3">
-                <h4 class="fw-bold text-primary mb-0"><i class="bi bi-journal-text me-2"></i>Trade Log</h4>
-                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+        <div class="modal-dialog modal-lg modal-dialog-centered modal-dialog-scrollable">
+            <div class="modal-content card-custom p-4 shadow-lg">
+                <div class="d-flex justify-content-between align-items-center mb-3">
+                    <h4 class="fw-bold text-primary mb-0"><i class="bi bi-journal-text me-2"></i>Trade Log</h4>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                </div>
+                <p id="trade-log-label" class="text-muted small mb-3"></p>
+                <div class="table-responsive" style="max-height: 400px;">
+                    <table class="table table-dark table-hover table-sm align-middle" style="font-size: 0.8rem;">
+                        <thead class="sticky-top" style="background:#1f2833;"><tr><th>Time</th><th>Side</th><th>Entry</th><th>Exit</th><th>Size</th><th>PnL</th><th>Exit Reason</th></tr></thead>
+                        <tbody id="trade-log-body"><tr><td colspan="7" class="text-center text-muted py-4">Loading...</td></tr></tbody>
+                    </table>
+                </div>
             </div>
-            <p id="trade-log-label" class="text-muted small mb-3"></p>
-            <div class="table-responsive" style="max-height: 400px;">
-                <table class="table table-dark table-hover table-sm align-middle" style="font-size: 0.8rem;">
-                    <thead class="sticky-top" style="background:#1f2833;"><tr><th>Time</th><th>Side</th><th>Entry</th><th>Exit</th><th>Size</th><th>PnL</th><th>Exit Reason</th></tr></thead>
-                    <tbody id="trade-log-body"><tr><td colspan="7" class="text-center text-muted py-4">Loading...</td></tr></tbody>
-                </table>
-            </div>
-        </div></div>
+        </div>
     </div>
 
     <div class="modal fade" id="botChartModal" tabindex="-1">
-        <div class="modal-dialog modal-fullscreen-sm-down modal-xl modal-dialog-centered"><div class="modal-content card-custom p-2 p-md-3 shadow-lg">
-            <div class="d-flex justify-content-between align-items-center mb-2">
-                <div>
-                    <h5 class="fw-bold text-primary mb-0" id="bot-chart-title" style="font-size:1rem;"><i class="bi bi-graph-up me-2"></i>Bot Chart</h5>
-                    <small class="text-muted" id="bot-chart-subtitle" style="font-size:0.6rem;"></small>
+        <div class="modal-dialog modal-fullscreen-sm-down modal-xl modal-dialog-centered">
+            <div class="modal-content card-custom p-2 p-md-3 shadow-lg">
+                <div class="d-flex justify-content-between align-items-center mb-2">
+                    <div>
+                        <h5 class="fw-bold text-primary mb-0" id="bot-chart-title" style="font-size:1rem;"><i class="bi bi-graph-up me-2"></i>Bot Chart</h5>
+                        <small class="text-muted" id="bot-chart-subtitle" style="font-size:0.6rem;"></small>
+                    </div>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
                 </div>
-                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                <div id="bot-chart-container" style="width:100%; height:50vh; min-height:250px;"></div>
+                <div id="bot-chart-info" class="border-top border-secondary pt-2 mt-2" style="font-size:0.65rem;"></div>
             </div>
-            <div id="bot-chart-container" style="width:100%; height:50vh; min-height:250px;"></div>
-            <div id="bot-chart-info" class="border-top border-secondary pt-2 mt-2" style="font-size:0.65rem;"></div>
-        </div></div>
+        </div>
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
     <script src="https://unpkg.com/lightweight-charts@4.1.1/dist/lightweight-charts.standalone.production.js"></script>
-    
+
     <script>
         let currentData = { positions: [], history: [], total_value: 0.0, rebalance: [], rebalance_configured: false, trails: [], free_usd: 0.0, bot_locked_usd: 0.0 };
-        let indicatorState = {}; 
-        
+        let indicatorState = {};
+
         // Active pair state (tied to chart)
         let activePairType = 'SPOT';  // SPOT or FUTURE
         let activePairPrice = 0;
-        
+
         // Product list cache
         let allProducts = [];
         let activeTypeFilter = 'ALL';
@@ -539,10 +616,10 @@
             chartPair = pair;
             document.getElementById('chart-pair-label').innerText = pair;
             const container = document.getElementById('tv_chart_container');
-            
+
             // Clear existing overlays when chart rebuilds
             overlayLines = {};
-            
+
             if (mainChart) { mainChart.remove(); mainChart = null; }
             mainChart = createChart(container);
             const series = addCandleAndVolume(mainChart);
@@ -554,14 +631,14 @@
                 rawCandles = candles;
                 mainCandleSeries.setData(candles);
                 mainVolumeSeries.setData(buildVolumeData(candles));
-                
+
                 // Show last 100 candles at readable zoom
                 const barsToShow = Math.min(100, candles.length);
                 mainChart.timeScale().setVisibleLogicalRange({
                     from: candles.length - barsToShow,
                     to: candles.length + 5
                 });
-                
+
                 const lastPx = candles[candles.length - 1].close;
                 activePairPrice = lastPx;
                 const prod = allProducts.find(p => p.id === pair);
@@ -732,13 +809,13 @@
             document.getElementById('bot-chart-title').innerHTML = `<i class="bi bi-graph-up me-2"></i>${pair}`;
             document.getElementById('bot-chart-subtitle').innerText = `${strategy} Bot -- ${(TF_LABELS[tf] || tf).toUpperCase()} -- ID: ${botId}`;
             document.getElementById('bot-chart-info').innerHTML = '<span class="text-muted">Loading...</span>';
-            
+
             botChartModal.show();
             await new Promise(r => setTimeout(r, 200));
-            
+
             const container = document.getElementById('bot-chart-container');
             container.innerHTML = '';
-            
+
             // Use actual container dimensions
             const chart = createChart(container, container.clientHeight || 300);
             chart.applyOptions({ width: container.clientWidth });
@@ -768,8 +845,8 @@
                 if (s.lower_price) {
                     series.candles.createPriceLine({
                         price: s.lower_price,
-                        color: 'rgba(0,213,120,0.6)',
-                        lineWidth: 1, lineStyle: 2,
+                        color: '#00d578',
+                        lineWidth: 2, lineStyle: 0,
                         axisLabelVisible: true,
                         title: 'FLOOR',
                     });
@@ -779,8 +856,8 @@
                 if (s.upper_price) {
                     series.candles.createPriceLine({
                         price: s.upper_price,
-                        color: 'rgba(255,75,92,0.6)',
-                        lineWidth: 1, lineStyle: 2,
+                        color: '#ff4b5c',
+                        lineWidth: 2, lineStyle: 0,
                         axisLabelVisible: true,
                         title: 'CEIL',
                     });
@@ -790,8 +867,8 @@
                 grids.forEach(g => {
                     series.candles.createPriceLine({
                         price: g.price,
-                        color: g.side === 'BUY' ? 'rgba(0,213,120,0.3)' : 'rgba(255,75,92,0.3)',
-                        lineWidth: 1, lineStyle: 1,
+                        color: g.side === 'BUY' ? 'rgba(0,213,120,0.7)' : 'rgba(255,75,92,0.7)',
+                        lineWidth: 2, lineStyle: 2,
                         axisLabelVisible: false,
                         title: '',
                     });
@@ -861,7 +938,7 @@
                     const haltBadge = settings.halted ? '<span class="badge bg-danger">HALTED</span>' : '';
                     const modeBadge = `<span class="badge bg-dark border border-secondary">${settings.mode || 'LONG'}</span>`;
                     const stepBadge = `<span class="badge bg-dark border border-secondary">${settings.step_pct || 0.6}%</span>`;
-                    
+
                     statusBadges = `<div class="d-flex gap-1 flex-wrap mb-1">${modeBadge}${stepBadge}${followOn}${haltBadge}<span class="badge bg-dark border border-success">${buys}B</span><span class="badge bg-dark border border-danger">${sells}S</span></div>`;
                 }
 
@@ -1125,7 +1202,7 @@
         async function loadIndicator(asset, type) {
             let pair = type === 'SPOT' ? `${asset}-USD` : asset;
             indicatorState[asset] = '<div class="spinner-border spinner-border-sm text-primary"></div>';
-            renderDashboard(); 
+            renderDashboard();
             try {
                 const r = await fetch(`/api/indicators/${pair}`); const d = await r.json();
                 if (d.rsi.includes('Err') || d.rsi === 'No Data') indicatorState[asset] = `<span class="indicator-tag neu">${d.rsi}</span>`;
@@ -1163,13 +1240,13 @@
 
         function renderDashboard() {
             if (!currentData.positions) return;
-            
+
             // Format top level values
             const currencyFormatter = new Intl.NumberFormat('en-US',{style:'currency',currency:'USD'});
             document.getElementById('total-val').innerText = currencyFormatter.format(currentData.total_value);
             document.getElementById('free-usd-val').innerText = currencyFormatter.format(currentData.free_usd || 0);
             document.getElementById('bot-locked-val').innerText = currencyFormatter.format(currentData.bot_locked_usd || 0);
-            
+
             // Rebalance UI
             let rebHTML = "";
             if (!currentData.rebalance_configured) {
@@ -1235,16 +1312,16 @@
                 const res = await fetch('/api/orders');
                 const data = await res.json();
                 const grid = document.getElementById('all-orders-grid');
-                
+
                 if (data.length === 0) {
                     grid.innerHTML = '<tr><td colspan="7" class="text-center text-muted py-4">No order history found.</td></tr>';
                     return;
                 }
 
                 grid.innerHTML = data.map(o => {
-                    let sClass = "bg-secondary text-white"; 
-                    if(o.status === 'FILLED') sClass = "bg-success text-dark"; 
-                    if(o.status === 'REJECTED' || o.status === 'FAILED') sClass = "bg-danger text-white"; 
+                    let sClass = "bg-secondary text-white";
+                    if(o.status === 'FILLED') sClass = "bg-success text-dark";
+                    if(o.status === 'REJECTED' || o.status === 'FAILED') sClass = "bg-danger text-white";
                     if(o.status === 'CANCELLED') sClass = "bg-warning text-dark";
                     if(o.status === 'OPEN' || o.status === 'PENDING') sClass = "bg-primary text-white";
 
@@ -1298,7 +1375,7 @@
         async function previewGrid() {
             // Only run for GRID strategy
             if (document.getElementById('bot-strategy').value !== 'GRID') return;
-            
+
             // Debounce: wait 400ms after last keystroke
             clearTimeout(_gridPreviewTimer);
             _gridPreviewTimer = setTimeout(_doPreviewGrid, 400);
@@ -1338,21 +1415,21 @@
             let amount = parseFloat(document.getElementById('bot-amount').value);
             const strategy = document.getElementById('bot-strategy').value;
             const timeframe = document.getElementById('bot-timeframe').value;
-            
+
             if (!pair || !amount || amount <= 0) return alert("Please enter a valid asset pair and allocation amount.");
             if (!pair.includes('-')) document.getElementById('bot-pair').value = pair + '-USD';
 
             const payload = { pair: document.getElementById('bot-pair').value, strategy: strategy, amount: amount, timeframe: timeframe, settings: {} };
-            
+
             if (strategy === 'GRID') {
                 const lower = parseFloat(document.getElementById('grid-lower').value);
                 const upper = parseFloat(document.getElementById('grid-upper').value);
                 const stepPct = parseFloat(document.getElementById('grid-step-pct').value) || 0.6;
                 const minOrder = parseFloat(document.getElementById('grid-min-order').value) || 5;
                 const mode = document.getElementById('grid-mode').value;
-                
+
                 if (!lower || !upper || upper <= lower) return alert("Invalid floor/ceiling. Run the preview first.");
-                
+
                 // Grid count derived from capital and min order size
                 const gridCount = Math.floor(amount / minOrder);
                 if (gridCount < 2) return alert("Need at least 2 grid levels. Increase capital or lower min order.");
@@ -1475,7 +1552,7 @@
                 const r = await fetch('/api/bots');
                 const bots = await r.json();
                 const grid = document.getElementById('active-bots-grid');
-                
+
                 if (Object.keys(bots).length === 0) {
                     grid.innerHTML = '<div class="text-center text-muted py-5">No bots currently deployed.</div>';
                     return;
@@ -1483,7 +1560,7 @@
 
                 grid.innerHTML = Object.entries(bots).map(([id, b]) => {
                     const statusClass = b.status === 'RUNNING' ? 'bg-success text-dark' : 'bg-danger';
-                    const pnl = b.live_pnl || 0; 
+                    const pnl = b.live_pnl || 0;
                     const pnlClass = pnl >= 0 ? 'text-success-custom' : 'text-danger-custom';
                     const s = b.stats || {};
                     const winRate = s.win_rate || 0;
@@ -1504,7 +1581,7 @@
                     }
 
                     // Build TF options for inline changer
-                    const tfOpts = ['1m','5m','15m','30m','1h','6h','1d'].map(t => 
+                    const tfOpts = ['1m','5m','15m','30m','1h','6h','1d'].map(t =>
                         `<option value="${t}" ${t===botTf?'selected':''}>${t.toUpperCase()}</option>`
                     ).join('');
 
@@ -1659,12 +1736,12 @@
         }
 
         // Intervals for polling data
-        setInterval(refresh, 5000); 
-        setInterval(loadScreener, 30000); 
+        setInterval(refresh, 5000);
+        setInterval(loadScreener, 30000);
         setInterval(loadAllOrders, 10000); // Polling for order state changes
 
         // Initial Data Loads
-        refresh(); 
+        refresh();
         loadScreener();
         loadAllOrders();
     </script>
