@@ -1047,77 +1047,41 @@ def grid_emergency_halt(bot_id, bot, pair, cur_px, reason, halt_mode='NEUTRAL'):
 
     print(f"[GRID HALT | {pair}] {reason}")
 
-    sell_grids = [g for g in active_grids if g['side'] == 'SELL']
     buy_grids = [g for g in active_grids if g['side'] == 'BUY']
-
     cancelled = 0
     cancelled_prices = risk.setdefault('cancelled_buy_levels', [])
 
     # In FAVORABLE halt: keep buys alive (trend is carrying us)
-    # In ADVERSE/NEUTRAL: cancel buys
+    # In ADVERSE/NEUTRAL: cancel buys securely
     if halt_mode != 'FAVORABLE':
-        try:
-            open_res = client.get("/api/v3/brokerage/orders/historical/batch", params={
-                "order_status": "OPEN", "product_id": pair, "limit": 100
-            })
-            open_orders = open_res.get('orders', [])
-
-            sell_oids = {g.get('oid', '') for g in sell_grids}
-            sell_cb_oids = {g.get('cb_oid', '') for g in sell_grids}
-
-            buy_order_ids = []
-            for o in open_orders:
-                server_id = o.get('order_id', '')
-                client_id = o.get('client_order_id', '')
-                if client_id in sell_oids or server_id in sell_cb_oids:
-                    continue
-                if server_id:
-                    buy_order_ids.append(server_id)
-
-            for i in range(0, len(buy_order_ids), 10):
-                batch = buy_order_ids[i:i+10]
-                try:
-                    res = client.cancel_orders(order_ids=batch)
-                    results = res.get('results', []) if isinstance(res, dict) else getattr(res, 'results', [])
-                    for r in results:
-                        r_dict = r if isinstance(r, dict) else r.__dict__ if hasattr(r, '__dict__') else {}
-                        if r_dict.get('success', False):
-                            cancelled += 1
-                except Exception as e:
-                    print(f"[GRID HALT] Batch cancel error: {e}")
-                time.sleep(0.2)
-
-            # Track cancelled buy prices for redeployment
-            for g in buy_grids:
+        for g in list(buy_grids):
+            if cancel_order_safe(g):
                 cancelled_prices.append(g['price'])
-
-        except Exception as e:
-            print(f"[GRID HALT | {pair}] Failed to fetch open orders: {e}")
-
+                if g in active_grids:
+                    active_grids.remove(g)
+                cancelled += 1
+        sell_grids = [g for g in active_grids if g['side'] == 'SELL']
         print(f"[GRID HALT | {pair}] {halt_mode}: Cancelled {cancelled} orders. Keeping {len(sell_grids)} sells.")
-        # Remove buy grids from tracking
-        active_grids_remaining = sell_grids
     else:
+        sell_grids = [g for g in active_grids if g['side'] == 'SELL']
         print(f"[GRID HALT | {pair}] FAVORABLE: Keeping {len(buy_grids)} buys + {len(sell_grids)} sells alive.")
-        active_grids_remaining = active_grids  # Keep everything
 
     # If holding inventory with no sells, place exit sell
     held = abs(bot.get('asset_held', 0))
-    if held > 0 and not any(g['side'] == 'SELL' for g in active_grids_remaining) and step_size > 0:
+    if held > 0 and not any(g['side'] == 'SELL' for g in active_grids) and step_size > 0:
         exit_px = cur_px + (step_size * 0.5)
         exit_grid = place_grid_sell(pair, exit_px, held, base_inc, quote_inc, deriv_flag, mult)
         if exit_grid:
-            active_grids_remaining.append(exit_grid)
+            active_grids.append(exit_grid)
             print(f"[GRID HALT | {pair}] Placed exit SELL at {exit_px:.2f}")
 
-    bot['settings']['active_grids'] = active_grids_remaining
     bot['settings']['halted'] = True
     bot['settings']['halted_reason'] = reason
     bot['settings']['halted_at'] = datetime.now(timezone.utc).isoformat()
     risk['halt_mode'] = halt_mode
     risk['halt_trigger_price'] = cur_px
     risk['direction_streak'] = 0
-    risk['last_streak_direction'] = direction
+    risk['last_streak_direction'] = risk.get('direction', 'CHOPPY')
     save_bots()
 
 # ==========================================
@@ -1502,28 +1466,28 @@ def evaluate_depth_escalation(bot, pair, direction, cur_px):
     cancelled_prices = risk.setdefault('cancelled_buy_levels', [])
 
     if depth >= 6:
-        # CRITICAL: cancel ALL remaining buys
+        # CRITICAL: cancel ALL remaining buys securely
         count = 0
         for g in list(buy_grids):
-            cancel_order_safe(g)
-            cancelled_prices.append(g['price'])
-            if g in active_grids:
-                active_grids.remove(g)
-            count += 1
+            if cancel_order_safe(g):
+                cancelled_prices.append(g['price'])
+                if g in active_grids:
+                    active_grids.remove(g)
+                count += 1
         if count:
-            print(f"[RISK ENGINE | {pair}] CRITICAL depth={depth}: Cancelled ALL {count} open buys")
+            print(f"[RISK ENGINE | {pair}] CRITICAL depth={depth}: Cancelled {count} open buys")
             save_bots()
 
     elif depth >= 4 and direction == 'FALLING':
-        # ELEVATED + FALLING: cancel bottom 1-2 buys
+        # ELEVATED + FALLING: cancel bottom 1-2 buys securely
         to_cancel = buy_grids[:min(2, len(buy_grids))]
         count = 0
         for g in to_cancel:
-            cancel_order_safe(g)
-            cancelled_prices.append(g['price'])
-            if g in active_grids:
-                active_grids.remove(g)
-            count += 1
+            if cancel_order_safe(g):
+                cancelled_prices.append(g['price'])
+                if g in active_grids:
+                    active_grids.remove(g)
+                count += 1
         if count:
             print(f"[RISK ENGINE | {pair}] ELEVATED depth={depth} FALLING: Cancelled {count} lowest buys")
             save_bots()
@@ -1669,21 +1633,6 @@ def manage_runner_exits(bot, pair, cur_px):
 def execute_grid_bot(bot_id, bot, pair):
     """
     Runs every 15s. Grid Risk Engine integrated.
-
-    Cycle order:
-    1. Fetch price + candles
-    2. Direction (SMA 5)
-    3. ADX / ATR
-    4. Sync depth score
-    5. Circuit breaker check
-    6. Trailing stop check
-    7. Halt evaluation (ADX + direction -> halt mode)
-    8. If halted: adjust trails, manage buys, check recovery
-    9. If not halted: depth escalation, recovery velocity, runners
-    10. REST fill check
-    11. Buy redeployment
-    12. Follow logic (blocked if depth > 3)
-    13. INIT (no grids -> deploy with risk state)
     """
     settings = bot.get('settings', {})
     risk = settings.setdefault('risk', {})
@@ -1705,7 +1654,6 @@ def execute_grid_bot(bot_id, bot, pair):
         return
 
     if len(candles) < 50:
-        print(f"[GRID BOT | {pair}] Only {len(candles)} candles, need 50. Waiting...")
         return
 
     parsed = [{'start': int(c['start']), 'high': float(c['high']), 'low': float(c['low']),
@@ -1725,30 +1673,38 @@ def execute_grid_bot(bot_id, bot, pair):
     except:
         curr_adx, curr_atr = 0.0, 0.0
 
-    active_grids = settings.get('active_grids')
+    # --- 4. REST fill check (MOVED UP FOR SAFETY) ---
+    active_grids = settings.get('active_grids', [])
     has_grids = active_grids and len(active_grids) > 0
+
+    if has_grids:
+        grid_check_fills(bot_id, bot, pair)
+        # Re-read state after potential fills
+        active_grids = settings.get('active_grids', [])
+        has_grids = active_grids and len(active_grids) > 0
+
     is_halted = settings.get('halted', False)
     lower = settings.get('lower_price')
 
-    # --- 4. Sync depth ---
+    # --- 5. Sync depth ---
     trails = risk.get('per_fill_trails', [])
     depth = len(trails)
     risk['depth_score'] = depth
 
-    # --- 5. Circuit breaker ---
+    # --- 6. Circuit breaker ---
     if check_circuit_breaker(bot, cur_px, pair):
         return
 
-    # --- 6. Trailing stops ---
+    # --- 7. Trailing stops ---
     if check_trailing_stops(bot, cur_px, pair):
-        # Re-read state after potential sells
+        # Re-read state after potential defensive sells
         active_grids = settings.get('active_grids', [])
         has_grids = bool(active_grids)
         trails = risk.get('per_fill_trails', [])
         depth = len(trails)
         risk['depth_score'] = depth
 
-    # --- 7. Halt evaluation ---
+    # --- 8. Halt evaluation ---
     if has_grids and not is_halted:
         should_halt = False
         halt_reason = ''
@@ -1772,19 +1728,17 @@ def execute_grid_bot(bot_id, bot, pair):
         if should_halt:
             risk['halt_mode'] = halt_mode
             grid_emergency_halt(bot_id, bot, pair, cur_px, halt_reason, halt_mode)
-            # Immediately adjust trails for the new halt mode
             adjust_trail_multipliers(bot, halt_mode, depth)
             save_bots()
             return
 
-    # --- 8. Halted state management (with deadband) ---
+    # --- 9. Halted state management (with deadband) ---
     if is_halted:
         halt_mode = risk.get('halt_mode', 'NEUTRAL')
         halt_trigger_px = risk.get('halt_trigger_price', cur_px)
         streak = risk.get('direction_streak', 0)
         last_dir = risk.get('last_streak_direction', 'CHOPPY')
 
-        # Track consecutive direction readings
         if direction == last_dir and direction != 'CHOPPY':
             streak += 1
         elif direction != last_dir:
@@ -1792,7 +1746,6 @@ def execute_grid_bot(bot_id, bot, pair):
         risk['direction_streak'] = streak
         risk['last_streak_direction'] = direction
 
-        # Deadband state machine
         new_mode = halt_mode
 
         if halt_mode == 'ADVERSE':
@@ -1826,34 +1779,33 @@ def execute_grid_bot(bot_id, bot, pair):
         halt_mode = new_mode
         risk['halt_mode'] = halt_mode
 
-        # Adjust trails for current halt mode
         adjust_trail_multipliers(bot, halt_mode, depth)
 
-        # Cancel open buys in adverse/neutral halt
+        # Cancel open buys securely
         if halt_mode in ('ADVERSE', 'NEUTRAL'):
             buy_grids = [g for g in (active_grids or []) if g['side'] == 'BUY']
             if buy_grids:
                 cancelled_prices = risk.setdefault('cancelled_buy_levels', [])
+                count = 0
                 for g in list(buy_grids):
-                    cancel_order_safe(g)
-                    cancelled_prices.append(g['price'])
-                    if g in active_grids:
-                        active_grids.remove(g)
-                if buy_grids:
-                    print(f"[GRID HALT | {pair}] {halt_mode}: Cancelled {len(buy_grids)} buys")
+                    if cancel_order_safe(g):
+                        cancelled_prices.append(g['price'])
+                        if g in active_grids:
+                            active_grids.remove(g)
+                        count += 1
+                if count:
+                    print(f"[GRID HALT | {pair}] {halt_mode}: Cancelled {count} buys")
 
-        # Check fills (sells may still complete during halt)
+        # Re-check fills just in case a sell filled during this cycle
         if has_grids:
             grid_check_fills(bot_id, bot, pair)
 
-        # Recalculate after fills
         active_grids = settings.get('active_grids', [])
         trails = risk.get('per_fill_trails', [])
         depth = len(trails)
         risk['depth_score'] = depth
         held = abs(bot.get('asset_held', 0))
 
-        # Check if halt can clear
         if depth == 0 and held < 0.000001:
             if curr_adx < 25:
                 settings.pop('halted', None)
@@ -1866,10 +1818,7 @@ def execute_grid_bot(bot_id, bot, pair):
                 settings.pop('chunk_size', None)
                 save_bots()
                 print(f"[GRID BOT | {pair}] Halt cleared. ADX={curr_adx:.1f}. Ready to redeploy.")
-            else:
-                print(f"[GRID BOT | {pair}] HALTED. Depth=0 but ADX={curr_adx:.1f} >= 25.")
         elif held > 0.000001 and depth == 0:
-            # Inventory held but no trails tracking it -- re-place exit sell
             remaining = settings.get('active_grids', [])
             if not any(g['side'] == 'SELL' for g in remaining):
                 step_size = settings.get('step_size', cur_px * 0.006)
@@ -1885,31 +1834,20 @@ def execute_grid_bot(bot_id, bot, pair):
         save_bots()
         return
 
-    # --- 9. Not halted: depth escalation + recovery ---
+    # --- 10. Not halted: depth escalation + recovery ---
     compute_recovery_velocity(risk)
     adjust_trail_multipliers(bot, None, depth)
 
     if depth >= 4:
         evaluate_depth_escalation(bot, pair, direction, cur_px)
 
-    # Runner mode: convert deep profitable fills to trail-only
     if risk.get('recovery_velocity', 0) >= 2.0:
         manage_runner_exits(bot, pair, cur_px)
 
-    # Update current risk
     risk['risk_current'] = round(sum(
         t.get('effective_trail', t['base_trail_distance']) * t['quantity']
         for t in risk.get('per_fill_trails', [])
     ), 4) if risk.get('per_fill_trails') else risk.get('risk_max', 0)
-
-    # --- 10. REST fill check ---
-    active_grids = settings.get('active_grids', [])
-    has_grids = active_grids and len(active_grids) > 0
-
-    if has_grids:
-        grid_check_fills(bot_id, bot, pair)
-        active_grids = settings.get('active_grids', [])
-        has_grids = active_grids and len(active_grids) > 0
 
     # --- 11. Buy redeployment ---
     step_size = settings.get('step_size', 0)
@@ -1976,10 +1914,10 @@ def execute_grid_bot(bot_id, bot, pair):
         if not deriv_flag:
             print(f"[GRID BOT | {pair}] WARNING: SHORT mode on spot requires inventory.")
 
-        total_orders = len(buy_levels) + len(sell_levels)
-        if total_orders == 0:
-            print(f"[GRID BOT | {pair}] No valid levels in old range. Auto-recentering on {cur_px:.2f}")
-            grid_count = settings.get('grid_count', max(2, int(bot['current_usd'] / settings.get('min_order_usd', 5))))
+    total_orders = len(buy_levels) + len(sell_levels)
+    if total_orders == 0:
+        print(f"[GRID BOT | {pair}] No valid levels in old range. Auto-recentering on {cur_px:.2f}")
+        grid_count = settings.get('grid_count', max(2, int(bot['current_usd'] / settings.get('min_order_usd', 5))))
         if mode == 'LONG':
             lower = cur_px - (grid_count * step)
             upper = cur_px
@@ -2333,3 +2271,4 @@ def withdraw_from_bot(bot_id):
     return jsonify(success=True, message=f"Withdrew ${amount:.2f} from bot {bot_id}.")
 
 load_bots()
+
