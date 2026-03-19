@@ -1,4 +1,4 @@
-# GRID RISK ENGINE — FULL SPECIFICATION
+# GRID RISK ENGINE  FULL SPECIFICATION
 # Reference Document for Implementation
 # Date: 2026-03-18
 
@@ -14,7 +14,7 @@ recovery. Max loss is known before deployment.
 ## 1. MAX LOSS ENVELOPE (Defined at Deployment)
 
 Every grid level gets a trailing stop distance based on its position in the
-grid. Distances graduate — wider at top, tighter at bottom.
+grid. Distances graduate  wider at top, tighter at bottom.
 
 - Top third of levels:    trail = 3 steps below fill price
 - Middle third of levels: trail = 2 steps below fill price
@@ -25,7 +25,7 @@ Trailing stop activates per-fill the moment a buy order fills. High water
 mark starts at fill price, ratchets up with price. Stop triggers only if
 price drops trail distance from the high water mark.
 
-Max Loss = sum of (trail_distance_in_price × chunk_size_in_asset) for all
+Max Loss = sum of (trail_distance_in_price  chunk_size_in_asset) for all
 levels. This is deterministic from grid geometry alone. Calculated before
 any order is placed.
 
@@ -129,7 +129,7 @@ how much profit each fill represents.
 
 - Fills more than 2 steps in profit (deep fills recovering):
   Switch to trailing exit instead of fixed grid sell.
-  Don't sell at grid level — let trail manage exit.
+  Don't sell at grid level  let trail manage exit.
   If recovery has momentum, these ride further.
   If stalls, trail catches it at profit > normal flip.
 
@@ -266,3 +266,4 @@ New fields in bot.settings:
 - Trail state persisted to bots.json for crash recovery
 - Follow mode blocked when depth > 3 (don't slide grid deeper into trouble)
 - Recovery redeployment uses same place_grid_buy helper (gets cb_oid tracking)
+- **Secure Cancellations (Anti-Race Condition):** The engine must NEVER assume an API cancellation request succeeds. When the risk engine dictates a buy order cancellation (e.g., adverse halt, depth >= 4), it must explicitly verify the cancellation via the exchange API (`cancel_order_safe`). If the order cannot be cancelled (because it just filled), it must remain in local state to be processed by the REST fill checker on the next cycle.
