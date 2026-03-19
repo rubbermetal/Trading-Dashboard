@@ -382,6 +382,9 @@
                                     <div class="d-flex justify-content-between text-muted">
                                         <span>PER ORDER: <b class="text-white" id="gp-per-order">-</b></span>
                                         <span>PROFIT/FLIP: <b class="text-success-custom" id="gp-profit">-</b></span>
+                                        <span>MAX LOSS: <b class="text-danger-custom" id="gp-maxloss">-</b></span>
+                                        <span>RISK: <b class="text-warning-custom" id="gp-risk">-</b></span>
+                                        <span>FLIPS TO RECOVER: <b class="text-white" id="gp-recover">-</b></span>
                                     </div>
                                 </div>
                                 <small class="text-muted mt-2 d-block" style="font-size:0.55rem;">0.6% step = breakeven with maker fees. Floor/Ceiling auto-set from price but can be overridden.</small>
@@ -541,13 +544,13 @@
 
         // Overlay group definitions: which series keys + line styles
         const OVERLAY_GROUPS = {
-            ema:   { series: [{key:'ema20',color:'#FFD700',w:1},{key:'ema50',color:'#FFA500',w:1},{key:'ema200',color:'#4169E1',w:2}] },
-            bb:    { series: [{key:'bb_upper',color:'#9B59B6',w:1,dash:true},{key:'bb_lower',color:'#9B59B6',w:1,dash:true},{key:'bb_mid',color:'#9B59B6',w:1}] },
-            kc:    { series: [{key:'kc_upper',color:'#3498DB',w:1,dash:true},{key:'kc_lower',color:'#3498DB',w:1,dash:true}] },
-            ichi:  { series: [{key:'ichi_tenkan',color:'#E74C3C',w:1},{key:'ichi_kijun',color:'#2ECC71',w:1},{key:'ichi_span_a',color:'rgba(46,204,113,0.4)',w:1},{key:'ichi_span_b',color:'rgba(231,76,60,0.4)',w:1}] },
-            gator: { series: [{key:'gator_jaw',color:'#3498DB',w:1},{key:'gator_teeth',color:'#E74C3C',w:1},{key:'gator_lips',color:'#2ECC71',w:1}] },
-            tar:   { series: [{key:'tar',color:'#FF4444',w:2}] },
-            alma:  { series: [{key:'alma_fast',color:'#2ECC71',w:1},{key:'alma_slow',color:'#E74C3C',w:1}] },
+            ema: { series: [{ key: 'ema20', color: '#FFD700', w: 1 }, { key: 'ema50', color: '#FFA500', w: 1 }, { key: 'ema200', color: '#4169E1', w: 2 }] },
+            bb: { series: [{ key: 'bb_upper', color: '#9B59B6', w: 1, dash: true }, { key: 'bb_lower', color: '#9B59B6', w: 1, dash: true }, { key: 'bb_mid', color: '#9B59B6', w: 1 }] },
+            kc: { series: [{ key: 'kc_upper', color: '#3498DB', w: 1, dash: true }, { key: 'kc_lower', color: '#3498DB', w: 1, dash: true }] },
+            ichi: { series: [{ key: 'ichi_tenkan', color: '#E74C3C', w: 1 }, { key: 'ichi_kijun', color: '#2ECC71', w: 1 }, { key: 'ichi_span_a', color: 'rgba(46,204,113,0.4)', w: 1 }, { key: 'ichi_span_b', color: 'rgba(231,76,60,0.4)', w: 1 }] },
+            gator: { series: [{ key: 'gator_jaw', color: '#3498DB', w: 1 }, { key: 'gator_teeth', color: '#E74C3C', w: 1 }, { key: 'gator_lips', color: '#2ECC71', w: 1 }] },
+            tar: { series: [{ key: 'tar', color: '#FF4444', w: 2 }] },
+            alma: { series: [{ key: 'alma_fast', color: '#2ECC71', w: 1 }, { key: 'alma_slow', color: '#E74C3C', w: 1 }] },
         };
 
         // ==========================================
@@ -673,8 +676,8 @@
                 const data = await r.json();
                 if (data.error) { console.error('Products error:', data.error); return; }
                 allProducts = [];
-                (data.spot || []).forEach(p => allProducts.push({...p, group: 'SPOT'}));
-                (data.derivatives || []).forEach(p => allProducts.push({...p, group: 'DERIV'}));
+                (data.spot || []).forEach(p => allProducts.push({ ...p, group: 'SPOT' }));
+                (data.derivatives || []).forEach(p => allProducts.push({ ...p, group: 'DERIV' }));
                 renderPairSelect();
             } catch (e) { console.error('Failed to load products:', e); }
         }
@@ -728,7 +731,7 @@
         // ==========================================
         function updateTradePanel(pair, price, type) {
             document.getElementById('trade-pair-label').innerText = pair || 'N/A';
-            document.getElementById('trade-live-price').innerText = price ? `$${Number(price).toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:6})}` : '$0.00';
+            document.getElementById('trade-live-price').innerText = price ? `$${Number(price).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 6 })}` : '$0.00';
             const badge = document.getElementById('trade-type-badge');
             badge.innerText = (type || 'SPOT').toUpperCase();
             badge.className = type === 'SPOT' ? 'badge bg-primary' : 'badge bg-warning text-dark';
@@ -751,7 +754,7 @@
 
             const payload = { pair, side, order_type: orderType, amount, limit_price: limitPx };
             try {
-                const res = await fetch('/api/trade', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload) });
+                const res = await fetch('/api/trade', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
                 const d = await res.json();
                 alert(d.message || d.error);
                 document.getElementById('trade-amt').value = '';
@@ -765,7 +768,7 @@
             const size = document.getElementById('trade-trail-size').value;
             if (!pct || !size) return alert('Enter trail % and position size.');
             try {
-                const res = await fetch('/api/trail', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ pair, pct, size, cur_px: activePairPrice }) });
+                const res = await fetch('/api/trail', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pair, pct, size, cur_px: activePairPrice }) });
                 const d = await res.json();
                 alert(d.message || d.error);
                 document.getElementById('trade-trail-pct').value = '';
@@ -792,7 +795,7 @@
             const sl = document.getElementById('sl-price').value;
             if (!tp && !sl) return alert('Set at least one target.');
             try {
-                const res = await fetch('/api/tpsl', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ pair: tpslPair, size: tpslSize, side: tpslSide, type: tpslType, tp_price: tp || null, sl_price: sl || null }) });
+                const res = await fetch('/api/tpsl', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pair: tpslPair, size: tpslSize, side: tpslSide, type: tpslType, tp_price: tp || null, sl_price: sl || null }) });
                 const d = await res.json();
                 alert(d.message || d.error);
                 tpslModal.hide(); refresh(); loadAllOrders();
@@ -935,31 +938,46 @@
                     const buys = grids.filter(g => g.side === 'BUY').length;
                     const sells = grids.filter(g => g.side === 'SELL').length;
                     const followOn = settings.follow ? '<span class="badge bg-info text-dark">FOLLOW</span>' : '';
-                    const haltBadge = settings.halted ? '<span class="badge bg-danger">HALTED</span>' : '';
+                    const haltBadge = settings.halted ? `<span class="badge bg-danger">HALTED${settings.risk && settings.risk.halt_mode ? ' (' + settings.risk.halt_mode + ')' : ''}</span>` : '';
                     const modeBadge = `<span class="badge bg-dark border border-secondary">${settings.mode || 'LONG'}</span>`;
                     const stepBadge = `<span class="badge bg-dark border border-secondary">${settings.step_pct || 0.6}%</span>`;
 
-                    statusBadges = `<div class="d-flex gap-1 flex-wrap mb-1">${modeBadge}${stepBadge}${followOn}${haltBadge}<span class="badge bg-dark border border-success">${buys}B</span><span class="badge bg-dark border border-danger">${sells}S</span></div>`;
+                    let riskBadges = '';
+                    const rsk = botData.risk || settings.risk || {};
+                    if (rsk.depth_score !== undefined) {
+                        const d = rsk.depth_score;
+                        const dColor = d >= 6 ? '#ff4b5c' : d >= 4 ? '#ffa500' : d >= 2 ? '#00bfff' : '#00d578';
+                        const dirColor = rsk.direction === 'RISING' ? '#00d578' : rsk.direction === 'FALLING' ? '#ff4b5c' : '#aaa';
+                        riskBadges = `<div class="d-flex gap-1 flex-wrap mb-1">` +
+                            `<span class="badge" style="background:${dColor}22;color:${dColor};border:1px solid ${dColor}">Depth ${d}/${rsk.total_buy_levels || '?'}</span>` +
+                            `<span class="badge" style="background:${dirColor}22;color:${dirColor};border:1px solid ${dirColor}">${rsk.direction || '?'}</span>` +
+                            `<span class="badge bg-dark border border-warning">Risk $${(rsk.risk_current || 0).toFixed(2)}/$${(rsk.risk_max || 0).toFixed(2)}</span>` +
+                            (rsk.active_trails > 0 ? `<span class="badge bg-dark border border-info">${rsk.active_trails} trails</span>` : '') +
+                            (rsk.cancelled_buys > 0 ? `<span class="badge bg-dark border border-danger">${rsk.cancelled_buys} buys cancelled</span>` : '') +
+                            `</div>`;
+                    }
+
+                    statusBadges = `<div class="d-flex gap-1 flex-wrap mb-1">${modeBadge}${stepBadge}${followOn}${haltBadge}<span class="badge bg-dark border border-success">${buys}B</span><span class="badge bg-dark border border-danger">${sells}S</span></div>${riskBadges}`;
                 }
 
                 if (strategy === 'TRAP') {
                     const stage = botData.entry_stage || 0;
                     const stageBadge = stage === 0 ? '<span class="badge bg-dark border border-secondary">SCANNING</span>'
                         : stage === 1 ? '<span class="badge bg-warning text-dark">STAGE 1 (25%)</span>'
-                        : '<span class="badge bg-success text-dark">STAGE 2 (100%)</span>';
+                            : '<span class="badge bg-success text-dark">STAGE 2 (100%)</span>';
                     const avgE = botData.avg_entry ? `<span class="badge bg-dark border border-info">Avg $${Number(botData.avg_entry).toLocaleString()}</span>` : '';
                     statusBadges = `<div class="d-flex gap-1 flex-wrap mb-1">${stageBadge}${avgE}</div>`;
                 }
 
                 infoEl.innerHTML = `${statusBadges}<div class="d-flex flex-wrap gap-3">
-                    <div><span class="text-muted">Pos</span> <b class="${posClass}">${pos}${botData.entry_price ? ' $' + Number(botData.entry_price).toLocaleString() : ''}</b></div>
-                    <div><span class="text-muted">USD</span> <b>$${(botData.current_usd || 0).toFixed(2)}</b></div>
-                    <div><span class="text-muted">Held</span> <b>${(botData.asset_held || 0).toFixed(6)}</b></div>
-                    <div><span class="text-muted">Trades</span> <b>${s.total_trades || 0}</b></div>
-                    <div><span class="text-muted">WR</span> <b class="${wrClass}">${wr.toFixed(0)}%</b></div>
-                    <div><span class="text-muted">PnL</span> <b class="${tpClass}">${tpnl >= 0 ? '+' : ''}$${tpnl.toFixed(2)}</b></div>
-                    <div><span class="text-muted">Unreal</span> <b class="${(botData.live_pnl||0) >= 0 ? 'text-success-custom' : 'text-danger-custom'}">${(botData.live_pnl||0) >= 0 ? '+' : ''}$${(botData.live_pnl||0).toFixed(2)}</b></div>
-                </div>`;
+                        <div><span class="text-muted">Pos</span> <b class="${posClass}">${pos}${botData.entry_price ? ' $' + Number(botData.entry_price).toLocaleString() : ''}</b></div>
+                        <div><span class="text-muted">USD</span> <b>$${(botData.current_usd || 0).toFixed(2)}</b></div>
+                        <div><span class="text-muted">Held</span> <b>${(botData.asset_held || 0).toFixed(6)}</b></div>
+                        <div><span class="text-muted">Trades</span> <b>${s.total_trades || 0}</b></div>
+                        <div><span class="text-muted">WR</span> <b class="${wrClass}">${wr.toFixed(0)}%</b></div>
+                        <div><span class="text-muted">PnL</span> <b class="${tpClass}">${tpnl >= 0 ? '+' : ''}$${tpnl.toFixed(2)}</b></div>
+                        <div><span class="text-muted">Unreal</span> <b class="${(botData.live_pnl || 0) >= 0 ? 'text-success-custom' : 'text-danger-custom'}">${(botData.live_pnl || 0) >= 0 ? '+' : ''}$${(botData.live_pnl || 0).toFixed(2)}</b></div>
+                    </div>`;
             } else {
                 infoEl.innerHTML = '<span class="text-muted">Could not load bot data.</span>';
             }
@@ -1108,23 +1126,23 @@
                 };
 
                 return `<tr>
-                    <td class="fw-bold" style="position:sticky;left:0;background:#1f2833;z-index:1;color:#66fcf1;">${r.label}</td>
-                    ${v('avg','price')}${v('high','price')}${v('low','price')}
-                    ${v('vol','vol')}${v('vol_avg','vol')}${dirCell(r.delta)}${v('vwap','price')}
-                    ${gradCell(r.rsi, 30, 70)}${v('stoch_k')}${v('stoch_d')}${gradCell(r.cci, -100, 100)}${gradCell(r.mfi, 20, 80)}
-                    <td class="${r.adx > 25 ? 'fw-bold' : 'text-muted'}" style="${r.adx > 25 ? 'background:rgba(0,230,118,0.2);' : ''}">${r.adx != null ? r.adx.toFixed(1) : '-'}</td>
-                    ${dirCell(r.roc)}${dirCell(r.momentum)}${dirCell(r.macd)}
-                    <td style="background:${r.macd_hist > 0 ? 'rgba(0,230,118,0.2)' : r.macd_hist < 0 ? 'rgba(255,82,82,0.2)' : ''};">${r.macd_hist != null ? r.macd_hist.toFixed(2) : '-'}</td>
-                    ${stateCell(r.tar_state, 'ABOVE', 'rgba(0,230,118,0.3)', 'rgba(255,82,82,0.3)')}
-                    ${stateCell(r.ema_cross, 'BULL', 'rgba(0,230,118,0.4)', 'rgba(255,82,82,0.4)')}
-                    ${stateCell(r.ema_golden, 'GOLD', 'rgba(255,215,0,0.4)', 'rgba(0,0,0,0.6)')}
-                    ${v('atr','price')}${v('stdev','price')}${gradCell(r.z_score, -2, 2)}
-                </tr>`;
+                        <td class="fw-bold" style="position:sticky;left:0;background:#1f2833;z-index:1;color:#66fcf1;">${r.label}</td>
+                        ${v('avg', 'price')}${v('high', 'price')}${v('low', 'price')}
+                        ${v('vol', 'vol')}${v('vol_avg', 'vol')}${dirCell(r.delta)}${v('vwap', 'price')}
+                        ${gradCell(r.rsi, 30, 70)}${v('stoch_k')}${v('stoch_d')}${gradCell(r.cci, -100, 100)}${gradCell(r.mfi, 20, 80)}
+                        <td class="${r.adx > 25 ? 'fw-bold' : 'text-muted'}" style="${r.adx > 25 ? 'background:rgba(0,230,118,0.2);' : ''}">${r.adx != null ? r.adx.toFixed(1) : '-'}</td>
+                        ${dirCell(r.roc)}${dirCell(r.momentum)}${dirCell(r.macd)}
+                        <td style="background:${r.macd_hist > 0 ? 'rgba(0,230,118,0.2)' : r.macd_hist < 0 ? 'rgba(255,82,82,0.2)' : ''};">${r.macd_hist != null ? r.macd_hist.toFixed(2) : '-'}</td>
+                        ${stateCell(r.tar_state, 'ABOVE', 'rgba(0,230,118,0.3)', 'rgba(255,82,82,0.3)')}
+                        ${stateCell(r.ema_cross, 'BULL', 'rgba(0,230,118,0.4)', 'rgba(255,82,82,0.4)')}
+                        ${stateCell(r.ema_golden, 'GOLD', 'rgba(255,215,0,0.4)', 'rgba(0,0,0,0.6)')}
+                        ${v('atr', 'price')}${v('stdev', 'price')}${gradCell(r.z_score, -2, 2)}
+                    </tr>`;
             }).join('');
             document.getElementById('scanner-body').innerHTML = body;
         }
 
-        function fmtVol(v) { return v >= 1e6 ? (v/1e6).toFixed(1)+'M' : v >= 1e3 ? (v/1e3).toFixed(1)+'K' : v.toFixed(0); }
+        function fmtVol(v) { return v >= 1e6 ? (v / 1e6).toFixed(1) + 'M' : v >= 1e3 ? (v / 1e3).toFixed(1) + 'K' : v.toFixed(0); }
         function fmtPx(v) { return v >= 100 ? v.toFixed(2) : v >= 1 ? v.toFixed(4) : v.toFixed(6); }
 
         // --- Overlay Toggle Logic ---
@@ -1166,7 +1184,7 @@
             if (!group || !mainChart) return;
             group.series.forEach(s => {
                 if (overlayLines[s.key]) {
-                    try { mainChart.removeSeries(overlayLines[s.key]); } catch(e) {}
+                    try { mainChart.removeSeries(overlayLines[s.key]); } catch (e) { }
                     delete overlayLines[s.key];
                 }
             });
@@ -1174,7 +1192,7 @@
 
         function removeAllOverlays() {
             Object.keys(overlayLines).forEach(key => {
-                try { mainChart.removeSeries(overlayLines[key]); } catch(e) {}
+                try { mainChart.removeSeries(overlayLines[key]); } catch (e) { }
             });
             overlayLines = {};
             activeGroups = {};
@@ -1182,21 +1200,21 @@
         }
 
         async function loadOrderBook(pair) {
-            if(!pair) return;
+            if (!pair) return;
             document.getElementById('book-pair-label').innerText = pair;
             try {
                 const bookR = await fetch(`/api/orderbook/${pair}`); const bookD = await bookR.json();
-                if(bookD.imbalance) {
+                if (bookD.imbalance) {
                     document.getElementById('bid-pct-label').innerText = `${bookD.imbalance.bid_pct}% Bids`;
                     document.getElementById('ask-pct-label').innerText = `${bookD.imbalance.ask_pct}% Asks`;
                     document.getElementById('bid-bar').style.width = `${bookD.imbalance.bid_pct}%`;
                     document.getElementById('ask-bar').style.width = `${bookD.imbalance.ask_pct}%`;
                     document.getElementById('buy-wall').innerText = `Buy: $${parseFloat(bookD.walls.buy_wall_px).toLocaleString()} (${parseFloat(bookD.walls.buy_wall_size).toFixed(2)})`;
                     document.getElementById('sell-wall').innerText = `Sell: $${parseFloat(bookD.walls.sell_wall_px).toLocaleString()} (${parseFloat(bookD.walls.sell_wall_size).toFixed(2)})`;
-                    document.getElementById('asks-list').innerHTML = bookD.asks.map(a => `<div class="book-row"><span>$${parseFloat(a.price).toLocaleString(undefined,{minimumFractionDigits:2})}</span><span class="text-muted">${parseFloat(a.size).toFixed(4)}</span></div>`).reverse().join('');
-                    document.getElementById('bids-list').innerHTML = bookD.bids.map(b => `<div class="book-row"><span>$${parseFloat(b.price).toLocaleString(undefined,{minimumFractionDigits:2})}</span><span class="text-muted">${parseFloat(b.size).toFixed(4)}</span></div>`).join('');
+                    document.getElementById('asks-list').innerHTML = bookD.asks.map(a => `<div class="book-row"><span>$${parseFloat(a.price).toLocaleString(undefined, { minimumFractionDigits: 2 })}</span><span class="text-muted">${parseFloat(a.size).toFixed(4)}</span></div>`).reverse().join('');
+                    document.getElementById('bids-list').innerHTML = bookD.bids.map(b => `<div class="book-row"><span>$${parseFloat(b.price).toLocaleString(undefined, { minimumFractionDigits: 2 })}</span><span class="text-muted">${parseFloat(b.size).toFixed(4)}</span></div>`).join('');
                 }
-            } catch(e) {}
+            } catch (e) { }
         }
 
         async function loadIndicator(asset, type) {
@@ -1222,7 +1240,7 @@
                 currentData.positions.forEach(p => { if (indicatorState[p.asset] === undefined) loadIndicator(p.asset, p.type); });
                 document.getElementById('live-dot').className = "badge bg-success rounded-pill";
                 renderDashboard();
-                if(chartPair) loadOrderBook(chartPair);
+                if (chartPair) loadOrderBook(chartPair);
                 loadBots();
                 // Update embedded trade panel with fresh price from positions
                 if (chartPair) {
@@ -1242,7 +1260,7 @@
             if (!currentData.positions) return;
 
             // Format top level values
-            const currencyFormatter = new Intl.NumberFormat('en-US',{style:'currency',currency:'USD'});
+            const currencyFormatter = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
             document.getElementById('total-val').innerText = currencyFormatter.format(currentData.total_value);
             document.getElementById('free-usd-val').innerText = currencyFormatter.format(currentData.free_usd || 0);
             document.getElementById('bot-locked-val').innerText = currencyFormatter.format(currentData.bot_locked_usd || 0);
@@ -1253,10 +1271,10 @@
                 rebHTML = `<div class="text-center p-3"><p class="text-muted small">Rebalance targets not set.</p><button class="btn btn-outline-warning btn-sm fw-bold" onclick="openRebalanceConfig()">CONFIGURE</button></div>`;
             } else {
                 let listHTML = currentData.rebalance.map(r => `
-                    <div class="d-flex justify-content-between align-items-center mb-2 border-bottom border-secondary pb-1">
-                        <div><b class="text-white">${r.asset}</b> <span class="text-muted">Target: ${r.target}</span><br><span class="text-muted">Actual: <span class="${r.status==='Balanced'?'text-success-custom':r.status==='Over'?'text-danger-custom':'text-warning-custom'}">${r.actual}</span></span></div>
-                        <div class="text-end"><span class="badge ${r.status==='Balanced'?'bg-success':r.status==='Over'?'bg-danger':'bg-warning text-dark'}">${r.status}</span><br><span class="text-muted" style="font-size:0.65rem;">${r.action}</span></div>
-                    </div>`).join('');
+                        <div class="d-flex justify-content-between align-items-center mb-2 border-bottom border-secondary pb-1">
+                            <div><b class="text-white">${r.asset}</b> <span class="text-muted">Target: ${r.target}</span><br><span class="text-muted">Actual: <span class="${r.status === 'Balanced' ? 'text-success-custom' : r.status === 'Over' ? 'text-danger-custom' : 'text-warning-custom'}">${r.actual}</span></span></div>
+                            <div class="text-end"><span class="badge ${r.status === 'Balanced' ? 'bg-success' : r.status === 'Over' ? 'bg-danger' : 'bg-warning text-dark'}">${r.status}</span><br><span class="text-muted" style="font-size:0.65rem;">${r.action}</span></div>
+                        </div>`).join('');
                 rebHTML = `${listHTML}<button class="btn btn-outline-warning w-100 fw-bold py-2 mt-2" onclick="executeRebalance()">1-CLICK REBALANCE</button>`;
             }
             document.getElementById('rebalance-content').innerHTML = rebHTML;
@@ -1265,42 +1283,42 @@
             document.getElementById('pos-grid').innerHTML = currentData.positions.map(i => {
                 let tradePair = i.type === 'SPOT' ? `${i.asset}-USD` : i.asset;
                 let indHtml = indicatorState[i.asset] || '';
-                let entryPxStr = i.entry_price !== 'N/A' ? '$' + i.entry_price.toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:6}) : 'N/A';
-                let curPxStr = '$' + i.price.toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:6});
+                let entryPxStr = i.entry_price !== 'N/A' ? '$' + i.entry_price.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 6 }) : 'N/A';
+                let curPxStr = '$' + i.price.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 6 });
                 let liqHtml = i.liquidation !== 'N/A' ? `<div class="text-center"><small class="text-warning-custom d-block small" style="font-size:0.7rem; text-transform:uppercase;">Liq Price</small><span class="fw-bold text-warning-custom">${i.liquidation}</span></div>` : '<div></div>';
-                let pnlHtml = i.pnl ? `<div class="text-end"><small class="text-muted d-block small" style="font-size:0.7rem; text-transform:uppercase;">P&L</small><span class="${i.pnl.includes('-')?'text-danger-custom':'text-success-custom'} fw-bold">${i.pnl}</span></div>` : '<div class="text-end"></div>';
+                let pnlHtml = i.pnl ? `<div class="text-end"><small class="text-muted d-block small" style="font-size:0.7rem; text-transform:uppercase;">P&L</small><span class="${i.pnl.includes('-') ? 'text-danger-custom' : 'text-success-custom'} fw-bold">${i.pnl}</span></div>` : '<div class="text-end"></div>';
                 let trailBadge = currentData.trails.includes(tradePair) ? `<span class="badge bg-warning text-dark border border-warning position-absolute top-0 end-0 m-2" style="font-size:0.5rem;"><i class="bi bi-activity"></i> TRAILING</span>` : '';
 
                 return `
-                <div class="col-12 col-md-12 col-lg-6">
-                    <div class="card card-custom p-3 shadow-sm h-100 d-flex flex-column position-relative">
-                        ${trailBadge}
-                        <div class="d-flex justify-content-between align-items-start mb-3 border-bottom border-secondary pb-2">
-                            <div><h5 class="mb-0 fw-bold" style="color:#66fcf1;">${i.asset}</h5><span class="badge bg-dark border border-secondary mt-1" style="font-size:0.6rem">${i.type}</span></div>
-                            <div class="text-end"><h5 class="mb-0 fw-bold">$${i.usd_value.toLocaleString(undefined,{minimumFractionDigits:2})}</h5><span class="badge ${i.side === 'LONG' ? 'bg-success text-dark' : i.side === 'SHORT' ? 'bg-danger text-white' : 'bg-secondary'} mt-1" style="font-size:0.6rem">${i.side || 'N/A'}</span></div>
+                    <div class="col-12 col-md-12 col-lg-6">
+                        <div class="card card-custom p-3 shadow-sm h-100 d-flex flex-column position-relative">
+                            ${trailBadge}
+                            <div class="d-flex justify-content-between align-items-start mb-3 border-bottom border-secondary pb-2">
+                                <div><h5 class="mb-0 fw-bold" style="color:#66fcf1;">${i.asset}</h5><span class="badge bg-dark border border-secondary mt-1" style="font-size:0.6rem">${i.type}</span></div>
+                                <div class="text-end"><h5 class="mb-0 fw-bold">$${i.usd_value.toLocaleString(undefined, { minimumFractionDigits: 2 })}</h5><span class="badge ${i.side === 'LONG' ? 'bg-success text-dark' : i.side === 'SHORT' ? 'bg-danger text-white' : 'bg-secondary'} mt-1" style="font-size:0.6rem">${i.side || 'N/A'}</span></div>
+                            </div>
+                            <div class="d-flex justify-content-between mb-3 border-bottom border-secondary pb-2">
+                                <div><small class="text-muted d-block" style="font-size:0.65rem; text-transform:uppercase;">Avg Entry</small><b class="text-white">${entryPxStr}</b></div>
+                                <div class="text-end"><small class="text-muted d-block" style="font-size:0.65rem; text-transform:uppercase;">Current Price</small><b class="text-white">${curPxStr}</b></div>
+                            </div>
+                            <div class="d-flex mb-3 mt-1">${indHtml}</div>
+                            <div class="d-flex justify-content-between border-top border-secondary pt-3 mt-auto mb-3">
+                                <div><small class="text-muted d-block" style="font-size:0.7rem; text-transform:uppercase;">Owned</small><b>${i.size}</b></div>
+                                ${liqHtml}${pnlHtml}
+                            </div>
+                            <div class="d-flex justify-content-between gap-2 mt-auto">
+                                <button class="btn btn-sm btn-outline-warning rounded-pill flex-grow-1" style="font-size:0.75rem;" onclick="openTPSL('${tradePair}','${i.size}','${i.side}','${i.type}')">TP/SL</button>
+                                <button class="btn btn-sm btn-outline-primary rounded-pill flex-grow-1" style="font-size:0.75rem;" onclick="loadPairOnChart('${tradePair}',${i.price},'${i.type}')">TRADE</button>
+                                <button class="btn btn-sm btn-danger rounded-pill flex-grow-1" style="font-size:0.75rem;" onclick="closePos('${tradePair}','${i.size}','${i.side}','${i.type}')">CLOSE</button>
+                            </div>
                         </div>
-                        <div class="d-flex justify-content-between mb-3 border-bottom border-secondary pb-2">
-                            <div><small class="text-muted d-block" style="font-size:0.65rem; text-transform:uppercase;">Avg Entry</small><b class="text-white">${entryPxStr}</b></div>
-                            <div class="text-end"><small class="text-muted d-block" style="font-size:0.65rem; text-transform:uppercase;">Current Price</small><b class="text-white">${curPxStr}</b></div>
-                        </div>
-                        <div class="d-flex mb-3 mt-1">${indHtml}</div>
-                        <div class="d-flex justify-content-between border-top border-secondary pt-3 mt-auto mb-3">
-                            <div><small class="text-muted d-block" style="font-size:0.7rem; text-transform:uppercase;">Owned</small><b>${i.size}</b></div>
-                            ${liqHtml}${pnlHtml}
-                        </div>
-                        <div class="d-flex justify-content-between gap-2 mt-auto">
-                            <button class="btn btn-sm btn-outline-warning rounded-pill flex-grow-1" style="font-size:0.75rem;" onclick="openTPSL('${tradePair}','${i.size}','${i.side}','${i.type}')">TP/SL</button>
-                            <button class="btn btn-sm btn-outline-primary rounded-pill flex-grow-1" style="font-size:0.75rem;" onclick="loadPairOnChart('${tradePair}',${i.price},'${i.type}')">TRADE</button>
-                            <button class="btn btn-sm btn-danger rounded-pill flex-grow-1" style="font-size:0.75rem;" onclick="closePos('${tradePair}','${i.size}','${i.side}','${i.type}')">CLOSE</button>
-                        </div>
-                    </div>
-                </div>`
+                    </div>`
             }).join('');
 
             // Recent Order History Snippet (Trading Desk)
             document.getElementById('history-grid').innerHTML = currentData.history.map(h => {
-                let sClass = "bg-secondary"; if(h.status === 'FILLED') sClass = "bg-success"; if(h.status === 'REJECTED' || h.status === 'FAILED') sClass = "bg-danger"; if(h.status === 'CANCELLED') sClass = "bg-warning text-dark";
-                return `<tr><td class="fw-bold">${h.pair}</td><td><span class="badge ${h.side==='BUY'?'text-success':'text-danger'}">${h.side}</span></td><td><span class="badge badge-status ${sClass}">${h.status}</span></td><td class="text-muted small">${h.time}</td></tr>`;
+                let sClass = "bg-secondary"; if (h.status === 'FILLED') sClass = "bg-success"; if (h.status === 'REJECTED' || h.status === 'FAILED') sClass = "bg-danger"; if (h.status === 'CANCELLED') sClass = "bg-warning text-dark";
+                return `<tr><td class="fw-bold">${h.pair}</td><td><span class="badge ${h.side === 'BUY' ? 'text-success' : 'text-danger'}">${h.side}</span></td><td><span class="badge badge-status ${sClass}">${h.status}</span></td><td class="text-muted small">${h.time}</td></tr>`;
             }).join('');
         }
 
@@ -1320,10 +1338,10 @@
 
                 grid.innerHTML = data.map(o => {
                     let sClass = "bg-secondary text-white";
-                    if(o.status === 'FILLED') sClass = "bg-success text-dark";
-                    if(o.status === 'REJECTED' || o.status === 'FAILED') sClass = "bg-danger text-white";
-                    if(o.status === 'CANCELLED') sClass = "bg-warning text-dark";
-                    if(o.status === 'OPEN' || o.status === 'PENDING') sClass = "bg-primary text-white";
+                    if (o.status === 'FILLED') sClass = "bg-success text-dark";
+                    if (o.status === 'REJECTED' || o.status === 'FAILED') sClass = "bg-danger text-white";
+                    if (o.status === 'CANCELLED') sClass = "bg-warning text-dark";
+                    if (o.status === 'OPEN' || o.status === 'PENDING') sClass = "bg-primary text-white";
 
                     let actionBtn = '';
                     if (o.status === 'OPEN' || o.status === 'PENDING') {
@@ -1331,25 +1349,25 @@
                     }
 
                     return `<tr>
-                        <td class="text-muted small">${o.time}</td>
-                        <td class="fw-bold text-white">${o.pair}</td>
-                        <td><span class="badge ${o.side === 'BUY' ? 'text-success border border-success' : 'text-danger border border-danger'} bg-transparent">${o.side}</span></td>
-                        <td>${o.price}</td>
-                        <td class="text-muted">${o.filled} / ${o.size}</td>
-                        <td><span class="badge ${sClass}">${o.status}</span></td>
-                        <td class="text-end">${actionBtn}</td>
-                    </tr>`;
+                            <td class="text-muted small">${o.time}</td>
+                            <td class="fw-bold text-white">${o.pair}</td>
+                            <td><span class="badge ${o.side === 'BUY' ? 'text-success border border-success' : 'text-danger border border-danger'} bg-transparent">${o.side}</span></td>
+                            <td>${o.price}</td>
+                            <td class="text-muted">${o.filled} / ${o.size}</td>
+                            <td><span class="badge ${sClass}">${o.status}</span></td>
+                            <td class="text-end">${actionBtn}</td>
+                        </tr>`;
                 }).join('');
             } catch (e) { console.error("Error loading orders:", e); }
         }
 
         async function cancelOrder(orderId) {
-            if(!confirm("Are you sure you want to cancel this order?")) return;
+            if (!confirm("Are you sure you want to cancel this order?")) return;
             try {
                 const res = await fetch('/api/orders/cancel', {
                     method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({order_id: orderId})
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ order_id: orderId })
                 });
                 const d = await res.json();
                 alert(d.message || d.error);
@@ -1393,7 +1411,7 @@
 
             try {
                 const res = await fetch(`/api/bots/grid_preview`, {
-                    method: 'POST', headers: {'Content-Type':'application/json'},
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ pair, capital, step_pct: stepPct, min_order_usd: minOrder, mode })
                 });
                 const d = await res.json();
@@ -1406,6 +1424,9 @@
                 document.getElementById('gp-range').innerText = `$${d.lower_price.toFixed(2)} -- $${d.upper_price.toFixed(2)}`;
                 document.getElementById('gp-per-order').innerText = `$${d.per_order_usd.toFixed(2)}`;
                 document.getElementById('gp-profit').innerText = `~$${d.profit_per_flip.toFixed(4)}/flip`;
+                document.getElementById('gp-maxloss').innerText = `$${(d.max_loss || 0).toFixed(2)}`;
+                document.getElementById('gp-risk').innerText = `${(d.risk_pct || 0).toFixed(1)}% of capital`;
+                document.getElementById('gp-recover').innerText = `${d.flips_to_recover || '-'}`;
                 previewDiv.style.display = 'block';
             } catch (e) { previewDiv.style.display = 'none'; }
         }
@@ -1445,9 +1466,9 @@
                 };
             }
 
-            if(!confirm(`Deploy ${strategy} bot on ${payload.pair} (${timeframe}) with $${amount}? This will lock funds into the bot's sandbox.`)) return;
+            if (!confirm(`Deploy ${strategy} bot on ${payload.pair} (${timeframe}) with $${amount}? This will lock funds into the bot's sandbox.`)) return;
 
-            const res = await fetch('/api/bots/start', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload) });
+            const res = await fetch('/api/bots/start', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
             const d = await res.json();
             alert(d.message || d.error);
             document.getElementById('bot-pair').value = '';
@@ -1458,7 +1479,7 @@
         }
 
         async function stopBot(botId) {
-            if(!confirm("Are you sure you want to stop this bot? It will stop executing trades.")) return;
+            if (!confirm("Are you sure you want to stop this bot? It will stop executing trades.")) return;
             const res = await fetch(`/api/bots/stop/${botId}`, { method: 'POST' });
             const d = await res.json();
             alert(d.message || d.error);
@@ -1475,7 +1496,7 @@
         async function changeBotTF(botId, newTf) {
             try {
                 const res = await fetch(`/api/bots/timeframe/${botId}`, {
-                    method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({timeframe: newTf})
+                    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ timeframe: newTf })
                 });
                 const d = await res.json();
                 if (!d.success) alert(d.error);
@@ -1485,7 +1506,7 @@
         async function toggleGridFollow(botId, enabled) {
             try {
                 const res = await fetch(`/api/bots/follow/${botId}`, {
-                    method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({follow: enabled})
+                    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ follow: enabled })
                 });
                 if (!res.ok) { alert('Server error toggling follow: ' + res.status); return; }
                 const d = await res.json();
@@ -1494,7 +1515,7 @@
         }
 
         async function deleteBot(botId) {
-            if(!confirm("Are you sure you want to completely delete this bot? Any crypto it holds will remain in your main portfolio, but the bot's sandbox will be destroyed.")) return;
+            if (!confirm("Are you sure you want to completely delete this bot? Any crypto it holds will remain in your main portfolio, but the bot's sandbox will be destroyed.")) return;
             const res = await fetch(`/api/bots/delete/${botId}`, { method: 'DELETE' });
             const d = await res.json();
             alert(d.message || d.error);
@@ -1513,7 +1534,7 @@
             const amount = parseFloat(document.getElementById('fund-amount').value);
             if (!amount || amount <= 0) return alert("Enter a valid amount.");
             const res = await fetch(`/api/bots/${action}/${activeFundBotId}`, {
-                method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({amount})
+                method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ amount })
             });
             const d = await res.json();
             alert(d.message || d.error);
@@ -1533,18 +1554,18 @@
                 body.innerHTML = trades.slice().reverse().map(t => {
                     const pClass = t.pnl >= 0 ? 'text-success-custom' : 'text-danger-custom';
                     const reasonBadge = t.exit_reason === 'STOP_LOSS' ? 'bg-danger' : t.exit_reason === 'TRAILING_STOP' ? 'bg-warning text-dark' : t.exit_reason === 'GRID_FLIP' ? 'bg-info text-dark' : 'bg-primary';
-                    const ts = t.timestamp ? t.timestamp.substring(0,16).replace('T',' ') : '';
+                    const ts = t.timestamp ? t.timestamp.substring(0, 16).replace('T', ' ') : '';
                     return `<tr>
-                        <td class="text-muted">${ts}</td>
-                        <td><span class="badge ${t.side==='LONG'?'text-success border border-success':'text-danger border border-danger'} bg-transparent">${t.side}</span></td>
-                        <td>$${t.entry_price.toLocaleString()}</td>
-                        <td>$${t.exit_price.toLocaleString()}</td>
-                        <td>${t.size}</td>
-                        <td class="${pClass} fw-bold">${t.pnl >= 0 ? '+' : ''}$${t.pnl.toFixed(4)}</td>
-                        <td><span class="badge ${reasonBadge}" style="font-size:0.6rem;">${t.exit_reason}</span></td>
-                    </tr>`;
+                            <td class="text-muted">${ts}</td>
+                            <td><span class="badge ${t.side === 'LONG' ? 'text-success border border-success' : 'text-danger border border-danger'} bg-transparent">${t.side}</span></td>
+                            <td>$${t.entry_price.toLocaleString()}</td>
+                            <td>$${t.exit_price.toLocaleString()}</td>
+                            <td>${t.size}</td>
+                            <td class="${pClass} fw-bold">${t.pnl >= 0 ? '+' : ''}$${t.pnl.toFixed(4)}</td>
+                            <td><span class="badge ${reasonBadge}" style="font-size:0.6rem;">${t.exit_reason}</span></td>
+                        </tr>`;
                 }).join('');
-            } catch(e) { document.getElementById('trade-log-body').innerHTML = '<tr><td colspan="7" class="text-center text-danger py-4">Error loading trades.</td></tr>'; }
+            } catch (e) { document.getElementById('trade-log-body').innerHTML = '<tr><td colspan="7" class="text-center text-danger py-4">Error loading trades.</td></tr>'; }
         }
 
         async function loadBots() {
@@ -1575,87 +1596,97 @@
                         actionButtons = `<button class="btn btn-sm btn-outline-danger" onclick="stopBot('${id}')"><i class="bi bi-stop-circle"></i> STOP</button>`;
                     } else {
                         actionButtons = `
-                            <button class="btn btn-sm btn-outline-success me-1" onclick="restartBot('${id}')"><i class="bi bi-play-circle"></i></button>
-                            <button class="btn btn-sm btn-outline-secondary" onclick="deleteBot('${id}')"><i class="bi bi-trash"></i></button>
-                        `;
+                                <button class="btn btn-sm btn-outline-success me-1" onclick="restartBot('${id}')"><i class="bi bi-play-circle"></i></button>
+                                <button class="btn btn-sm btn-outline-secondary" onclick="deleteBot('${id}')"><i class="bi bi-trash"></i></button>
+                            `;
                     }
 
                     // Build TF options for inline changer
-                    const tfOpts = ['1m','5m','15m','30m','1h','6h','1d'].map(t =>
-                        `<option value="${t}" ${t===botTf?'selected':''}>${t.toUpperCase()}</option>`
+                    const tfOpts = ['1m', '5m', '15m', '30m', '1h', '6h', '1d'].map(t =>
+                        `<option value="${t}" ${t === botTf ? 'selected' : ''}>${t.toUpperCase()}</option>`
                     ).join('');
 
                     return `
-                    <div class="col-12 col-md-6">
-                        <div class="card card-custom p-3 shadow-sm h-100 position-relative border-${b.status === 'RUNNING' ? 'success' : 'secondary'}">
-                            <div class="d-flex justify-content-between mb-2">
-                                <div>
-                                    <h6 class="fw-bold mb-0"><a href="#" class="text-decoration-none" style="color:#66fcf1;" onclick="event.preventDefault(); openBotChart('${id}','${b.pair}','${b.strategy}','${botTf}')">${b.pair}</a></h6>
-                                    <span class="badge bg-dark border border-secondary" style="font-size:0.6rem">${b.strategy} BOT</span>
-                                    <select class="d-inline-block ms-1 bg-dark text-white border-secondary rounded" style="font-size:0.55rem; padding:1px 4px; border:1px solid #45a29e; cursor:pointer;" onchange="changeBotTF('${id}', this.value)">${tfOpts}</select>
+                        <div class="col-12 col-md-6">
+                            <div class="card card-custom p-3 shadow-sm h-100 position-relative border-${b.status === 'RUNNING' ? 'success' : 'secondary'}">
+                                <div class="d-flex justify-content-between mb-2">
+                                    <div>
+                                        <h6 class="fw-bold mb-0"><a href="#" class="text-decoration-none" style="color:#66fcf1;" onclick="event.preventDefault(); openBotChart('${id}','${b.pair}','${b.strategy}','${botTf}')">${b.pair}</a></h6>
+                                        <span class="badge bg-dark border border-secondary" style="font-size:0.6rem">${b.strategy} BOT</span>
+                                        <select class="d-inline-block ms-1 bg-dark text-white border-secondary rounded" style="font-size:0.55rem; padding:1px 4px; border:1px solid #45a29e; cursor:pointer;" onchange="changeBotTF('${id}', this.value)">${tfOpts}</select>
+                                    </div>
+                                    <div class="text-end"><span class="badge ${statusClass} mb-1">${b.status}</span><br><small class="text-muted" style="font-size: 0.6rem;">ID: ${id}</small></div>
                                 </div>
-                                <div class="text-end"><span class="badge ${statusClass} mb-1">${b.status}</span><br><small class="text-muted" style="font-size: 0.6rem;">ID: ${id}</small></div>
-                            </div>
 
-                            <!-- ACCOUNT BALANCES -->
-                            <div class="d-flex justify-content-between small border-top border-secondary pt-2 mt-1">
-                                <div><span class="text-muted d-block" style="font-size: 0.6rem;">NET VALUE</span><b class="text-white">$${netVal.toFixed(2)}</b></div>
-                                <div class="text-center"><span class="text-muted d-block" style="font-size: 0.6rem;">IDLE USD</span><b class="text-white">$${b.current_usd.toFixed(2)}</b></div>
-                                <div class="text-end"><span class="text-muted d-block" style="font-size: 0.6rem;">ASSET HELD</span><b class="text-white">${b.asset_held.toFixed(6)}</b></div>
-                            </div>
+                                <!-- ACCOUNT BALANCES -->
+                                <div class="d-flex justify-content-between small border-top border-secondary pt-2 mt-1">
+                                    <div><span class="text-muted d-block" style="font-size: 0.6rem;">NET VALUE</span><b class="text-white">$${netVal.toFixed(2)}</b></div>
+                                    <div class="text-center"><span class="text-muted d-block" style="font-size: 0.6rem;">IDLE USD</span><b class="text-white">$${b.current_usd.toFixed(2)}</b></div>
+                                    <div class="text-end"><span class="text-muted d-block" style="font-size: 0.6rem;">ASSET HELD</span><b class="text-white">${b.asset_held.toFixed(6)}</b></div>
+                                </div>
 
-                            <!-- LIVE PNL -->
-                            <div class="d-flex justify-content-between align-items-center border-top border-secondary pt-2 mt-2">
-                                <div><span class="text-muted d-block" style="font-size: 0.6rem;">UNREALIZED PNL</span><b class="${pnlClass}">${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}</b></div>
-                                <div class="text-end"><span class="text-muted d-block" style="font-size: 0.6rem;">REALIZED PNL</span><b class="${tpClass}">${totalPnl >= 0 ? '+' : ''}$${totalPnl.toFixed(2)}</b></div>
-                            </div>
+                                <!-- LIVE PNL -->
+                                <div class="d-flex justify-content-between align-items-center border-top border-secondary pt-2 mt-2">
+                                    <div><span class="text-muted d-block" style="font-size: 0.6rem;">UNREALIZED PNL</span><b class="${pnlClass}">${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}</b></div>
+                                    <div class="text-end"><span class="text-muted d-block" style="font-size: 0.6rem;">REALIZED PNL</span><b class="${tpClass}">${totalPnl >= 0 ? '+' : ''}$${totalPnl.toFixed(2)}</b></div>
+                                </div>
 
-                            <!-- STATS ROW -->
-                            <div class="border-top border-secondary pt-2 mt-2" style="font-size:0.7rem;">
-                                <div class="d-flex justify-content-between mb-1">
-                                    <span class="text-muted">Trades</span><span class="text-white fw-bold">${s.total_trades || 0}</span>
+                                <!-- STATS ROW -->
+                                <div class="border-top border-secondary pt-2 mt-2" style="font-size:0.7rem;">
+                                    <div class="d-flex justify-content-between mb-1">
+                                        <span class="text-muted">Trades</span><span class="text-white fw-bold">${s.total_trades || 0}</span>
+                                    </div>
+                                    <div class="d-flex justify-content-between mb-1">
+                                        <span class="text-muted">Win / Loss</span>
+                                        <span><span class="text-success-custom fw-bold">${s.winning_trades || 0}</span> <span class="text-muted">/</span> <span class="text-danger-custom fw-bold">${s.losing_trades || 0}</span></span>
+                                    </div>
+                                    <div class="d-flex justify-content-between mb-1">
+                                        <span class="text-muted">Win Rate</span><span class="${wrClass} fw-bold">${winRate.toFixed(1)}%</span>
+                                    </div>
+                                    <div class="d-flex justify-content-between mb-1">
+                                        <span class="text-muted">Stopped Out</span><span class="text-warning-custom fw-bold">${s.stopped_out || 0}</span>
+                                    </div>
+                                    <div class="d-flex justify-content-between mb-1">
+                                        <span class="text-muted">Best / Worst</span>
+                                        <span><span class="text-success-custom">+$${(s.largest_win || 0).toFixed(2)}</span> <span class="text-muted">/</span> <span class="text-danger-custom">$${(s.largest_loss || 0).toFixed(2)}</span></span>
+                                    </div>
+                                    <div class="d-flex justify-content-between">
+                                        <span class="text-muted">Est. Fees</span><span class="text-muted">$${(s.total_fees_est || 0).toFixed(2)}</span>
+                                    </div>
                                 </div>
-                                <div class="d-flex justify-content-between mb-1">
-                                    <span class="text-muted">Win / Loss</span>
-                                    <span><span class="text-success-custom fw-bold">${s.winning_trades || 0}</span> <span class="text-muted">/</span> <span class="text-danger-custom fw-bold">${s.losing_trades || 0}</span></span>
-                                </div>
-                                <div class="d-flex justify-content-between mb-1">
-                                    <span class="text-muted">Win Rate</span><span class="${wrClass} fw-bold">${winRate.toFixed(1)}%</span>
-                                </div>
-                                <div class="d-flex justify-content-between mb-1">
-                                    <span class="text-muted">Stopped Out</span><span class="text-warning-custom fw-bold">${s.stopped_out || 0}</span>
-                                </div>
-                                <div class="d-flex justify-content-between mb-1">
-                                    <span class="text-muted">Best / Worst</span>
-                                    <span><span class="text-success-custom">+$${(s.largest_win || 0).toFixed(2)}</span> <span class="text-muted">/</span> <span class="text-danger-custom">$${(s.largest_loss || 0).toFixed(2)}</span></span>
-                                </div>
-                                <div class="d-flex justify-content-between">
-                                    <span class="text-muted">Est. Fees</span><span class="text-muted">$${(s.total_fees_est || 0).toFixed(2)}</span>
+
+                                ${b.strategy === 'GRID' ? `
+                                <!-- GRID CONTROLS + RISK ENGINE -->
+                                <div class="border-top border-secondary pt-2 mt-2" style="font-size:0.65rem;">
+                                    <div class="d-flex justify-content-between align-items-center mb-1">
+                                        <div class="form-check form-switch mb-0">
+                                            <input class="form-check-input" type="checkbox" ${(b.settings && b.settings.follow) ? 'checked' : ''} onchange="toggleGridFollow('${id}', this.checked)">
+                                            <label class="form-check-label text-muted">Follow</label>
+                                        </div>
+                                        ${(b.settings && b.settings.halted_reason)
+                                ? `<span class="badge bg-danger" style="font-size:0.55rem;" title="${b.settings.halted_reason}"><i class="bi bi-exclamation-triangle me-1"></i>HALTED${b.risk && b.risk.halt_mode ? ' (' + b.risk.halt_mode + ')' : ''}</span>`
+                                : `<span class="badge bg-dark border border-secondary" style="font-size:0.55rem;">${(b.settings && b.settings.active_grids) ? b.settings.active_grids.length + ' levels' : 'Deploying...'}</span>`}
+                                    </div>
+                                    ${b.risk ? `
+                                    <div class="d-flex flex-wrap gap-2 mt-1">
+                                        <span class="text-muted">Depth: <b class="${b.risk.depth_score >= 6 ? 'text-danger-custom' : b.risk.depth_score >= 4 ? 'text-warning-custom' : b.risk.depth_score >= 2 ? 'text-info' : 'text-success-custom'}">${b.risk.depth_score}/${b.risk.total_buy_levels}</b></span>
+                                        <span class="text-muted">Dir: <b class="${b.risk.direction === 'RISING' ? 'text-success-custom' : b.risk.direction === 'FALLING' ? 'text-danger-custom' : 'text-muted'}">${b.risk.direction}</b></span>
+                                        <span class="text-muted">Risk: <b class="text-warning-custom">$${(b.risk.risk_current || 0).toFixed(2)}</b><span class="text-muted">/$${(b.risk.risk_max || 0).toFixed(2)}</span></span>
+                                    </div>` : ''}
+                                </div>` : ''}
+
+                                <!-- ACTION BUTTONS -->
+                                <div class="d-flex justify-content-between align-items-end border-top border-secondary pt-2 mt-2">
+                                    <div class="d-flex gap-1">
+                                        <button class="btn btn-sm btn-outline-primary" onclick="openBotFunds('${id}', '${b.pair}', ${b.current_usd})" title="Deposit / Withdraw"><i class="bi bi-wallet2"></i></button>
+                                        <button class="btn btn-sm btn-outline-info" onclick="openTradeLog('${id}', '${b.pair}')" title="Trade Log"><i class="bi bi-journal-text"></i></button>
+                                    </div>
+                                    <div>${actionButtons}</div>
                                 </div>
                             </div>
-
-                            ${b.strategy === 'GRID' ? `
-                            <!-- GRID CONTROLS -->
-                            <div class="d-flex justify-content-between align-items-center border-top border-secondary pt-2 mt-2" style="font-size:0.7rem;">
-                                <div class="form-check form-switch mb-0">
-                                    <input class="form-check-input" type="checkbox" ${(b.settings && b.settings.follow) ? 'checked' : ''} onchange="toggleGridFollow('${id}', this.checked)">
-                                    <label class="form-check-label text-muted">Follow</label>
-                                </div>
-                                ${(b.settings && b.settings.halted_reason) ? `<span class="badge bg-danger" style="font-size:0.55rem;" title="${b.settings.halted_reason}"><i class="bi bi-exclamation-triangle me-1"></i>HALTED</span>` : `<span class="badge bg-dark border border-secondary" style="font-size:0.55rem;">${(b.settings && b.settings.active_grids) ? b.settings.active_grids.length + ' levels' : 'Deploying...'}</span>`}
-                            </div>` : ''}
-
-                            <!-- ACTION BUTTONS -->
-                            <div class="d-flex justify-content-between align-items-end border-top border-secondary pt-2 mt-2">
-                                <div class="d-flex gap-1">
-                                    <button class="btn btn-sm btn-outline-primary" onclick="openBotFunds('${id}', '${b.pair}', ${b.current_usd})" title="Deposit / Withdraw"><i class="bi bi-wallet2"></i></button>
-                                    <button class="btn btn-sm btn-outline-info" onclick="openTradeLog('${id}', '${b.pair}')" title="Trade Log"><i class="bi bi-journal-text"></i></button>
-                                </div>
-                                <div>${actionButtons}</div>
-                            </div>
-                        </div>
-                    </div>`;
+                        </div>`;
                 }).join('');
-            } catch (e) {}
+            } catch (e) { }
         }
 
         // ==========================================
@@ -1670,7 +1701,7 @@
                     let mClass = i.macd === 'Bullish' ? 'text-success-custom' : i.macd === 'Bearish' ? 'text-danger-custom' : 'text-muted';
                     return `<tr><td class="fw-bold">${i.asset}</td><td>${i.price}</td><td class="${rClass} fw-bold">${i.rsi}</td><td class="${mClass} fw-bold">${i.macd}</td></tr>`;
                 }).join('');
-            } catch(e) {}
+            } catch (e) { }
         }
 
         function openRebalanceConfig() {
@@ -1684,8 +1715,8 @@
         function addRebRow(asset, pct) {
             const row = document.createElement('div'); row.className = "d-flex gap-2 mb-2 reb-row";
             row.innerHTML = `<input type="text" class="form-control bg-dark border-secondary text-white reb-asset" placeholder="e.g. BTC" value="${asset}" style="text-transform:uppercase;">
-                             <input type="number" class="form-control bg-dark border-secondary text-white reb-pct" placeholder="%" value="${pct}" oninput="updateRebTotal()">
-                             <button class="btn btn-outline-danger" onclick="this.parentElement.remove(); updateRebTotal();"><i class="bi bi-x-lg"></i></button>`;
+                                 <input type="number" class="form-control bg-dark border-secondary text-white reb-pct" placeholder="%" value="${pct}" oninput="updateRebTotal()">
+                                 <button class="btn btn-outline-danger" onclick="this.parentElement.remove(); updateRebTotal();"><i class="bi bi-x-lg"></i></button>`;
             document.getElementById('reb-rows-container').appendChild(row);
         }
 
@@ -1701,13 +1732,13 @@
                 const asset = row.querySelector('.reb-asset').value.trim(); const pct = row.querySelector('.reb-pct').value;
                 if (asset && pct) payload[asset] = pct;
             });
-            const res = await fetch('/api/config_rebalance', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload) });
-            const d = await res.json(); if(!d.success) return alert(d.error);
+            const res = await fetch('/api/config_rebalance', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+            const d = await res.json(); if (!d.success) return alert(d.error);
             rebModal.hide(); refresh();
         }
 
         async function executeRebalance() {
-            if(!confirm("Execute trades to rebalance your portfolio?")) return;
+            if (!confirm("Execute trades to rebalance your portfolio?")) return;
             const res = await fetch('/api/execute_rebalance', { method: 'POST' });
             const d = await res.json(); alert(d.message || d.error); refresh();
         }
@@ -1726,13 +1757,13 @@
             loadOrderBook(pair);
             updateTradePanel(pair, price, type);
             // Scroll to top to see chart
-            document.getElementById('trade-panel').scrollIntoView({behavior:'smooth'});
+            document.getElementById('trade-panel').scrollIntoView({ behavior: 'smooth' });
         }
 
         async function closePos(pair, size, side, type) {
-            if(!confirm(`Close entire position of ${size} units for ${pair}?`)) return;
-            const res = await fetch('/api/trade', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({action: 'CLOSE', pair: pair, size: size, side: side, type: type}) });
-            const data = await res.json(); if(!data.success) alert(data.error); else refresh();
+            if (!confirm(`Close entire position of ${size} units for ${pair}?`)) return;
+            const res = await fetch('/api/trade', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'CLOSE', pair: pair, size: size, side: side, type: type }) });
+            const data = await res.json(); if (!data.success) alert(data.error); else refresh();
         }
 
         // Intervals for polling data
