@@ -12,6 +12,62 @@ from bot_utils import (
 )
 
 # ==========================================
+# GRID PNL CALCULATOR
+# ==========================================
+def calculate_grid_pnl(bot, live_px):
+    """
+    Calculates unrealized PnL for a GRID bot.
+    
+    GRID bots hold fractional inventory across multiple fill levels.
+    PnL = (current_usd + inventory_value) - allocated_usd
+    
+    For per-fill detail, uses the trailing stop state which tracks
+    each fill's entry price and quantity.
+    """
+    mult = get_contract_multiplier(bot['pair'])
+    held = abs(bot.get('asset_held', 0))
+    
+    # Inventory value at current market price
+    inventory_value = held * live_px * mult
+    
+    # Total bot value = idle cash + inventory at market
+    total_value = bot.get('current_usd', 0) + inventory_value
+    
+    # PnL vs allocated capital (deposits - withdrawals already reflected in allocated_usd)
+    pnl = total_value - bot.get('allocated_usd', 0)
+    
+    return round(pnl, 4), round(total_value, 4)
+
+# ==========================================
+# ORDER SPACING GUARD
+# ==========================================
+def has_order_nearby(price, active_grids, min_gap):
+    """
+    Returns True if any existing grid order is within min_gap of the target price.
+    Prevents orders from being placed cents apart due to market-relative vs
+    grid-relative anchor drift between follow/flip/redeployment paths.
+    """
+    for g in active_grids:
+        if abs(g['price'] - price) < min_gap:
+            return True
+    return False
+
+def find_safe_price(price, active_grids, min_gap, direction='up'):
+    """
+    Nudges a price until it's at least min_gap from all existing orders.
+    direction: 'up' nudges higher (for sells), 'down' nudges lower (for buys).
+    Returns adjusted price, or None if can't find safe price within 5 attempts.
+    """
+    for _ in range(5):
+        if not has_order_nearby(price, active_grids, min_gap):
+            return price
+        if direction == 'up':
+            price += min_gap
+        else:
+            price -= min_gap
+    return None
+
+# ==========================================
 # GRID HELPERS
 # ==========================================
 def cancel_all_pair_orders(pair):
@@ -163,6 +219,9 @@ def grid_check_fills(bot_id, bot, pair):
 
     if step_size <= 0: return
 
+    # Minimum gap = 40% of step size to prevent near-duplicate orders
+    min_gap = step_size * 0.4
+
     try:
         order_data = client.get("/api/v3/brokerage/orders/historical/batch", params={
             "order_status": "FILLED", "product_id": pair, "limit": 50
@@ -207,6 +266,26 @@ def grid_check_fills(bot_id, bot, pair):
 
         if grid['side'] == 'BUY':
             new_price = grid['price'] + step_size
+            # SPACING GUARD: nudge sell price up if too close to existing order
+            safe_price = find_safe_price(new_price, active_grids, min_gap, direction='up')
+            if safe_price is None:
+                # FIX #1: No safe price found — skip placement, hold inventory with trail only
+                print(f"[GRID REST | {pair}] No safe sell price near {new_price:.2f}. Holding with trail only.")
+                try: active_grids.remove(grid)
+                except ValueError: pass
+                bot['asset_held'] += filled_size
+                bot['current_usd'] -= filled_value
+                changes_made = True
+
+                risk = bot['settings'].setdefault('risk', {})
+                total_levels = risk.get('total_buy_levels', 10)
+                level_idx = grid.get('level_idx', total_levels // 2)
+                activate_trail(bot, avg_price, filled_size, level_idx, total_levels, step_size)
+                continue
+            if safe_price != new_price:
+                print(f"[GRID REST | {pair}] Sell nudged {new_price:.2f} -> {safe_price:.2f} (spacing guard)")
+            new_price = safe_price
+
             new_grid = place_grid_sell(pair, new_price, filled_size, base_inc, quote_inc, deriv_flag, mult)
             
             if new_grid:
@@ -250,6 +329,23 @@ def grid_check_fills(bot_id, bot, pair):
                 print(f"[GRID REST | {pair}] SELL filled during halt. Depth now={bot['settings'].get('risk', {}).get('depth_score', 0)}")
             else:
                 new_price = grid['price'] - step_size
+                # SPACING GUARD: nudge buy price down if too close to existing order
+                safe_price = find_safe_price(new_price, active_grids, min_gap, direction='down')
+                if safe_price is None:
+                    # FIX #1: No safe price — record the level for redeployment later
+                    print(f"[GRID REST | {pair}] No safe buy price near {new_price:.2f}. Level queued for redeployment.")
+                    try: active_grids.remove(grid)
+                    except ValueError: pass
+                    bot['asset_held'] -= filled_size
+                    bot['current_usd'] += filled_value
+                    risk = bot['settings'].setdefault('risk', {})
+                    risk.setdefault('cancelled_buy_levels', []).append(new_price)
+                    changes_made = True
+                    continue
+                if safe_price != new_price:
+                    print(f"[GRID REST | {pair}] Buy nudged {new_price:.2f} -> {safe_price:.2f} (spacing guard)")
+                new_price = safe_price
+
                 new_grid = place_grid_buy(pair, new_price, chunk_usd, base_inc, quote_inc, deriv_flag, mult)
                 
                 if new_grid:
@@ -283,29 +379,38 @@ def grid_emergency_halt(bot_id, bot, pair, cur_px, reason, halt_mode='NEUTRAL'):
 
     print(f"[GRID HALT | {pair}] {reason}")
 
+    # FIX #3: Spec says ALL halt modes cancel buys as precaution (including FAVORABLE)
     buy_grids = [g for g in active_grids if g['side'] == 'BUY']
     cancelled = 0
     cancelled_prices = risk.setdefault('cancelled_buy_levels', [])
 
-    if halt_mode != 'FAVORABLE':
-        for g in list(buy_grids):
-            if cancel_order_safe(g):
-                cancelled_prices.append(g['price'])
-                if g in active_grids: active_grids.remove(g)
-                cancelled += 1
-        sell_grids = [g for g in active_grids if g['side'] == 'SELL']
-        print(f"[GRID HALT | {pair}] {halt_mode}: Cancelled {cancelled} orders. Keeping {len(sell_grids)} sells.")
+    for g in list(buy_grids):
+        if cancel_order_safe(g):
+            cancelled_prices.append(g['price'])
+            if g in active_grids: active_grids.remove(g)
+            cancelled += 1
+    sell_grids = [g for g in active_grids if g['side'] == 'SELL']
+
+    if halt_mode == 'FAVORABLE':
+        print(f"[GRID HALT | {pair}] FAVORABLE: Cancelled {cancelled} buys (precautionary). Keeping {len(sell_grids)} sells. Widened trails.")
     else:
-        sell_grids = [g for g in active_grids if g['side'] == 'SELL']
-        print(f"[GRID HALT | {pair}] FAVORABLE: Keeping {len(buy_grids)} buys + {len(sell_grids)} sells alive.")
+        print(f"[GRID HALT | {pair}] {halt_mode}: Cancelled {cancelled} buys. Keeping {len(sell_grids)} sells.")
 
     held = abs(bot.get('asset_held', 0))
     if held > 0 and not any(g['side'] == 'SELL' for g in active_grids) and step_size > 0:
         exit_px = cur_px + (step_size * 0.5)
-        exit_grid = place_grid_sell(pair, exit_px, held, base_inc, quote_inc, deriv_flag, mult)
-        if exit_grid:
-            active_grids.append(exit_grid)
-            print(f"[GRID HALT | {pair}] Placed exit SELL at {exit_px:.2f}")
+        # SPACING GUARD on exit sell
+        min_gap = step_size * 0.4
+        safe_px = find_safe_price(exit_px, active_grids, min_gap, direction='up')
+        if safe_px:
+            exit_px = safe_px
+        else:
+            print(f"[GRID HALT | {pair}] No safe exit sell price found near {exit_px:.2f}. Trail-only exit.")
+        if safe_px:
+            exit_grid = place_grid_sell(pair, exit_px, held, base_inc, quote_inc, deriv_flag, mult)
+            if exit_grid:
+                active_grids.append(exit_grid)
+                print(f"[GRID HALT | {pair}] Placed exit SELL at {exit_px:.2f}")
 
     bot['settings']['halted'] = True
     bot['settings']['halted_reason'] = reason
@@ -317,6 +422,16 @@ def grid_emergency_halt(bot_id, bot, pair, cur_px, reason, halt_mode='NEUTRAL'):
     save_bots()
 
 def grid_follow(bot_id, bot, pair, cur_px, df):
+    """
+    Slides the grid window to follow price by recycling stale orders.
+    
+    Key design rules:
+    - New orders are placed at GRID-ALIGNED prices (step multiples from existing levels)
+      not at market-relative prices, preventing drift between follow and fill-flip anchors.
+    - Orders are NEVER removed from tracking unless a replacement is successfully placed.
+    - Max 1 recycle per cycle to prevent churn.
+    - Orders placed less than 120 seconds ago are never recycled (cooldown).
+    """
     settings = bot.get('settings', {})
     active_grids = settings.get('active_grids', [])
     step_size = settings.get('step_size', 0)
@@ -337,86 +452,122 @@ def grid_follow(bot_id, bot, pair, cur_px, df):
     
     grid_low = min(all_prices)
     grid_high = max(all_prices)
-    changes_made = False
     
+    # Only trigger follow if price is more than 1 full step beyond the grid edge
+    if not (cur_px > grid_high + step_size and mode != 'SHORT') and \
+       not (cur_px < grid_low - step_size and mode == 'LONG'):
+        return
+
+    # Minimum gap between any two orders
+    min_gap = step_size * 0.4
+    now = time.time()
+    cooldown = 120  # seconds before an order can be recycled
+
+    # --- PRICE ABOVE GRID (LONG or BOTH mode): move lowest buy up ---
     if cur_px > grid_high + step_size and mode != 'SHORT':
-        stale = sorted(buy_grids, key=lambda g: g['price'])
-        to_recycle = stale[:min(2, len(stale))]
-        for old_grid in to_recycle:
-            if cancel_order_safe(old_grid):
-                new_buy_px = cur_px - step_size
-                existing_prices = {round(g['price'], 2) for g in active_grids}
-                while round(new_buy_px, 2) in existing_prices: new_buy_px -= step_size
-                new_grid = place_grid_buy(pair, new_buy_px, chunk_usd, base_inc, quote_inc, deriv_flag, mult)
-                if new_grid:
-                    active_grids.remove(old_grid)
-                    active_grids.append(new_grid)
-                    changes_made = True
-                    print(f"[GRID FOLLOW | {pair}] Recycled BUY {old_grid['price']:.2f} -> {new_buy_px:.2f}")
-                else:
-                    active_grids.remove(old_grid)
-                    changes_made = True
-                    
-    elif cur_px < grid_low - step_size and mode != 'LONG':
-        stale = sorted(sell_grids, key=lambda g: -g['price'])
-        to_recycle = stale[:min(2, len(stale))]
-        for old_grid in to_recycle:
-            if cancel_order_safe(old_grid):
-                new_sell_px = cur_px + step_size
-                existing_prices = {round(g['price'], 2) for g in active_grids}
-                while round(new_sell_px, 2) in existing_prices: new_sell_px += step_size
-                new_grid = place_grid_sell(pair, new_sell_px, 0, base_inc, quote_inc, deriv_flag, mult, use_chunk=True, chunk_usd=chunk_usd)
-                if new_grid:
-                    active_grids.remove(old_grid)
-                    active_grids.append(new_grid)
-                    changes_made = True
-                    print(f"[GRID FOLLOW | {pair}] Recycled SELL {old_grid['price']:.2f} -> {new_sell_px:.2f}")
-                else:
-                    active_grids.remove(old_grid)
-                    changes_made = True
-                    
+        # Find the single lowest buy that's old enough to recycle
+        candidates = sorted(buy_grids, key=lambda g: g['price'])
+        old_grid = None
+        for c in candidates:
+            placed_at = c.get('placed_at', 0)
+            if now - placed_at >= cooldown:
+                old_grid = c
+                break
+        
+        if not old_grid:
+            return  # All orders are too fresh to recycle
+        
+        # Calculate new price: grid-aligned, one step above current highest
+        new_buy_px = grid_high + step_size
+        # If that's still below price, step up until we're just below cur_px
+        while new_buy_px + step_size < cur_px:
+            new_buy_px += step_size
+        
+        # Ensure it's actually below current price (it's a buy)
+        if new_buy_px >= cur_px:
+            new_buy_px -= step_size
+        
+        # Check spacing
+        if has_order_nearby(new_buy_px, active_grids, min_gap):
+            safe_px = find_safe_price(new_buy_px, active_grids, min_gap, direction='down')
+            if not safe_px:
+                return  # No safe price -- do nothing, keep all orders
+            new_buy_px = safe_px
+        
+        # Only recycle if the new position is meaningfully better (at least 0.5 step closer to price)
+        if (cur_px - new_buy_px) >= (cur_px - old_grid['price']) - (step_size * 0.5):
+            return  # Not worth recycling
+        
+        if cancel_order_safe(old_grid):
+            new_grid = place_grid_buy(pair, new_buy_px, chunk_usd, base_inc, quote_inc, deriv_flag, mult)
+            if new_grid:
+                new_grid['placed_at'] = now
+                active_grids.remove(old_grid)
+                active_grids.append(new_grid)
+                # Update bounds
+                remaining_prices = [g['price'] for g in active_grids]
+                if remaining_prices:
+                    settings['lower_price'] = min(remaining_prices)
+                    settings['upper_price'] = max(remaining_prices)
+                save_bots()
+                print(f"[GRID FOLLOW | {pair}] Recycled BUY {old_grid['price']:.2f} -> {new_buy_px:.2f}")
+            else:
+                # FIX #2: Placement failed after cancel — queue level for redeployment
+                print(f"[GRID FOLLOW | {pair}] Recycle placement failed at {new_buy_px:.2f}. Queued for redeployment.")
+                active_grids.remove(old_grid)
+                risk = bot['settings'].setdefault('risk', {})
+                risk.setdefault('cancelled_buy_levels', []).append(old_grid['price'])
+                save_bots()
+
+    # --- PRICE BELOW GRID (LONG mode): move highest buy down ---
     elif cur_px < grid_low - step_size and mode == 'LONG':
-        stale = sorted(buy_grids, key=lambda g: -g['price'])
-        to_recycle = stale[:min(2, len(stale))]
-        for old_grid in to_recycle:
-            if cancel_order_safe(old_grid):
-                new_buy_px = cur_px - step_size
-                existing_prices = {round(g['price'], 2) for g in active_grids}
-                while round(new_buy_px, 2) in existing_prices: new_buy_px -= step_size
-                new_grid = place_grid_buy(pair, new_buy_px, chunk_usd, base_inc, quote_inc, deriv_flag, mult)
-                if new_grid:
-                    active_grids.remove(old_grid)
-                    active_grids.append(new_grid)
-                    changes_made = True
-                    print(f"[GRID FOLLOW | {pair}] Followed DOWN: BUY {old_grid['price']:.2f} -> {new_buy_px:.2f}")
-                else:
-                    active_grids.remove(old_grid)
-                    changes_made = True
-                    
-    elif cur_px > grid_high + step_size and mode == 'SHORT':
-        stale = sorted(sell_grids, key=lambda g: g['price'])
-        to_recycle = stale[:min(2, len(stale))]
-        for old_grid in to_recycle:
-            if cancel_order_safe(old_grid):
-                new_sell_px = cur_px + step_size
-                existing_prices = {round(g['price'], 2) for g in active_grids}
-                while round(new_sell_px, 2) in existing_prices: new_sell_px += step_size
-                new_grid = place_grid_sell(pair, new_sell_px, 0, base_inc, quote_inc, deriv_flag, mult, use_chunk=True, chunk_usd=chunk_usd)
-                if new_grid:
-                    active_grids.remove(old_grid)
-                    active_grids.append(new_grid)
-                    changes_made = True
-                    print(f"[GRID FOLLOW | {pair}] Followed UP: SELL {old_grid['price']:.2f} -> {new_sell_px:.2f}")
-                else:
-                    active_grids.remove(old_grid)
-                    changes_made = True
-    
-    if changes_made:
-        remaining_prices = [g['price'] for g in active_grids]
-        if remaining_prices:
-            settings['lower_price'] = min(remaining_prices)
-            settings['upper_price'] = max(remaining_prices)
-        save_bots()
+        candidates = sorted(buy_grids, key=lambda g: -g['price'])
+        old_grid = None
+        for c in candidates:
+            placed_at = c.get('placed_at', 0)
+            if now - placed_at >= cooldown:
+                old_grid = c
+                break
+        
+        if not old_grid:
+            return
+        
+        # Grid-aligned: one step below current lowest
+        new_buy_px = grid_low - step_size
+        while new_buy_px - step_size > cur_px:
+            new_buy_px -= step_size
+        
+        if new_buy_px >= cur_px:
+            new_buy_px -= step_size
+
+        if has_order_nearby(new_buy_px, active_grids, min_gap):
+            safe_px = find_safe_price(new_buy_px, active_grids, min_gap, direction='down')
+            if not safe_px:
+                return
+            new_buy_px = safe_px
+        
+        if (old_grid['price'] - new_buy_px) < step_size * 0.5:
+            return  # Not worth it
+
+        if cancel_order_safe(old_grid):
+            new_grid = place_grid_buy(pair, new_buy_px, chunk_usd, base_inc, quote_inc, deriv_flag, mult)
+            if new_grid:
+                new_grid['placed_at'] = now
+                active_grids.remove(old_grid)
+                active_grids.append(new_grid)
+                remaining_prices = [g['price'] for g in active_grids]
+                if remaining_prices:
+                    settings['lower_price'] = min(remaining_prices)
+                    settings['upper_price'] = max(remaining_prices)
+                save_bots()
+                print(f"[GRID FOLLOW | {pair}] Followed DOWN: BUY {old_grid['price']:.2f} -> {new_buy_px:.2f}")
+            else:
+                # FIX #2: Placement failed after cancel — queue level for redeployment
+                print(f"[GRID FOLLOW | {pair}] Follow-down placement failed at {new_buy_px:.2f}. Queued for redeployment.")
+                active_grids.remove(old_grid)
+                risk = bot['settings'].setdefault('risk', {})
+                risk.setdefault('cancelled_buy_levels', []).append(old_grid['price'])
+                save_bots()
 
 # ==========================================
 # GRID RISK ENGINE
@@ -587,19 +738,24 @@ def evaluate_buy_redeployment(bot, pair, direction, cur_px, step_size, base_inc,
     if direction == 'FALLING' and depth > 3: return
     if depth > 3: return
 
-    existing_prices = {round(g['price'], 2) for g in active_grids}
     total_levels = risk.get('total_buy_levels', 10)
     deployed = 0
     max_per_cycle = min(len(cancelled), 3)
+    min_gap = step_size * 0.4
 
     for i in range(max_per_cycle):
         new_price = cur_px - (step_size * (i + 1))
-        while round(new_price, 2) in existing_prices: new_price -= step_size
+        # SPACING GUARD: nudge down if too close to any existing order
+        safe_px = find_safe_price(new_price, active_grids, min_gap, direction='down')
+        if not safe_px:
+            print(f"[RISK ENGINE | {pair}] Redeployment skipped at ~{new_price:.2f}: no safe price")
+            continue
+        new_price = safe_px
+
         g = place_grid_buy(pair, new_price, chunk_usd, base_inc, quote_inc, deriv_flag, mult)
         if g:
             g['level_idx'] = max(0, total_levels - 1)
             active_grids.append(g)
-            existing_prices.add(round(new_price, 2))
             deployed += 1
 
     if deployed:
@@ -681,6 +837,72 @@ def manage_runner_exits(bot, pair, cur_px):
                     break
     if converted: save_bots()
 
+def check_trailing_stops(bot, cur_px, pair):
+    """
+    REST-cycle fallback for trailing stop evaluation (every 15s).
+    The WS ticker in bot_ws.py checks on every tick, but if WS is down
+    this ensures trails still get evaluated. This is the function that
+    was completely missing -- trails were being activated and adjusted
+    but never actually checked against price in the REST cycle.
+    """
+    risk = bot['settings'].get('risk', {})
+    trails = risk.get('per_fill_trails', [])
+    if not trails:
+        return False
+
+    settings = bot.get('settings', {})
+    active_grids = settings.get('active_grids', [])
+    mult = get_contract_multiplier(pair)
+    base_inc = settings.get('base_inc', '0.00000001')
+    triggered = []
+
+    for t in trails:
+        # Update high water mark
+        if cur_px > t['high_water_mark']:
+            t['high_water_mark'] = cur_px
+
+        effective = t.get('effective_trail', t.get('base_trail_distance', 0))
+        trigger_price = t['high_water_mark'] - effective
+
+        if cur_px <= trigger_price:
+            triggered.append(t)
+
+    for t in triggered:
+        qty = t['quantity']
+        effective = t.get('effective_trail', t.get('base_trail_distance', 0))
+        print(f"[RISK ENGINE | {pair}] TRAILING STOP: fill@{t['fill_price']:.2f} "
+              f"HWM={t['high_water_mark']:.2f} trail={effective:.2f} exit@{cur_px:.2f}")
+        try:
+            oid = str(uuid.uuid4())
+            str_qty = snap_to_increment(qty, base_inc)
+            client.market_order_sell(client_order_id=oid, product_id=pair, base_size=str_qty)
+
+            record_trade(bot, t['fill_price'], cur_px, qty, 'LONG', 'TRAILING_STOP', pair, mult)
+            bot['asset_held'] -= qty
+            bot['current_usd'] += qty * cur_px * 0.995
+
+            # Cancel the corresponding grid sell order
+            for g in list(active_grids):
+                if ((t.get('sell_oid') and g.get('oid') == t['sell_oid']) or
+                    (t.get('sell_cb_oid') and g.get('cb_oid') == t['sell_cb_oid'])):
+                    cancel_order_safe(g)
+                    active_grids.remove(g)
+                    break
+        except Exception as e:
+            print(f"[RISK ENGINE | {pair}] Trail stop sell failed: {e}")
+            continue
+
+        trails.remove(t)
+
+    if triggered:
+        risk['depth_score'] = len(trails)
+        risk['risk_current'] = round(sum(
+            t.get('effective_trail', t.get('base_trail_distance', 0)) * t['quantity'] for t in trails
+        ), 4)
+        save_bots()
+        return True
+    return False
+
 def execute_grid_bot(bot_id, bot, pair):
     settings = bot.get('settings', {})
     risk = settings.setdefault('risk', {})
@@ -732,6 +954,15 @@ def execute_grid_bot(bot_id, bot, pair):
 
     if check_circuit_breaker(bot, cur_px, pair): return
 
+    # --- Trailing stop check (REST fallback, runs even if WS is down) ---
+    if check_trailing_stops(bot, cur_px, pair):
+        # Re-read state after potential sells
+        active_grids = settings.get('active_grids', [])
+        has_grids = active_grids and len(active_grids) > 0
+        trails = risk.get('per_fill_trails', [])
+        depth = len(trails)
+        risk['depth_score'] = depth
+
     if has_grids and not is_halted:
         should_halt = False
         halt_reason = ''
@@ -753,7 +984,7 @@ def execute_grid_bot(bot_id, bot, pair):
         if should_halt:
             held = abs(bot.get('asset_held', 0))
             
-            # --- NEW: DORMANT BYPASS ---
+            # DORMANT BYPASS: no position, just abort grid
             if depth == 0 and held < 0.000001:
                 print(f"[GRID BOT | {pair}] Aborting deployed grid (0 depth). Reverting to DORMANT. Reason: {halt_reason}")
                 cancel_all_pair_orders(pair)
@@ -762,7 +993,6 @@ def execute_grid_bot(bot_id, bot, pair):
                 settings.pop('chunk_size', None)
                 save_bots()
                 return
-            # ---------------------------
 
             risk['halt_mode'] = halt_mode
             grid_emergency_halt(bot_id, bot, pair, cur_px, halt_reason, halt_mode)
@@ -848,6 +1078,10 @@ def execute_grid_bot(bot_id, bot, pair):
                 exit_px = cur_px + (step_size * 0.5)
                 deriv_flag = is_derivative(pair)
                 mult = get_contract_multiplier(pair)
+                # SPACING GUARD on halt exit sell
+                min_gap = step_size * 0.4
+                safe_px = find_safe_price(exit_px, remaining, min_gap, direction='up')
+                if safe_px: exit_px = safe_px
                 exit_grid = place_grid_sell(pair, exit_px, held, base_inc, quote_inc, deriv_flag, mult)
                 if exit_grid:
                     remaining.append(exit_grid)

@@ -15,7 +15,7 @@ from bot_utils import (
 
 # --- Engine & Strategy Imports ---
 from bot_executors import execute_orb, execute_quad, execute_trap
-from grid_engine import execute_grid_bot, calculate_max_loss
+from grid_engine import execute_grid_bot, calculate_max_loss, calculate_grid_pnl
 from bot_ws import start_ws_engine
 
 bot_manager_bp = Blueprint('bot_manager', __name__)
@@ -81,19 +81,24 @@ def get_bots():
         except: pass
         
         mult = get_contract_multiplier(bot['pair'])
-        pos_side = bot.get('position_side', 'LONG') 
         
-        if bot['current_usd'] > 0 and bot['asset_held'] == 0: 
-            net_val = bot['current_usd']
-        elif pos_side == 'LONG': 
-            net_val = bot['current_usd'] + (bot['asset_held'] * live_px * mult)
-        elif pos_side == 'SHORT':
-            profit = (bot.get('entry_price', live_px) - live_px) * abs(bot['asset_held']) * mult
-            net_val = bot['allocated_usd'] + profit
-        else: 
-            net_val = bot['allocated_usd']
-            
-        pnl = net_val - bot['allocated_usd']
+        # --- PnL Calculation ---
+        if bot.get('strategy') == 'GRID':
+            # GRID bots: value = idle cash + inventory at market price
+            pnl, net_val = calculate_grid_pnl(bot, live_px)
+        else:
+            pos_side = bot.get('position_side', 'LONG') 
+            if bot['current_usd'] > 0 and bot['asset_held'] == 0: 
+                net_val = bot['current_usd']
+            elif pos_side == 'LONG': 
+                net_val = bot['current_usd'] + (bot['asset_held'] * live_px * mult)
+            elif pos_side == 'SHORT':
+                profit = (bot.get('entry_price', live_px) - live_px) * abs(bot['asset_held']) * mult
+                net_val = bot['allocated_usd'] + profit
+            else: 
+                net_val = bot['allocated_usd']
+            pnl = net_val - bot['allocated_usd']
+
         b_copy = bot.copy()
         b_copy['live_pnl'] = pnl
         b_copy['net_value'] = net_val
@@ -106,7 +111,7 @@ def get_bots():
         # Format stats for UI delivery
         stats = ensure_stats(bot)
         b_copy['stats'] = stats.copy()
-        b_copy['stats']['trade_log'] = len(stats.get('trade_log', [])) # Don't send entire log array
+        b_copy['stats']['trade_log'] = len(stats.get('trade_log', []))
         
         total_t = stats['total_trades']
         b_copy['stats']['win_rate'] = round((stats['winning_trades'] / total_t) * 100, 1) if total_t > 0 else 0.0
@@ -174,7 +179,6 @@ def grid_preview():
 
     profit_per_flip = per_order_usd * step_pct
 
-    # Max Loss Envelope Calculation
     preview_buy_levels = []
     lvl = lower_price
     while lvl <= upper_price:

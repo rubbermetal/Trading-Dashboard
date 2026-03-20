@@ -1,6 +1,7 @@
 # bot_ws.py
 import os
 import json
+import time
 import uuid
 import threading
 from coinbase.websocket import WSClient
@@ -14,7 +15,7 @@ from bot_utils import (
 from grid_engine import (
     place_grid_sell, place_grid_buy, 
     activate_trail, deactivate_trail_by_sell,
-    cancel_order_safe
+    cancel_order_safe, has_order_nearby, find_safe_price
 )
 
 _processed_fill_oids = set()
@@ -65,7 +66,7 @@ def process_price_tick(pair, cur_px):
 
                 for g in list(active_grids):
                     if ((t.get('sell_oid') and g.get('oid') == t['sell_oid']) or
-                        (t.get('sell_cb_oid') and g.get('cb_oid') == t.get('sell_cb_oid'))):
+                        (t.get('sell_cb_oid') and g.get('cb_oid') == t['sell_cb_oid'])):
                         cancel_order_safe(g) 
                         active_grids.remove(g)
                         break
@@ -114,11 +115,19 @@ def process_grid_fill(order_id, filled_size, filled_value, status, pair):
                 mult = get_contract_multiplier(pair)
                 deriv_flag = is_derivative(pair)
                 is_halted = settings.get('halted', False)
+                min_gap = step_size * 0.4 if step_size else 0
                 
                 print(f"[WS ENGINE] Fill detected: {grid['side']} at {grid['price']:.2f} (order {order_id[:8]}...)")
                 
                 if grid['side'] == 'BUY':
                     new_price = grid['price'] + step_size
+                    # SPACING GUARD: nudge sell up if too close to existing order
+                    if min_gap > 0 and has_order_nearby(new_price, active_grids, min_gap):
+                        safe_px = find_safe_price(new_price, active_grids, min_gap, direction='up')
+                        if safe_px:
+                            print(f"[WS ENGINE] Sell nudged {new_price:.2f} -> {safe_px:.2f} (spacing guard)")
+                            new_price = safe_px
+
                     new_grid = place_grid_sell(pair, new_price, filled_size, base_inc, quote_inc, deriv_flag, mult)
                     
                     if new_grid:
@@ -149,6 +158,13 @@ def process_grid_fill(order_id, filled_size, filled_value, status, pair):
                         print(f"[WS ENGINE] SELL filled during halt. No new BUY.")
                     else:
                         new_price = grid['price'] - step_size
+                        # SPACING GUARD: nudge buy down if too close to existing order
+                        if min_gap > 0 and has_order_nearby(new_price, active_grids, min_gap):
+                            safe_px = find_safe_price(new_price, active_grids, min_gap, direction='down')
+                            if safe_px:
+                                print(f"[WS ENGINE] Buy nudged {new_price:.2f} -> {safe_px:.2f} (spacing guard)")
+                                new_price = safe_px
+
                         new_grid = place_grid_buy(pair, new_price, chunk_usd, base_inc, quote_inc, deriv_flag, mult)
                         
                         if new_grid:
@@ -197,9 +213,12 @@ def _ws_daemon():
             active_pairs = list(set([bot.get('pair') for bot in ACTIVE_BOTS.values() if bot.get('pair')] + ["BTC-USD", "ETH-USD"]))
             ws_client = WSClient(api_key=api_key, api_secret=api_secret, on_message=on_message)
             ws_client.open()
-            ws_client.subscribe(product_ids=active_pairs, channel_name="user")
-            ws_client.subscribe(product_ids=active_pairs, channel_name="ticker")
-            ws_client.run_forever_with_exception_fallback()
+            ws_client.subscribe(product_ids=active_pairs, channels=["user"])
+            ws_client.subscribe(product_ids=active_pairs, channels=["ticker"])
+            print(f"[WS ENGINE] Subscribed to {len(active_pairs)} pairs: {active_pairs}")
+            # open() runs WS in background thread; keep this daemon alive
+            while True:
+                time.sleep(60)
         else:
             print("[WS ENGINE] Missing API Keys in Env. WS Tracking Disabled.")
     except Exception as e:
