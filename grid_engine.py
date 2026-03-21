@@ -1064,6 +1064,20 @@ def execute_grid_bot(bot_id, bot, pair):
         risk['depth_score'] = depth
         held = abs(bot.get('asset_held', 0))
 
+        # --- DUST CHECK: treat trivial inventory as zero ---
+        # Floating-point residuals from fill math can leave dust (e.g. 0.000003)
+        # that blocks halt clearing forever. If inventory value < $0.10, sweep it.
+        dust_usd = held * cur_px * get_contract_multiplier(pair)
+        if held > 0 and dust_usd < 0.10:
+            print(f"[GRID HALT | {pair}] Sweeping dust: {held:.8f} units (${dust_usd:.4f}). Zeroing out.")
+            bot['asset_held'] = 0.0
+            held = 0.0
+            # Clear any orphan trails that might reference this dust
+            if depth > 0:
+                risk['per_fill_trails'] = []
+                depth = 0
+                risk['depth_score'] = 0
+
         if depth == 0 and held < 0.000001:
             if curr_adx < 25:
                 settings.pop('halted', None); settings.pop('halted_reason', None); settings.pop('halted_at', None)
@@ -1071,22 +1085,45 @@ def execute_grid_bot(bot_id, bot, pair):
                 settings.pop('active_grids', None); settings.pop('step_size', None); settings.pop('chunk_size', None)
                 save_bots()
                 print(f"[GRID BOT | {pair}] Halt cleared. ADX={curr_adx:.1f}. Ready to redeploy.")
+            else:
+                print(f"[GRID HALT | {pair}] Waiting for ADX < 25 to clear halt (current ADX={curr_adx:.1f})")
         elif held > 0.000001 and depth == 0:
             remaining = settings.get('active_grids', [])
-            if not any(g['side'] == 'SELL' for g in remaining):
+            has_active_sell = any(g['side'] == 'SELL' for g in remaining)
+
+            if not has_active_sell:
+                # Try limit sell first
                 step_size = settings.get('step_size', cur_px * 0.006)
                 exit_px = cur_px + (step_size * 0.5)
                 deriv_flag = is_derivative(pair)
                 mult = get_contract_multiplier(pair)
-                # SPACING GUARD on halt exit sell
                 min_gap = step_size * 0.4
                 safe_px = find_safe_price(exit_px, remaining, min_gap, direction='up')
                 if safe_px: exit_px = safe_px
+
                 exit_grid = place_grid_sell(pair, exit_px, held, base_inc, quote_inc, deriv_flag, mult)
                 if exit_grid:
                     remaining.append(exit_grid)
                     save_bots()
                     print(f"[GRID HALT | {pair}] Re-placed exit SELL at {exit_px:.2f}")
+                elif curr_adx < 25:
+                    # Limit sell failed AND ADX is clear — market sell to unblock
+                    print(f"[GRID HALT | {pair}] Limit sell failed. ADX={curr_adx:.1f} < 25. Market-selling {held:.8f} to clear halt.")
+                    try:
+                        oid = str(uuid.uuid4())
+                        str_qty = snap_to_increment(held, base_inc)
+                        client.market_order_sell(client_order_id=oid, product_id=pair, base_size=str_qty)
+                        mult = get_contract_multiplier(pair)
+                        record_trade(bot, cur_px, cur_px, held, 'LONG', 'HALT_CLEAR', pair, mult)
+                        bot['current_usd'] += held * cur_px * 0.995
+                        bot['asset_held'] = 0.0
+                        save_bots()
+                    except Exception as e:
+                        print(f"[GRID HALT | {pair}] Market sell for halt clear failed: {e}")
+            else:
+                print(f"[GRID HALT | {pair}] Waiting: held={held:.8f} depth={depth} sells_active={has_active_sell} ADX={curr_adx:.1f}")
+        else:
+            print(f"[GRID HALT | {pair}] Waiting: held={held:.8f} depth={depth} ADX={curr_adx:.1f} mode={halt_mode}")
 
         save_bots()
         return
