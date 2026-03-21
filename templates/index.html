@@ -85,6 +85,26 @@
             background: #00d578;
         }
 
+        
+        .osc-pane-label {
+            position: absolute; top: 2px; left: 6px; z-index: 5;
+            font-size: 0.55rem; font-weight: bold; color: #66fcf1;
+            pointer-events: none; opacity: 0.8;
+        }
+        .bot-chart-fullscreen {
+            position: fixed !important; top: 0; left: 0; width: 100vw !important;
+            height: 100vh !important; z-index: 9999; background: #0b0c10;
+            border-radius: 0 !important; max-width: 100vw !important;
+            padding: 8px !important;
+        }
+        .bot-chart-fullscreen .modal-dialog {
+            max-width: 100vw !important; width: 100vw !important;
+            height: 100vh !important; margin: 0 !important;
+        }
+        .bot-chart-fullscreen .modal-content {
+            height: 100vh !important; border-radius: 0 !important;
+        }
+
         .progress-ask {
             background: #ff4b5c;
         }
@@ -496,9 +516,15 @@
                         <h5 class="fw-bold text-primary mb-0" id="bot-chart-title" style="font-size:1rem;"><i class="bi bi-graph-up me-2"></i>Bot Chart</h5>
                         <small class="text-muted" id="bot-chart-subtitle" style="font-size:0.6rem;"></small>
                     </div>
-                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                    <div class="d-flex gap-2 align-items-center">
+                        <button class="btn btn-sm btn-outline-secondary" id="bot-chart-fs-btn" onclick="toggleBotChartFullscreen()" title="Fullscreen"><i class="bi bi-arrows-fullscreen"></i></button>
+                        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                    </div>
                 </div>
-                <div id="bot-chart-container" style="width:100%; height:50vh; min-height:250px;"></div>
+                <div id="bot-chart-wrapper" style="width:100%; display:flex; flex-direction:column; flex:1; min-height:250px;">
+                    <div id="bot-chart-container" style="width:100%; flex:3; min-height:200px;"></div>
+                    <div id="bot-osc-panes" style="width:100%;"></div>
+                </div>
                 <div id="bot-chart-info" class="border-top border-secondary pt-2 mt-2" style="font-size:0.65rem;"></div>
             </div>
         </div>
@@ -809,22 +835,56 @@
         loadProducts();
 
         // ---- BOT CHART (MODAL) ----
+        let _botChartFullscreen = false;
+        let _botChartInstances = [];  // track all chart instances for cleanup
+        let _botChartRO = null;
+
+        function toggleBotChartFullscreen() {
+            _botChartFullscreen = !_botChartFullscreen;
+            const modal = document.getElementById('botChartModal');
+            const btn = document.getElementById('bot-chart-fs-btn');
+            if (_botChartFullscreen) {
+                modal.classList.add('bot-chart-fullscreen');
+                btn.innerHTML = '<i class="bi bi-fullscreen-exit"></i>';
+            } else {
+                modal.classList.remove('bot-chart-fullscreen');
+                btn.innerHTML = '<i class="bi bi-arrows-fullscreen"></i>';
+            }
+            // Resize all chart instances
+            setTimeout(() => {
+                _botChartInstances.forEach(({ chart, container }) => {
+                    if (chart && container) {
+                        chart.applyOptions({ width: container.clientWidth, height: container.clientHeight });
+                    }
+                });
+            }, 100);
+        }
+
         async function openBotChart(botId, pair, strategy, botTf) {
             const tf = botTf || STRATEGY_TF[strategy] || '1h';
             document.getElementById('bot-chart-title').innerHTML = `<i class="bi bi-graph-up me-2"></i>${pair}`;
             document.getElementById('bot-chart-subtitle').innerText = `${strategy} Bot -- ${(TF_LABELS[tf] || tf).toUpperCase()} -- ID: ${botId}`;
             document.getElementById('bot-chart-info').innerHTML = '<span class="text-muted">Loading...</span>';
+            document.getElementById('bot-osc-panes').innerHTML = '';
+            _botChartInstances = [];
+            _botChartFullscreen = false;
+            document.getElementById('botChartModal').classList.remove('bot-chart-fullscreen');
+            document.getElementById('bot-chart-fs-btn').innerHTML = '<i class="bi bi-arrows-fullscreen"></i>';
 
             botChartModal.show();
             await new Promise(r => setTimeout(r, 200));
 
-            const container = document.getElementById('bot-chart-container');
-            container.innerHTML = '';
+            const mainContainer = document.getElementById('bot-chart-container');
+            mainContainer.innerHTML = '';
 
-            // Use actual container dimensions
-            const chart = createChart(container, container.clientHeight || 300);
-            chart.applyOptions({ width: container.clientWidth });
+            // Determine heights
+            const wrapper = document.getElementById('bot-chart-wrapper');
+            const wrapperH = wrapper.clientHeight || 400;
+
+            const chart = createChart(mainContainer, mainContainer.clientHeight || Math.floor(wrapperH * 0.65));
+            chart.applyOptions({ width: mainContainer.clientWidth });
             const series = addCandleAndVolume(chart);
+            _botChartInstances.push({ chart, container: mainContainer });
 
             // Fetch candles
             const candles = await fetchCandles(pair, tf);
@@ -833,7 +893,7 @@
                 series.volume.setData(buildVolumeData(candles));
             }
 
-            // Fetch bot data for grid levels, stats, and state
+            // Fetch bot data
             let botData = null;
             try {
                 const br = await fetch('/api/bots');
@@ -841,93 +901,159 @@
                 botData = allBots[botId];
             } catch (e) { console.error('Bot data fetch error:', e); }
 
-            // --- GRID BOT: Draw levels, floor, ceiling as price lines (won't distort scale) ---
+            // --- GRID BOT: floor, ceiling, grid levels ---
             if (botData && strategy === 'GRID') {
                 const s = botData.settings || {};
                 const grids = s.active_grids || [];
-
-                // Floor
-                if (s.lower_price) {
-                    series.candles.createPriceLine({
-                        price: s.lower_price,
-                        color: '#00d578',
-                        lineWidth: 2, lineStyle: 0,
-                        axisLabelVisible: true,
-                        title: 'FLOOR',
-                    });
-                }
-
-                // Ceiling
-                if (s.upper_price) {
-                    series.candles.createPriceLine({
-                        price: s.upper_price,
-                        color: '#ff4b5c',
-                        lineWidth: 2, lineStyle: 0,
-                        axisLabelVisible: true,
-                        title: 'CEIL',
-                    });
-                }
-
-                // Individual grid levels
+                if (s.lower_price) series.candles.createPriceLine({ price: s.lower_price, color: '#00d578', lineWidth: 2, lineStyle: 0, axisLabelVisible: true, title: 'FLOOR' });
+                if (s.upper_price) series.candles.createPriceLine({ price: s.upper_price, color: '#ff4b5c', lineWidth: 2, lineStyle: 0, axisLabelVisible: true, title: 'CEIL' });
                 grids.forEach(g => {
-                    series.candles.createPriceLine({
-                        price: g.price,
-                        color: g.side === 'BUY' ? 'rgba(0,213,120,0.7)' : 'rgba(255,75,92,0.7)',
-                        lineWidth: 2, lineStyle: 2,
-                        axisLabelVisible: false,
-                        title: '',
-                    });
+                    series.candles.createPriceLine({ price: g.price, color: g.side === 'BUY' ? 'rgba(0,213,120,0.7)' : 'rgba(255,75,92,0.7)', lineWidth: 2, lineStyle: 2, axisLabelVisible: false, title: '' });
                 });
             }
 
-            // --- MOMENTUM BOT: Entry, stop, and HWM lines ---
+            // --- MOMENTUM BOT: Entry, stop, HWM ---
             if (botData && strategy === 'MOMENTUM' && botData.position_side === 'LONG') {
                 if (botData.entry_price) {
                     series.candles.createPriceLine({ price: botData.entry_price, color: '#FFD700', lineWidth: 2, lineStyle: 0, axisLabelVisible: true, title: 'ENTRY' });
                 }
                 const m = botData.momentum || {};
                 if (m.entry_atr && botData.entry_price && m.high_water_mark) {
-                    const hwm = m.high_water_mark;
-                    const atr = m.entry_atr;
-                    const phase = m.stop_phase || 1;
+                    const hwm = m.high_water_mark, atr = m.entry_atr, phase = m.stop_phase || 1;
                     let stopPx;
                     if (phase === 3) stopPx = Math.max(hwm - 0.75 * atr, botData.entry_price + (m.fee_estimate || 0) / (botData.asset_held || 1));
                     else if (phase === 2) stopPx = Math.max(hwm - 1.0 * atr, botData.entry_price - 0.5 * atr);
                     else stopPx = hwm - 1.5 * atr;
                     series.candles.createPriceLine({ price: stopPx, color: '#ff4b5c', lineWidth: 2, lineStyle: 2, axisLabelVisible: true, title: 'STOP P' + phase });
-                    if (hwm > botData.entry_price) {
-                        series.candles.createPriceLine({ price: hwm, color: '#66fcf1', lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: 'HWM' });
-                    }
+                    if (hwm > botData.entry_price) series.candles.createPriceLine({ price: hwm, color: '#66fcf1', lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: 'HWM' });
                 }
             }
 
-            // --- DCA BOT: Avg entry + tier lines + pause line ---
+            // --- DCA BOT: Avg entry + tiers + pause ---
             if (botData && strategy === 'DCA' && botData.dca) {
                 const d = botData.dca;
                 if (d.avg_entry > 0) {
                     series.candles.createPriceLine({ price: d.avg_entry, color: '#FFD700', lineWidth: 2, lineStyle: 0, axisLabelVisible: true, title: 'AVG' });
                     [1.5, 2.5, 4.0, 6.0, 8.0, 10.0].forEach(pct => {
-                        const tierPx = d.avg_entry * (1 + pct / 100);
-                        series.candles.createPriceLine({ price: tierPx, color: 'rgba(0,213,120,0.5)', lineWidth: 1, lineStyle: 2, axisLabelVisible: false, title: '' });
+                        series.candles.createPriceLine({ price: d.avg_entry * (1 + pct / 100), color: 'rgba(0,213,120,0.5)', lineWidth: 1, lineStyle: 2, axisLabelVisible: false, title: '' });
                     });
-                    const pausePx = d.avg_entry * 0.85;
-                    series.candles.createPriceLine({ price: pausePx, color: '#ff4b5c', lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: 'PAUSE' });
+                    series.candles.createPriceLine({ price: d.avg_entry * 0.85, color: '#ff4b5c', lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: 'PAUSE' });
                 }
             }
 
-            // --- ALL BOTS (except MOMENTUM/DCA): Entry price line if in position ---
+            // --- ALL BOTS (except MOMENTUM/DCA): Entry price ---
             if (botData && botData.position_side !== 'FLAT' && strategy !== 'MOMENTUM' && strategy !== 'DCA') {
                 const entryPx = (strategy === 'TRAP' && botData.avg_entry) ? botData.avg_entry : botData.entry_price;
-                if (entryPx) {
-                    series.candles.createPriceLine({
-                        price: entryPx,
-                        color: '#FFD700',
-                        lineWidth: 2, lineStyle: 0,
-                        axisLabelVisible: true,
-                        title: strategy === 'TRAP' ? 'AVG' : 'ENTRY',
-                    });
-                }
+                if (entryPx) series.candles.createPriceLine({ price: entryPx, color: '#FFD700', lineWidth: 2, lineStyle: 0, axisLabelVisible: true, title: strategy === 'TRAP' ? 'AVG' : 'ENTRY' });
             }
+
+            // ==========================================
+            // FETCH & RENDER STRATEGY INDICATORS
+            // ==========================================
+            try {
+                const indRes = await fetch(`/api/bot_indicators/${pair}/${tf}/${strategy}`);
+                const indData = await indRes.json();
+                if (!indData.error) {
+                    // --- Price-scale overlays ---
+                    const overlays = indData.overlays || {};
+                    Object.entries(overlays).forEach(([name, info]) => {
+                        if (!info.data || !info.data.length) return;
+                        const line = chart.addLineSeries({
+                            color: info.color || '#aaa',
+                            lineWidth: info.width || 1,
+                            priceLineVisible: false,
+                            lastValueVisible: false,
+                            crosshairMarkerVisible: false,
+                            title: name,
+                        });
+                        line.setData(info.data);
+                    });
+
+                    // --- Oscillator sub-panes ---
+                    const oscillators = indData.oscillators || {};
+                    const oscKeys = Object.keys(oscillators);
+                    if (oscKeys.length > 0) {
+                        const oscContainer = document.getElementById('bot-osc-panes');
+                        oscContainer.innerHTML = '';
+
+                        oscKeys.forEach(paneName => {
+                            const pane = oscillators[paneName];
+                            const paneDiv = document.createElement('div');
+                            paneDiv.style.cssText = 'width:100%; position:relative; border-top:1px solid #45a29e44; margin-top:2px;';
+                            // Height scales: 1 pane = 120px, 2 = 100px each, 3+ = 80px each
+                            const paneH = oscKeys.length === 1 ? 120 : oscKeys.length === 2 ? 100 : 80;
+                            paneDiv.style.height = paneH + 'px';
+                            oscContainer.appendChild(paneDiv);
+
+                            // Label
+                            const label = document.createElement('div');
+                            label.className = 'osc-pane-label';
+                            label.innerText = paneName;
+                            paneDiv.appendChild(label);
+
+                            // Chart
+                            const oscChart = LightweightCharts.createChart(paneDiv, {
+                                width: paneDiv.clientWidth,
+                                height: paneH,
+                                layout: { background: { type: 'solid', color: '#1a1e26' }, textColor: '#adb5bd', fontFamily: 'sans-serif', fontSize: 9 },
+                                grid: { vertLines: { color: '#45a29e11' }, horzLines: { color: '#45a29e11' } },
+                                rightPriceScale: { borderColor: '#45a29e22' },
+                                timeScale: { visible: false },
+                                crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+                                handleScroll: false,
+                                handleScale: false,
+                            });
+                            _botChartInstances.push({ chart: oscChart, container: paneDiv });
+
+                            // Series
+                            const seriesMap = pane.series || {};
+                            Object.entries(seriesMap).forEach(([sName, sInfo]) => {
+                                if (!sInfo.data || !sInfo.data.length) return;
+                                const line = oscChart.addLineSeries({
+                                    color: sInfo.color || '#aaa',
+                                    lineWidth: sInfo.width || 1,
+                                    priceLineVisible: false,
+                                    lastValueVisible: true,
+                                    crosshairMarkerVisible: false,
+                                    title: sName,
+                                });
+                                line.setData(sInfo.data);
+                            });
+
+                            // Horizontal reference levels
+                            const levels = pane.levels || [];
+                            if (levels.length > 0 && Object.keys(seriesMap).length > 0) {
+                                // Add levels as price lines on the first series
+                                const firstSeriesName = Object.keys(seriesMap)[0];
+                                const firstData = seriesMap[firstSeriesName];
+                                if (firstData && firstData.data && firstData.data.length) {
+                                    const refSeries = oscChart.addLineSeries({
+                                        color: 'transparent', lineWidth: 0,
+                                        priceLineVisible: false, lastValueVisible: false,
+                                        crosshairMarkerVisible: false,
+                                    });
+                                    refSeries.setData(firstData.data);
+                                    levels.forEach(lv => {
+                                        refSeries.createPriceLine({
+                                            price: lv.value,
+                                            color: lv.color || '#555',
+                                            lineWidth: 1,
+                                            lineStyle: 2,
+                                            axisLabelVisible: true,
+                                            title: lv.label || '',
+                                        });
+                                    });
+                                }
+                            }
+
+                            // Sync time scale with main chart
+                            chart.timeScale().subscribeVisibleLogicalRangeChange(range => {
+                                if (range) oscChart.timeScale().setVisibleLogicalRange(range);
+                            });
+                        });
+                    }
+                }
+            } catch (e) { console.error('Indicator fetch error:', e); }
 
             // --- Trade markers ---
             try {
@@ -943,16 +1069,9 @@
                             exitSnapped = closest.time;
                         }
                         const isWin = t.pnl >= 0;
-                        markers.push({
-                            time: exitSnapped,
-                            position: 'aboveBar',
-                            color: isWin ? '#00d578' : '#ff4b5c',
-                            shape: 'arrowDown',
-                            text: `${isWin ? '+' : ''}$${t.pnl.toFixed(2)}`
-                        });
+                        markers.push({ time: exitSnapped, position: 'aboveBar', color: isWin ? '#00d578' : '#ff4b5c', shape: 'arrowDown', text: `${isWin ? '+' : ''}$${t.pnl.toFixed(2)}` });
                     });
-                    const seen = {};
-                    const unique = markers.filter(m => { if (seen[m.time]) return false; seen[m.time] = true; return true; });
+                    const seen = {}; const unique = markers.filter(m => { if (seen[m.time]) return false; seen[m.time] = true; return true; });
                     series.candles.setMarkers(unique.sort((a, b) => a.time - b.time));
                 }
             } catch (e) { console.error('Trade log fetch error:', e); }
@@ -978,30 +1097,20 @@
                     const haltBadge = settings.halted ? `<span class="badge bg-danger">HALTED${settings.risk && settings.risk.halt_mode ? ' (' + settings.risk.halt_mode + ')' : ''}</span>` : '';
                     const modeBadge = `<span class="badge bg-dark border border-secondary">${settings.mode || 'LONG'}</span>`;
                     const stepBadge = `<span class="badge bg-dark border border-secondary">${settings.step_pct || 0.6}%</span>`;
-
                     let riskBadges = '';
                     const rsk = botData.risk || settings.risk || {};
                     if (rsk.depth_score !== undefined) {
                         const d = rsk.depth_score;
                         const dColor = d >= 6 ? '#ff4b5c' : d >= 4 ? '#ffa500' : d >= 2 ? '#00bfff' : '#00d578';
                         const dirColor = rsk.direction === 'RISING' ? '#00d578' : rsk.direction === 'FALLING' ? '#ff4b5c' : '#aaa';
-                        riskBadges = `<div class="d-flex gap-1 flex-wrap mb-1">` +
-                            `<span class="badge" style="background:${dColor}22;color:${dColor};border:1px solid ${dColor}">Depth ${d}/${rsk.total_buy_levels || '?'}</span>` +
-                            `<span class="badge" style="background:${dirColor}22;color:${dirColor};border:1px solid ${dirColor}">${rsk.direction || '?'}</span>` +
-                            `<span class="badge bg-dark border border-warning">Risk $${(rsk.risk_current || 0).toFixed(2)}/$${(rsk.risk_max || 0).toFixed(2)}</span>` +
-                            (rsk.active_trails > 0 ? `<span class="badge bg-dark border border-info">${rsk.active_trails} trails</span>` : '') +
-                            (rsk.cancelled_buys > 0 ? `<span class="badge bg-dark border border-danger">${rsk.cancelled_buys} buys cancelled</span>` : '') +
-                            `</div>`;
+                        riskBadges = `<div class="d-flex gap-1 flex-wrap mb-1"><span class="badge" style="background:${dColor}22;color:${dColor};border:1px solid ${dColor}">Depth ${d}/${rsk.total_buy_levels || '?'}</span><span class="badge" style="background:${dirColor}22;color:${dirColor};border:1px solid ${dirColor}">${rsk.direction || '?'}</span><span class="badge bg-dark border border-warning">Risk $${(rsk.risk_current || 0).toFixed(2)}/$${(rsk.risk_max || 0).toFixed(2)}</span>${rsk.active_trails > 0 ? `<span class="badge bg-dark border border-info">${rsk.active_trails} trails</span>` : ''}${rsk.cancelled_buys > 0 ? `<span class="badge bg-dark border border-danger">${rsk.cancelled_buys} buys cancelled</span>` : ''}</div>`;
                     }
-
                     statusBadges = `<div class="d-flex gap-1 flex-wrap mb-1">${modeBadge}${stepBadge}${followOn}${haltBadge}<span class="badge bg-dark border border-success">${buys}B</span><span class="badge bg-dark border border-danger">${sells}S</span></div>${riskBadges}`;
                 }
 
                 if (strategy === 'TRAP') {
                     const stage = botData.entry_stage || 0;
-                    const stageBadge = stage === 0 ? '<span class="badge bg-dark border border-secondary">SCANNING</span>'
-                        : stage === 1 ? '<span class="badge bg-warning text-dark">STAGE 1 (25%)</span>'
-                            : '<span class="badge bg-success text-dark">STAGE 2 (100%)</span>';
+                    const stageBadge = stage === 0 ? '<span class="badge bg-dark border border-secondary">SCANNING</span>' : stage === 1 ? '<span class="badge bg-warning text-dark">STAGE 1 (25%)</span>' : '<span class="badge bg-success text-dark">STAGE 2 (100%)</span>';
                     const avgE = botData.avg_entry ? `<span class="badge bg-dark border border-info">Avg $${Number(botData.avg_entry).toLocaleString()}</span>` : '';
                     statusBadges = `<div class="d-flex gap-1 flex-wrap mb-1">${stageBadge}${avgE}</div>`;
                 }
@@ -1030,39 +1139,41 @@
                 }
 
                 infoEl.innerHTML = `${statusBadges}<div class="d-flex flex-wrap gap-3">
-                        <div><span class="text-muted">Pos</span> <b class="${posClass}">${pos}${botData.entry_price ? ' $' + Number(botData.entry_price).toLocaleString() : ''}</b></div>
-                        <div><span class="text-muted">USD</span> <b>$${(botData.current_usd || 0).toFixed(2)}</b></div>
-                        <div><span class="text-muted">Held</span> <b>${(botData.asset_held || 0).toFixed(6)}</b></div>
-                        <div><span class="text-muted">Trades</span> <b>${s.total_trades || 0}</b></div>
-                        <div><span class="text-muted">WR</span> <b class="${wrClass}">${wr.toFixed(0)}%</b></div>
-                        <div><span class="text-muted">PnL</span> <b class="${tpClass}">${tpnl >= 0 ? '+' : ''}$${tpnl.toFixed(2)}</b></div>
-                        <div><span class="text-muted">Unreal</span> <b class="${(botData.live_pnl || 0) >= 0 ? 'text-success-custom' : 'text-danger-custom'}">${(botData.live_pnl || 0) >= 0 ? '+' : ''}$${(botData.live_pnl || 0).toFixed(2)}</b></div>
-                    </div>`;
+                    <div><span class="text-muted">Pos</span> <b class="${posClass}">${pos}${botData.entry_price ? ' $' + Number(botData.entry_price).toLocaleString() : ''}</b></div>
+                    <div><span class="text-muted">USD</span> <b>$${(botData.current_usd || 0).toFixed(2)}</b></div>
+                    <div><span class="text-muted">Held</span> <b>${(botData.asset_held || 0).toFixed(6)}</b></div>
+                    <div><span class="text-muted">Trades</span> <b>${s.total_trades || 0}</b></div>
+                    <div><span class="text-muted">WR</span> <b class="${wrClass}">${wr.toFixed(0)}%</b></div>
+                    <div><span class="text-muted">PnL</span> <b class="${tpClass}">${tpnl >= 0 ? '+' : ''}$${tpnl.toFixed(2)}</b></div>
+                    <div><span class="text-muted">Unreal</span> <b class="${(botData.live_pnl || 0) >= 0 ? 'text-success-custom' : 'text-danger-custom'}">${(botData.live_pnl || 0) >= 0 ? '+' : ''}$${(botData.live_pnl || 0).toFixed(2)}</b></div>
+                </div>`;
             } else {
                 infoEl.innerHTML = '<span class="text-muted">Could not load bot data.</span>';
             }
 
-            // Show last 80 candles instead of cramming all 300 on screen
+            // Zoom to last 80 candles
             if (candles.length > 0) {
                 const barsToShow = Math.min(80, candles.length);
-                chart.timeScale().setVisibleLogicalRange({
-                    from: candles.length - barsToShow,
-                    to: candles.length + 5
-                });
+                chart.timeScale().setVisibleLogicalRange({ from: candles.length - barsToShow, to: candles.length + 5 });
             }
 
             // Responsive resize
-            const ro = new ResizeObserver(() => {
-                if (chart) {
-                    chart.applyOptions({ width: container.clientWidth, height: container.clientHeight });
-                }
+            if (_botChartRO) _botChartRO.disconnect();
+            _botChartRO = new ResizeObserver(() => {
+                _botChartInstances.forEach(({ chart: c, container: ct }) => {
+                    if (c && ct) c.applyOptions({ width: ct.clientWidth, height: ct.clientHeight });
+                });
             });
-            ro.observe(container);
+            _botChartRO.observe(mainContainer);
 
             // Cleanup on close
             document.getElementById('botChartModal').addEventListener('hidden.bs.modal', function handler() {
-                chart.remove();
-                ro.disconnect();
+                _botChartInstances.forEach(({ chart: c }) => { try { c.remove(); } catch(e) {} });
+                _botChartInstances = [];
+                if (_botChartRO) { _botChartRO.disconnect(); _botChartRO = null; }
+                document.getElementById('bot-osc-panes').innerHTML = '';
+                _botChartFullscreen = false;
+                document.getElementById('botChartModal').classList.remove('bot-chart-fullscreen');
                 document.getElementById('botChartModal').removeEventListener('hidden.bs.modal', handler);
             });
         }
