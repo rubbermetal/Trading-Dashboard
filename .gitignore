@@ -1,3 +1,18 @@
+# Secrets & runtime state
 .env
-check_adx.py
 bots.json
+
+# Development utilities (not part of the application)
+check_adx.py
+patch_*.py
+*.pre_*
+HTML_DIFFS.md
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environment
+venv/
