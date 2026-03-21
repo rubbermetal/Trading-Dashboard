@@ -18,7 +18,39 @@ from grid_engine import (
     cancel_order_safe, has_order_nearby, find_safe_price
 )
 
+from bot_executors import momentum_get_stop_price
+
 _processed_fill_oids = set()
+
+# FIX #4: Track subscribed pairs so we can resubscribe when new bots are added
+_subscribed_pairs = set()
+_ws_client_ref = None
+_ws_lock = threading.Lock()
+
+def _check_new_pairs():
+    """Checks if any new bot pairs need WS subscription. Called periodically."""
+    global _ws_client_ref, _subscribed_pairs
+    if _ws_client_ref is None:
+        return
+    
+    current_pairs = set(
+        bot.get('pair') for bot in ACTIVE_BOTS.values()
+        if bot.get('pair') and bot.get('strategy') in ('GRID', 'MOMENTUM', 'DCA') and bot.get('status') == 'RUNNING'
+    )
+    # Always include baseline pairs
+    current_pairs.update(["BTC-USD", "ETH-USD"])
+    
+    new_pairs = current_pairs - _subscribed_pairs
+    if new_pairs:
+        try:
+            new_list = list(new_pairs)
+            with _ws_lock:
+                _ws_client_ref.subscribe(product_ids=new_list, channels=["user"])
+                _ws_client_ref.subscribe(product_ids=new_list, channels=["ticker"])
+                _subscribed_pairs.update(new_pairs)
+            print(f"[WS ENGINE] Subscribed to {len(new_list)} new pairs: {new_list}")
+        except Exception as e:
+            print(f"[WS ENGINE] Resubscribe error: {e}")
 
 def process_price_tick(pair, cur_px):
     """Evaluates trailing stops asynchronously with network-level millisecond latency."""
@@ -82,6 +114,61 @@ def process_price_tick(pair, cur_px):
             risk['depth_score'] = len(trails)
             risk['risk_current'] = round(sum(t.get('effective_trail', t.get('base_trail_distance', 0)) * t['quantity'] for t in trails), 4)
 
+    # ==========================================
+    # MOMENTUM BOTS: 3-Phase Trailing Stop (WS Primary Path)
+    # ==========================================
+    for bot_id, bot in list(ACTIVE_BOTS.items()):
+        if bot.get('strategy') != 'MOMENTUM' or bot.get('status') != 'RUNNING': continue
+        if bot.get('pair') != pair: continue
+        if bot.get('position_side') != 'LONG' or bot.get('asset_held', 0) <= 0: continue
+
+        # Update high water mark
+        hwm = bot.get('high_water_mark', cur_px)
+        if cur_px > hwm:
+            bot['high_water_mark'] = cur_px
+            changes_made = True
+
+        stop_px, phase = momentum_get_stop_price(bot, cur_px)
+        bot['stop_phase'] = phase
+
+        if stop_px > 0 and cur_px <= stop_px:
+            exit_reason = 'STOP_LOSS' if phase == 1 else 'TRAILING_STOP'
+            held = abs(bot['asset_held'])
+            mult = get_contract_multiplier(pair)
+            print(f"[WS MOMENTUM | {pair}] Phase {phase} STOP HIT: price {cur_px:.2f} <= stop {stop_px:.2f}")
+
+            try:
+                oid = str(uuid.uuid4())
+                str_qty = snap_to_increment(held, bot.get('settings', {}).get('base_inc', '0.00000001'))
+                client.market_order_sell(client_order_id=oid, product_id=pair, base_size=str_qty)
+
+                record_trade(bot, bot['entry_price'], cur_px, held, 'LONG', exit_reason, pair, mult)
+
+                profit = (cur_px - bot['entry_price']) * held * mult
+                bot['current_usd'] = bot['allocated_usd'] + (profit * 0.995)
+                bot['asset_held'] = 0.0
+                bot['position_side'] = 'FLAT'
+                for key in ['entry_atr', 'high_water_mark', 'stop_phase', 'fee_estimate',
+                            'pending_order_oid', 'pending_order_time', 'signal_retries']:
+                    bot.pop(key, None)
+                changes_made = True
+                print(f"[WS MOMENTUM | {pair}] EXIT ({exit_reason}): PnL ${profit:.2f}")
+            except Exception as e:
+                print(f"[WS MOMENTUM | {pair}] Sell failed: {e}")
+
+    # ==========================================
+    # DCA BOTS: Live profit % update (display only, no stop execution)
+    # ==========================================
+    for bot_id, bot in list(ACTIVE_BOTS.items()):
+        if bot.get('strategy') != 'DCA' or bot.get('status') != 'RUNNING': continue
+        if bot.get('pair') != pair: continue
+        if bot.get('asset_held', 0) <= 0 or bot.get('avg_entry', 0) <= 0: continue
+
+        avg_entry = bot['avg_entry']
+        profit_pct = ((cur_px - avg_entry) / avg_entry) * 100
+        bot['live_profit_pct'] = round(profit_pct, 2)
+        changes_made = True
+
     if changes_made:
         save_bots()
 
@@ -121,12 +208,23 @@ def process_grid_fill(order_id, filled_size, filled_value, status, pair):
                 
                 if grid['side'] == 'BUY':
                     new_price = grid['price'] + step_size
-                    # SPACING GUARD: nudge sell up if too close to existing order
+                    # FIX #1: Properly handle None from find_safe_price
                     if min_gap > 0 and has_order_nearby(new_price, active_grids, min_gap):
                         safe_px = find_safe_price(new_price, active_grids, min_gap, direction='up')
-                        if safe_px:
-                            print(f"[WS ENGINE] Sell nudged {new_price:.2f} -> {safe_px:.2f} (spacing guard)")
-                            new_price = safe_px
+                        if safe_px is None:
+                            print(f"[WS ENGINE] No safe sell price near {new_price:.2f}. Holding with trail only.")
+                            bot['asset_held'] += float(filled_size)
+                            bot['current_usd'] -= float(filled_value)
+                            risk = bot['settings'].setdefault('risk', {})
+                            total_levels = risk.get('total_buy_levels', 10)
+                            level_idx = grid.get('level_idx', total_levels // 2)
+                            activate_trail(bot, grid['price'], float(filled_size), level_idx, total_levels, step_size)
+                            # Remove filled buy from tracking (it's consumed)
+                            try: active_grids.pop(i)
+                            except: pass
+                            break
+                        print(f"[WS ENGINE] Sell nudged {new_price:.2f} -> {safe_px:.2f} (spacing guard)")
+                        new_price = safe_px
 
                     new_grid = place_grid_sell(pair, new_price, filled_size, base_inc, quote_inc, deriv_flag, mult)
                     
@@ -158,12 +256,20 @@ def process_grid_fill(order_id, filled_size, filled_value, status, pair):
                         print(f"[WS ENGINE] SELL filled during halt. No new BUY.")
                     else:
                         new_price = grid['price'] - step_size
-                        # SPACING GUARD: nudge buy down if too close to existing order
+                        # FIX #1: Properly handle None from find_safe_price
                         if min_gap > 0 and has_order_nearby(new_price, active_grids, min_gap):
                             safe_px = find_safe_price(new_price, active_grids, min_gap, direction='down')
-                            if safe_px:
-                                print(f"[WS ENGINE] Buy nudged {new_price:.2f} -> {safe_px:.2f} (spacing guard)")
-                                new_price = safe_px
+                            if safe_px is None:
+                                print(f"[WS ENGINE] No safe buy price near {new_price:.2f}. Level queued for redeployment.")
+                                bot['asset_held'] -= float(filled_size)
+                                bot['current_usd'] += float(filled_value)
+                                risk = bot['settings'].setdefault('risk', {})
+                                risk.setdefault('cancelled_buy_levels', []).append(new_price)
+                                try: active_grids.pop(i)
+                                except: pass
+                                break
+                            print(f"[WS ENGINE] Buy nudged {new_price:.2f} -> {safe_px:.2f} (spacing guard)")
+                            new_price = safe_px
 
                         new_grid = place_grid_buy(pair, new_price, chunk_usd, base_inc, quote_inc, deriv_flag, mult)
                         
@@ -181,6 +287,7 @@ def process_grid_fill(order_id, filled_size, filled_value, status, pair):
 
 def _ws_daemon():
     """Background Daemon for listening to User Channel WS execution events."""
+    global _ws_client_ref, _subscribed_pairs
     try:
         def on_message(msg):
             try:
@@ -215,10 +322,18 @@ def _ws_daemon():
             ws_client.open()
             ws_client.subscribe(product_ids=active_pairs, channels=["user"])
             ws_client.subscribe(product_ids=active_pairs, channels=["ticker"])
+            
+            # FIX #4: Store reference and track subscribed pairs for dynamic resubscription
+            with _ws_lock:
+                _ws_client_ref = ws_client
+                _subscribed_pairs = set(active_pairs)
+            
             print(f"[WS ENGINE] Subscribed to {len(active_pairs)} pairs: {active_pairs}")
             # open() runs WS in background thread; keep this daemon alive
+            # Periodically check for new pairs that need subscription
             while True:
-                time.sleep(60)
+                time.sleep(30)
+                _check_new_pairs()
         else:
             print("[WS ENGINE] Missing API Keys in Env. WS Tracking Disabled.")
     except Exception as e:

@@ -366,3 +366,230 @@ def calculate_trap(df, pos_side="FLAT", entry_stage=0, avg_entry=0.0, breakout_d
 
     return "HOLD", f"Consolidating in zone ({zone_lower:.2f} - {zone_upper:.2f}). Waiting for breakout.", {}
 
+# ==========================================
+# MOMENTUM STRATEGY
+# ==========================================
+def calculate_momentum(df):
+    """
+    MOMENTUM: Trend-pullback reversal using dual smoothed ROC + ADX power filter.
+    
+    Entry requires ALL:
+    1. ADX(14) >= 25 (strong trend)
+    2. SMA(20) > SMA(200) (uptrend context)
+    3. ROC(5) smoothed SMA(5) <= -0.30 AND ROC(14) smoothed SMA(5) <= -0.30 (real dip)
+    4. Both smoothed ROCs curling up (inflection: was flat/falling, now rising)
+    
+    Returns: ("BUY", reason) or ("HOLD", reason)
+    Also returns current ATR for stop calibration: ("BUY", reason, atr_value)
+    """
+    if len(df) < 210:
+        return "HOLD", "Not enough data", 0.0
+
+    c = df['close']
+    h = df['high']
+    l = df['low']
+
+    # --- Indicators ---
+    sma20 = ta.sma(c, 20)
+    sma200 = ta.sma(c, 200)
+    atr_series = ta.atr(h, l, c, 14)
+
+    # ADX
+    adx_df = ta.adx(h, l, c, 14)
+    if adx_df is None or adx_df.empty:
+        return "HOLD", "ADX calculation failed", 0.0
+
+    # ROC(5) smoothed with SMA(5) = "Fast ROC"
+    roc5_raw = ta.roc(c, 5)
+    roc5_smooth = ta.sma(roc5_raw, 2) if roc5_raw is not None else None
+
+    # ROC(14) smoothed with SMA(5) = "Slow ROC"
+    roc14_raw = ta.roc(c, 14)
+    roc14_smooth = ta.sma(roc14_raw, 2) if roc14_raw is not None else None
+
+    # Validate all indicators are ready
+    if sma20 is None or sma200 is None or atr_series is None:
+        return "HOLD", "Warming up indicators", 0.0
+    if roc5_smooth is None or roc14_smooth is None:
+        return "HOLD", "ROC indicators warming up", 0.0
+
+    curr_sma20 = sma20.iloc[-1]
+    curr_sma200 = sma200.iloc[-1]
+    curr_adx = float(adx_df.iloc[-1, 0])
+    curr_atr = float(atr_series.iloc[-1])
+
+    if pd.isna(curr_sma200) or pd.isna(curr_adx) or pd.isna(curr_atr) or curr_atr <= 0:
+        return "HOLD", "Warming up indicators", 0.0
+
+    # Current and previous 2 bars for curl-up detection
+    fast_cur = roc5_smooth.iloc[-1]
+    fast_prev = roc5_smooth.iloc[-2]
+    fast_prev2 = roc5_smooth.iloc[-3]
+
+    slow_cur = roc14_smooth.iloc[-1]
+    slow_prev = roc14_smooth.iloc[-2]
+    slow_prev2 = roc14_smooth.iloc[-3]
+
+    if pd.isna(fast_cur) or pd.isna(fast_prev) or pd.isna(fast_prev2):
+        return "HOLD", "ROC smoothing warming up", 0.0
+    if pd.isna(slow_cur) or pd.isna(slow_prev) or pd.isna(slow_prev2):
+        return "HOLD", "ROC smoothing warming up", 0.0
+
+    # --- CONDITION 1: Trend Power (ADX >= 25) ---
+    if curr_adx < 25:
+        return "HOLD", f"ADX too low ({curr_adx:.1f} < 25)", curr_atr
+
+    # --- CONDITION 2: Trend Direction (SMA 20 > SMA 200) ---
+    if curr_sma20 <= curr_sma200:
+        return "HOLD", f"SMA20 ({curr_sma20:.2f}) <= SMA200 ({curr_sma200:.2f}). No uptrend.", curr_atr
+
+    # --- CONDITION 3: Dip Depth (both ROCs <= -0.30) ---
+    if fast_cur > -0.30:
+        return "HOLD", f"Fast ROC not deep enough ({fast_cur:.2f} > -0.30)", curr_atr
+    if slow_cur > -0.30:
+        return "HOLD", f"Slow ROC not deep enough ({slow_cur:.2f} > -0.30)", curr_atr
+
+    # --- CONDITION 4: Fast ROC Curl-Up ---
+    # Current rising AND previous was flat or falling
+    fast_curling = (fast_cur > fast_prev) and (fast_prev <= fast_prev2)
+    if not fast_curling:
+        if fast_cur <= fast_prev:
+            return "HOLD", f"Fast ROC still falling ({fast_prev:.2f} -> {fast_cur:.2f})", curr_atr
+        else:
+            return "HOLD", f"Fast ROC rising but prev wasn't flat/falling ({fast_prev2:.2f} -> {fast_prev:.2f} -> {fast_cur:.2f})", curr_atr
+
+    # --- CONDITION 5: Slow ROC Curl-Up ---
+    slow_curling = (slow_cur > slow_prev) and (slow_prev <= slow_prev2)
+    if not slow_curling:
+        if slow_cur <= slow_prev:
+            return "HOLD", f"Slow ROC still falling ({slow_prev:.2f} -> {slow_cur:.2f})", curr_atr
+        else:
+            return "HOLD", f"Slow ROC rising but prev wasn't flat/falling ({slow_prev2:.2f} -> {slow_prev:.2f} -> {slow_cur:.2f})", curr_atr
+
+    # --- ALL CONDITIONS MET ---
+    reason = (f"MOMENTUM BUY: ADX={curr_adx:.1f}, "
+              f"FastROC={fast_cur:.2f} (curl from {fast_prev:.2f}), "
+              f"SlowROC={slow_cur:.2f} (curl from {slow_prev:.2f}), "
+              f"SMA20={curr_sma20:.2f} > SMA200={curr_sma200:.2f}")
+    return "BUY", reason, curr_atr
+
+# ==========================================
+# DCA STRATEGY
+# ==========================================
+def calculate_dca(df, dca_state="SCANNING", last_cross_direction="ABOVE"):
+    """
+    DCA: Signal-gated accumulation via dual smoothed ROC cross/curl cycle.
+    
+    State machine signals:
+    - "ARM": Fast ROC crossed below Slow ROC (new dip starting)
+    - "DISARM": Fast ROC crossed back above Slow before conditions met
+    - "BUY": Armed + both ROCs <= -0.50 + either curling up + ADX >= 20
+    - "HOLD": No action this cycle
+    
+    Returns: (signal, reason, extra_data)
+    extra_data includes: fast_roc, slow_roc, adx, depth_multiplier
+    """
+    empty_data = {'fast_roc': 0, 'slow_roc': 0, 'adx': 0, 'depth_multiplier': 1.0}
+    
+    if len(df) < 210:
+        return "HOLD", "Not enough data", empty_data
+
+    c = df['close']
+    h = df['high']
+    l = df['low']
+
+    # --- Indicators ---
+    adx_df = ta.adx(h, l, c, 14)
+    if adx_df is None or adx_df.empty:
+        return "HOLD", "ADX calculation failed", empty_data
+
+    roc5_raw = ta.roc(c, 5)
+    roc5_smooth = ta.sma(roc5_raw, 3) if roc5_raw is not None else None
+    roc14_raw = ta.roc(c, 14)
+    roc14_smooth = ta.sma(roc14_raw, 3) if roc14_raw is not None else None
+
+    if roc5_smooth is None or roc14_smooth is None:
+        return "HOLD", "ROC indicators warming up", empty_data
+
+    curr_adx = float(adx_df.iloc[-1, 0])
+
+    fast_cur = roc5_smooth.iloc[-1]
+    fast_prev = roc5_smooth.iloc[-2]
+    fast_prev2 = roc5_smooth.iloc[-3]
+    slow_cur = roc14_smooth.iloc[-1]
+    slow_prev = roc14_smooth.iloc[-2]
+    slow_prev2 = roc14_smooth.iloc[-3]
+
+    if any(pd.isna(v) for v in [fast_cur, fast_prev, fast_prev2, slow_cur, slow_prev, slow_prev2, curr_adx]):
+        return "HOLD", "Indicators warming up", empty_data
+
+    fast_cur = float(fast_cur)
+    fast_prev = float(fast_prev)
+    fast_prev2 = float(fast_prev2)
+    slow_cur = float(slow_cur)
+    slow_prev = float(slow_prev)
+    slow_prev2 = float(slow_prev2)
+
+    # Depth for sizing tier
+    depth = min(fast_cur, slow_cur)
+    if depth <= -2.0:
+        depth_mult = 1.25
+    elif depth <= -0.75:
+        depth_mult = 1.10
+    else:
+        depth_mult = 1.0
+
+    data = {
+        'fast_roc': round(fast_cur, 4),
+        'slow_roc': round(slow_cur, 4),
+        'adx': round(curr_adx, 2),
+        'depth_multiplier': depth_mult,
+    }
+
+    # --- SCANNING: detect Fast cross below Slow ---
+    if dca_state == "SCANNING":
+        # Cross below: fast was >= slow, now fast < slow
+        if fast_cur < slow_cur and fast_prev >= slow_prev:
+            return "ARM", f"Fast ROC ({fast_cur:.2f}) crossed below Slow ROC ({slow_cur:.2f})", data
+        return "HOLD", f"Scanning. Fast={fast_cur:.2f} Slow={slow_cur:.2f}", data
+
+    # --- ARMED: check for disarm or buy conditions ---
+    if dca_state == "ARMED":
+        # Disarm: Fast crossed back above Slow without reaching buy conditions
+        if fast_cur > slow_cur and fast_prev <= slow_prev:
+            return "DISARM", f"Fast ROC ({fast_cur:.2f}) crossed back above Slow ({slow_cur:.2f}). Dip too shallow.", data
+
+        # Check buy conditions
+        # 1. Both ROCs <= -0.50
+        if fast_cur > -0.50 or slow_cur > -0.50:
+            return "HOLD", f"Armed. Waiting for depth (Fast={fast_cur:.2f} Slow={slow_cur:.2f}, need <= -0.50)", data
+
+        # 2. Either ROC curling up
+        fast_curling = (fast_cur > fast_prev) and (fast_prev <= fast_prev2)
+        slow_curling = (slow_cur > slow_prev) and (slow_prev <= slow_prev2)
+        if not fast_curling and not slow_curling:
+            return "HOLD", f"Armed. Dip deep enough but no curl-up yet (Fast={fast_prev:.2f}->{fast_cur:.2f}, Slow={slow_prev:.2f}->{slow_cur:.2f})", data
+
+        # 3. ADX >= 20
+        if curr_adx < 20:
+            return "HOLD", f"Armed. Curl detected but ADX too low ({curr_adx:.1f} < 20)", data
+
+        # All conditions met
+        curl_source = "Fast" if fast_curling else "Slow"
+        reason = (f"DCA BUY: {curl_source} ROC curled up. "
+                  f"Fast={fast_cur:.2f} Slow={slow_cur:.2f} ADX={curr_adx:.1f} "
+                  f"Depth={depth:.2f} Size={depth_mult:.2f}x")
+        return "BUY", reason, data
+
+    # Default: if state is ACCUMULATING/BUYING/PAUSED, signal logic handles re-arm
+    # Check for re-arm: Fast must cross above Slow first (reset), then below (re-arm)
+    if last_cross_direction == "BELOW":
+        # Waiting for Fast to cross back above Slow (reset)
+        if fast_cur > slow_cur and fast_prev <= slow_prev:
+            return "CROSS_ABOVE", f"Fast ROC crossed above Slow (reset). Ready to re-arm on next cross below.", data
+    elif last_cross_direction == "ABOVE":
+        # Waiting for fresh cross below (re-arm)
+        if fast_cur < slow_cur and fast_prev >= slow_prev:
+            return "ARM", f"Re-armed: Fast ROC ({fast_cur:.2f}) crossed below Slow ROC ({slow_cur:.2f})", data
+
+    return "HOLD", f"Accumulating. Fast={fast_cur:.2f} Slow={slow_cur:.2f} Cross={last_cross_direction}", data

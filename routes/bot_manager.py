@@ -14,7 +14,7 @@ from bot_utils import (
 )
 
 # --- Engine & Strategy Imports ---
-from bot_executors import execute_orb, execute_quad, execute_trap
+from bot_executors import execute_orb, execute_quad, execute_trap, execute_momentum, execute_dca
 from grid_engine import execute_grid_bot, calculate_max_loss, calculate_grid_pnl
 from bot_ws import start_ws_engine
 
@@ -61,6 +61,10 @@ def run_bot(bot_id):
                 execute_grid_bot(bot_id, bot, pair)
             elif strategy == 'TRAP':
                 execute_trap(bot_id, bot, pair)
+            elif strategy == 'MOMENTUM':
+                execute_momentum(bot_id, bot, pair)
+            elif strategy == 'DCA':
+                execute_dca(bot_id, bot, pair)
         except Exception as e:
             print(f"[BOT ENGINE] Error in {pair} {strategy} bot: {e}")
             
@@ -130,6 +134,40 @@ def get_bots():
                 'recovery_velocity': risk.get('recovery_velocity', 0),
                 'cancelled_buys': len(risk.get('cancelled_buy_levels', [])),
                 'active_trails': len(risk.get('per_fill_trails', [])),
+            }
+
+        # Inject MOMENTUM state
+        if bot.get('strategy') == 'MOMENTUM':
+            b_copy['momentum'] = {
+                'stop_phase': bot.get('stop_phase', 0),
+                'entry_atr': bot.get('entry_atr', 0),
+                'high_water_mark': bot.get('high_water_mark', 0),
+                'fee_estimate': bot.get('fee_estimate', 0),
+                'pending': bool(bot.get('pending_order_oid')),
+                'retries': bot.get('signal_retries', 0),
+            }
+
+        # Inject DCA state
+        if bot.get('strategy') == 'DCA':
+            avg_e = bot.get('avg_entry', 0)
+            profit_pct = ((live_px - avg_e) / avg_e * 100) if avg_e > 0 and live_px > 0 else 0
+            # Determine next tier
+            highest_sold = bot.get('highest_tier_sold', 0)
+            next_tier = None
+            for t_pct, _ in [(1.5, 0.25), (2.5, 0.33), (4.0, 0.45), (6.0, 0.50), (8.0, 0.50), (10.0, 0.75)]:
+                if t_pct > highest_sold:
+                    next_tier = t_pct
+                    break
+            b_copy['dca'] = {
+                'state': bot.get('dca_state', 'SCANNING'),
+                'avg_entry': round(avg_e, 6),
+                'total_buys': bot.get('total_buys', 0),
+                'profit_pct': round(profit_pct, 2),
+                'next_tier': next_tier,
+                'highest_tier_sold': highest_sold,
+                'pending_buy': bool(bot.get('pending_buy_oid')),
+                'pending_sells': len(bot.get('pending_sells', [])),
+                'paused': bot.get('dca_state') == 'PAUSED',
             }
         
         response_data[bot_id] = b_copy

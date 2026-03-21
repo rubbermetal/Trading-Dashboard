@@ -28,6 +28,8 @@ STRATEGY_DEFAULT_TF = {
     "ORB":        "5m",
     "GRID":       "1h",
     "TRAP":       "15m",
+    "MOMENTUM":   "5m",
+    "DCA":        "5m",
 }
 
 def get_bot_tf(bot):

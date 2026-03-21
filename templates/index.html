@@ -316,6 +316,8 @@
                                     <option value="ORB">ORB (Midnight Breakout - Perps Only)</option>
                                     <option value="GRID">Grid Bot (Ranging Cashflow)</option>
                                     <option value="TRAP">Trap (Consolidation Breakout)</option>
+                                    <option value="MOMENTUM">Momentum (Trend Dip Reversal)</option>
+                                    <option value="DCA">DCA (Signal-Gated Accumulation)</option>
                                 </select>
                             </div>
 
@@ -532,7 +534,7 @@
         let chartTF = "15m";
 
         // Strategy -> native timeframe mapping
-        const STRATEGY_TF = { "QUAD": "15m", "QUAD_SUPER": "15m", "ORB": "5m", "GRID": "1h", "TRAP": "15m" };
+        const STRATEGY_TF = { "QUAD": "15m", "QUAD_SUPER": "15m", "ORB": "5m", "GRID": "1h", "TRAP": "15m", "MOMENTUM": "5m", "DCA": "5m" };
         const TF_LABELS = { "1m": "1m", "5m": "5m", "15m": "15m", "1h": "1H", "6h": "6H", "1d": "1D" };
 
         // Scanner state
@@ -878,8 +880,43 @@
                 });
             }
 
-            // --- ALL BOTS: Entry price line if in position ---
-            if (botData && botData.position_side !== 'FLAT') {
+            // --- MOMENTUM BOT: Entry, stop, and HWM lines ---
+            if (botData && strategy === 'MOMENTUM' && botData.position_side === 'LONG') {
+                if (botData.entry_price) {
+                    series.candles.createPriceLine({ price: botData.entry_price, color: '#FFD700', lineWidth: 2, lineStyle: 0, axisLabelVisible: true, title: 'ENTRY' });
+                }
+                const m = botData.momentum || {};
+                if (m.entry_atr && botData.entry_price && m.high_water_mark) {
+                    const hwm = m.high_water_mark;
+                    const atr = m.entry_atr;
+                    const phase = m.stop_phase || 1;
+                    let stopPx;
+                    if (phase === 3) stopPx = Math.max(hwm - 0.75 * atr, botData.entry_price + (m.fee_estimate || 0) / (botData.asset_held || 1));
+                    else if (phase === 2) stopPx = Math.max(hwm - 1.0 * atr, botData.entry_price - 0.5 * atr);
+                    else stopPx = hwm - 1.5 * atr;
+                    series.candles.createPriceLine({ price: stopPx, color: '#ff4b5c', lineWidth: 2, lineStyle: 2, axisLabelVisible: true, title: 'STOP P' + phase });
+                    if (hwm > botData.entry_price) {
+                        series.candles.createPriceLine({ price: hwm, color: '#66fcf1', lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: 'HWM' });
+                    }
+                }
+            }
+
+            // --- DCA BOT: Avg entry + tier lines + pause line ---
+            if (botData && strategy === 'DCA' && botData.dca) {
+                const d = botData.dca;
+                if (d.avg_entry > 0) {
+                    series.candles.createPriceLine({ price: d.avg_entry, color: '#FFD700', lineWidth: 2, lineStyle: 0, axisLabelVisible: true, title: 'AVG' });
+                    [1.5, 2.5, 4.0, 6.0, 8.0, 10.0].forEach(pct => {
+                        const tierPx = d.avg_entry * (1 + pct / 100);
+                        series.candles.createPriceLine({ price: tierPx, color: 'rgba(0,213,120,0.5)', lineWidth: 1, lineStyle: 2, axisLabelVisible: false, title: '' });
+                    });
+                    const pausePx = d.avg_entry * 0.85;
+                    series.candles.createPriceLine({ price: pausePx, color: '#ff4b5c', lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: 'PAUSE' });
+                }
+            }
+
+            // --- ALL BOTS (except MOMENTUM/DCA): Entry price line if in position ---
+            if (botData && botData.position_side !== 'FLAT' && strategy !== 'MOMENTUM' && strategy !== 'DCA') {
                 const entryPx = (strategy === 'TRAP' && botData.avg_entry) ? botData.avg_entry : botData.entry_price;
                 if (entryPx) {
                     series.candles.createPriceLine({
@@ -967,6 +1004,29 @@
                             : '<span class="badge bg-success text-dark">STAGE 2 (100%)</span>';
                     const avgE = botData.avg_entry ? `<span class="badge bg-dark border border-info">Avg $${Number(botData.avg_entry).toLocaleString()}</span>` : '';
                     statusBadges = `<div class="d-flex gap-1 flex-wrap mb-1">${stageBadge}${avgE}</div>`;
+                }
+
+                if (strategy === 'MOMENTUM') {
+                    const m = botData.momentum || {};
+                    const phase = m.stop_phase || 0;
+                    const phaseColors = { 0: 'bg-secondary', 1: 'bg-warning text-dark', 2: 'bg-info text-dark', 3: 'bg-success text-dark' };
+                    const phaseLabels = { 0: 'SCANNING', 1: 'PHASE 1 (INITIAL)', 2: 'PHASE 2 (TIGHTENED)', 3: 'PHASE 3 (LOCKED)' };
+                    const phaseBadge = `<span class="badge ${phaseColors[phase] || 'bg-secondary'}">${phaseLabels[phase] || 'FLAT'}</span>`;
+                    const pendingBadge = m.pending ? `<span class="badge bg-warning text-dark">PENDING (retry ${m.retries}/3)</span>` : '';
+                    const hwmBadge = m.high_water_mark > 0 ? `<span class="badge bg-dark border border-info">HWM $${Number(m.high_water_mark).toLocaleString()}</span>` : '';
+                    const atrBadge = m.entry_atr > 0 ? `<span class="badge bg-dark border border-secondary">ATR $${m.entry_atr.toFixed(2)}</span>` : '';
+                    statusBadges = `<div class="d-flex gap-1 flex-wrap mb-1">${phaseBadge}${pendingBadge}${hwmBadge}${atrBadge}</div>`;
+                }
+
+                if (strategy === 'DCA') {
+                    const d = botData.dca || {};
+                    const stateColors = { SCANNING: 'bg-secondary', ARMED: 'bg-warning text-dark', BUYING: 'bg-primary', ACCUMULATING: 'bg-success text-dark', TAKING_PROFIT: 'bg-info text-dark', PAUSED: 'bg-danger' };
+                    const stateBadge = `<span class="badge ${stateColors[d.state] || 'bg-secondary'}">${d.state || 'SCANNING'}</span>`;
+                    const buysBadge = d.total_buys > 0 ? `<span class="badge bg-dark border border-success">${d.total_buys} buys</span>` : '';
+                    const avgBadge = d.avg_entry > 0 ? `<span class="badge bg-dark border border-info">Avg $${Number(d.avg_entry).toLocaleString()}</span>` : '';
+                    const profitBadge = d.avg_entry > 0 ? `<span class="badge bg-dark border border-${d.profit_pct >= 0 ? 'success' : 'danger'}">${d.profit_pct >= 0 ? '+' : ''}${d.profit_pct.toFixed(2)}%</span>` : '';
+                    const tierBadge = d.next_tier ? `<span class="badge bg-dark border border-warning">Next: ${d.next_tier}%</span>` : '';
+                    statusBadges = `<div class="d-flex gap-1 flex-wrap mb-1">${stateBadge}${buysBadge}${avgBadge}${profitBadge}${tierBadge}</div>`;
                 }
 
                 infoEl.innerHTML = `${statusBadges}<div class="d-flex flex-wrap gap-3">
@@ -1379,7 +1439,7 @@
         // ==========================================
         // BOT MANAGER LOGIC
         // ==========================================
-        const STRATEGY_DEFAULT_TFS = { QUAD: '15m', QUAD_SUPER: '15m', ORB: '5m', GRID: '1h', TRAP: '15m' };
+        const STRATEGY_DEFAULT_TFS = { QUAD: '15m', QUAD_SUPER: '15m', ORB: '5m', GRID: '1h', TRAP: '15m', MOMENTUM: '5m', DCA: '5m' };
 
         function toggleBotSettings() {
             const strat = document.getElementById('bot-strategy').value;
@@ -1553,7 +1613,7 @@
                 if (!trades.length) { body.innerHTML = '<tr><td colspan="7" class="text-center text-muted py-4">No trades recorded yet.</td></tr>'; return; }
                 body.innerHTML = trades.slice().reverse().map(t => {
                     const pClass = t.pnl >= 0 ? 'text-success-custom' : 'text-danger-custom';
-                    const reasonBadge = t.exit_reason === 'STOP_LOSS' ? 'bg-danger' : t.exit_reason === 'TRAILING_STOP' ? 'bg-warning text-dark' : t.exit_reason === 'GRID_FLIP' ? 'bg-info text-dark' : 'bg-primary';
+                    const reasonBadge = t.exit_reason === 'CIRCUIT_BREAKER' ? 'bg-danger fw-bold' : t.exit_reason === 'HALT_CLEAR' ? 'bg-secondary' : t.exit_reason === 'DCA_TIER' ? 'bg-info text-dark' : t.exit_reason === 'STOP_LOSS' ? 'bg-danger' : t.exit_reason === 'TRAILING_STOP' ? 'bg-warning text-dark' : t.exit_reason === 'GRID_FLIP' ? 'bg-info text-dark' : 'bg-primary';
                     const ts = t.timestamp ? t.timestamp.substring(0, 16).replace('T', ' ') : '';
                     return `<tr>
                             <td class="text-muted">${ts}</td>
@@ -1673,6 +1733,31 @@
                                         <span class="text-muted">Dir: <b class="${b.risk.direction === 'RISING' ? 'text-success-custom' : b.risk.direction === 'FALLING' ? 'text-danger-custom' : 'text-muted'}">${b.risk.direction}</b></span>
                                         <span class="text-muted">Risk: <b class="text-warning-custom">$${(b.risk.risk_current || 0).toFixed(2)}</b><span class="text-muted">/$${(b.risk.risk_max || 0).toFixed(2)}</span></span>
                                     </div>` : ''}
+                                </div>` : ''}
+
+                                ${b.strategy === 'MOMENTUM' && b.momentum ? `
+                                <!-- MOMENTUM STOP PHASE -->
+                                <div class="border-top border-secondary pt-2 mt-2" style="font-size:0.65rem;">
+                                    <div class="d-flex flex-wrap gap-2">
+                                        <span class="badge ${({0:'bg-secondary',1:'bg-warning text-dark',2:'bg-info text-dark',3:'bg-success text-dark'})[b.momentum.stop_phase||0]}">${({0:'SCANNING',1:'P1: INITIAL',2:'P2: TIGHTENED',3:'P3: LOCKED'})[b.momentum.stop_phase||0]}</span>
+                                        ${b.momentum.pending ? '<span class="badge bg-warning text-dark">PENDING FILL</span>' : ''}
+                                        ${b.momentum.entry_atr > 0 ? `<span class="text-muted">ATR: <b class="text-white">$${b.momentum.entry_atr.toFixed(2)}</b></span>` : ''}
+                                        ${b.momentum.high_water_mark > 0 ? `<span class="text-muted">HWM: <b class="text-white">$${Number(b.momentum.high_water_mark).toLocaleString()}</b></span>` : ''}
+                                    </div>
+                                </div>` : ''}
+
+                                ${b.strategy === 'DCA' && b.dca ? `
+                                <!-- DCA STATE -->
+                                <div class="border-top border-secondary pt-2 mt-2" style="font-size:0.65rem;">
+                                    <div class="d-flex flex-wrap gap-2">
+                                        <span class="badge ${({SCANNING:'bg-secondary',ARMED:'bg-warning text-dark',BUYING:'bg-primary',ACCUMULATING:'bg-success text-dark',TAKING_PROFIT:'bg-info text-dark',PAUSED:'bg-danger'})[b.dca.state||'SCANNING']}">${b.dca.state || 'SCANNING'}</span>
+                                        ${b.dca.total_buys > 0 ? `<span class="text-muted">Buys: <b class="text-white">${b.dca.total_buys}</b></span>` : ''}
+                                        ${b.dca.avg_entry > 0 ? `<span class="text-muted">Avg: <b class="text-white">$${Number(b.dca.avg_entry).toLocaleString()}</b></span>` : ''}
+                                        ${b.dca.avg_entry > 0 ? `<span class="text-muted">P/L: <b class="${b.dca.profit_pct >= 0 ? 'text-success-custom' : 'text-danger-custom'}">${b.dca.profit_pct >= 0 ? '+' : ''}${b.dca.profit_pct.toFixed(2)}%</b></span>` : ''}
+                                        ${b.dca.next_tier ? `<span class="text-muted">Tier: <b class="text-warning-custom">${b.dca.next_tier}%</b></span>` : ''}
+                                        ${b.dca.pending_sells > 0 ? `<span class="badge bg-info text-dark">${b.dca.pending_sells} sells</span>` : ''}
+                                        ${b.dca.pending_buy ? '<span class="badge bg-primary">BUY PENDING</span>' : ''}
+                                    </div>
                                 </div>` : ''}
 
                                 <!-- ACTION BUTTONS -->
