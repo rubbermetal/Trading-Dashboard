@@ -338,6 +338,7 @@
                                     <option value="TRAP">Trap (Consolidation Breakout)</option>
                                     <option value="MOMENTUM">Momentum (Trend Dip Reversal)</option>
                                     <option value="DCA">DCA (Signal-Gated Accumulation)</option>
+                                    <option value="NPR">NPR (Name-Position-Risk - Derivs Only)</option>
                                 </select>
                             </div>
 
@@ -560,7 +561,7 @@
         let chartTF = "15m";
 
         // Strategy -> native timeframe mapping
-        const STRATEGY_TF = { "QUAD": "15m", "QUAD_SUPER": "15m", "ORB": "5m", "GRID": "1h", "TRAP": "15m", "MOMENTUM": "5m", "DCA": "5m" };
+        const STRATEGY_TF = { "QUAD": "15m", "QUAD_SUPER": "15m", "ORB": "5m", "GRID": "1h", "TRAP": "15m", "MOMENTUM": "5m", "DCA": "5m", "NPR": "2m" , "NPR": "2m" };
         const TF_LABELS = { "1m": "1m", "5m": "5m", "15m": "15m", "1h": "1H", "6h": "6H", "1d": "1D" };
 
         // Scanner state
@@ -1550,7 +1551,7 @@
         // ==========================================
         // BOT MANAGER LOGIC
         // ==========================================
-        const STRATEGY_DEFAULT_TFS = { QUAD: '15m', QUAD_SUPER: '15m', ORB: '5m', GRID: '1h', TRAP: '15m', MOMENTUM: '5m', DCA: '5m' };
+        const STRATEGY_DEFAULT_TFS = { QUAD: '15m', QUAD_SUPER: '15m', ORB: '5m', GRID: '1h', TRAP: '15m', MOMENTUM: '5m', DCA: '5m', NPR: '2m' };
 
         function toggleBotSettings() {
             const strat = document.getElementById('bot-strategy').value;
@@ -1724,7 +1725,7 @@
                 if (!trades.length) { body.innerHTML = '<tr><td colspan="7" class="text-center text-muted py-4">No trades recorded yet.</td></tr>'; return; }
                 body.innerHTML = trades.slice().reverse().map(t => {
                     const pClass = t.pnl >= 0 ? 'text-success-custom' : 'text-danger-custom';
-                    const reasonBadge = t.exit_reason === 'CIRCUIT_BREAKER' ? 'bg-danger fw-bold' : t.exit_reason === 'HALT_CLEAR' ? 'bg-secondary' : t.exit_reason === 'DCA_TIER' ? 'bg-info text-dark' : t.exit_reason === 'STOP_LOSS' ? 'bg-danger' : t.exit_reason === 'TRAILING_STOP' ? 'bg-warning text-dark' : t.exit_reason === 'GRID_FLIP' ? 'bg-info text-dark' : 'bg-primary';
+                    const reasonBadge = t.exit_reason === 'EVENT_STOP' ? 'bg-danger' : t.exit_reason === 'CIRCUIT_BREAKER' ? 'bg-danger fw-bold' : t.exit_reason === 'HALT_CLEAR' ? 'bg-secondary' : t.exit_reason === 'DCA_TIER' ? 'bg-info text-dark' : t.exit_reason === 'STOP_LOSS' ? 'bg-danger' : t.exit_reason === 'TRAILING_STOP' ? 'bg-warning text-dark' : t.exit_reason === 'GRID_FLIP' ? 'bg-info text-dark' : 'bg-primary';
                     const ts = t.timestamp ? t.timestamp.substring(0, 16).replace('T', ' ') : '';
                     return `<tr>
                             <td class="text-muted">${ts}</td>
@@ -1868,6 +1869,19 @@
                                         ${b.dca.next_tier ? `<span class="text-muted">Tier: <b class="text-warning-custom">${b.dca.next_tier}%</b></span>` : ''}
                                         ${b.dca.pending_sells > 0 ? `<span class="badge bg-info text-dark">${b.dca.pending_sells} sells</span>` : ''}
                                         ${b.dca.pending_buy ? '<span class="badge bg-primary">BUY PENDING</span>' : ''}
+                                    </div>
+                                </div>` : ''}
+
+                                ${b.strategy === 'NPR' && b.npr ? `
+                                <!-- NPR STATE -->
+                                <div class="border-top border-secondary pt-2 mt-2" style="font-size:0.65rem;">
+                                    <div class="d-flex flex-wrap gap-2">
+                                        <span class="badge ${({SCANNING:'bg-secondary',SIGNAL_WAIT:'bg-warning text-dark',ENTERING:'bg-primary',IN_POSITION:'bg-success text-dark',DAILY_HALT:'bg-danger'})[b.npr.state||'SCANNING']}">${b.npr.state || 'SCANNING'}</span>
+                                        ${b.npr.event_type ? `<span class="badge bg-dark border border-info">${b.npr.event_type} ${b.npr.event_direction === 'BULL' ? '&#9650;' : '&#9660;'}</span>` : ''}
+                                        ${b.npr.zone ? `<span class="badge bg-dark border border-${b.npr.zone > 0 ? 'success' : 'danger'}">Zone ${b.npr.zone > 0 ? '+' : ''}${b.npr.zone}</span>` : ''}
+                                        ${b.npr.check_score ? `<span class="text-muted">Score: <b class="text-white">${b.npr.check_score.toFixed(1)}</b></span>` : ''}
+                                        ${b.npr.event_stop > 0 ? `<span class="text-muted">Stop: <b class="text-danger-custom">$${Number(b.npr.event_stop).toLocaleString()}</b></span>` : ''}
+                                        <span class="text-muted">Day P/L: <b class="${b.npr.daily_loss > 0 ? 'text-danger-custom' : 'text-success-custom'}">-$${b.npr.daily_loss.toFixed(2)}</b>/<b class="text-muted">$${b.npr.max_loss_day.toFixed(0)}</b></span>
                                     </div>
                                 </div>` : ''}
 

@@ -1,6 +1,6 @@
 # Strategy Spec Conformance Report
 **Date:** 2026-03-22 (updated)
-**Specs checked:** Grid risk engine spec.md, MOMENTUM_strategy_spec.md, DCA_strategy_spec.md
+**Specs checked:** Grid risk engine spec.md, MOMENTUM_strategy_spec.md, DCA_strategy_spec.md, NPR_strategy_spec.md
 
 ---
 
@@ -197,6 +197,17 @@ Entry depth threshold updated to -0.30 to align with new dip threshold. Full new
 
 ### bots.json — one-time state reset
 All DCA bots reset to SCANNING with `last_cross_direction = ABOVE` post zero-line change. Not a code change.
+
+---
+
+## NPR Strategy — Added 2026-03-22 (Not Yet Audited)
+
+NPR (Name-Position-Risk) is a new derivatives-only strategy integrated on 2026-03-22.
+Full conformance audit pending first live session.
+
+**Files touched:** `strategies.py` (calculate_npr, NPR_CONFIG, helpers), `bot_executors.py`
+(execute_npr, npr_get_stop_and_trail), `bot_utils.py`, `routes/bot_manager.py`, `bot_ws.py`,
+`templates/index.html`. Source reference: `npr_executor_code.py`.
 
 ---
 

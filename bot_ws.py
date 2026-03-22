@@ -18,7 +18,7 @@ from grid_engine import (
     cancel_order_safe, has_order_nearby, find_safe_price
 )
 
-from bot_executors import momentum_get_stop_price
+from bot_executors import momentum_get_stop_price, npr_get_stop_and_trail
 
 _processed_fill_oids = set()
 
@@ -35,7 +35,7 @@ def _check_new_pairs():
     
     current_pairs = set(
         bot.get('pair') for bot in ACTIVE_BOTS.values()
-        if bot.get('pair') and bot.get('strategy') in ('GRID', 'MOMENTUM', 'DCA') and bot.get('status') == 'RUNNING'
+        if bot.get('pair') and bot.get('strategy') in ('GRID', 'MOMENTUM', 'DCA', 'NPR') and bot.get('status') == 'RUNNING'
     )
     # Always include baseline pairs
     current_pairs.update(["BTC-USD", "ETH-USD"])
@@ -155,6 +155,43 @@ def process_price_tick(pair, cur_px):
                 print(f"[WS MOMENTUM | {pair}] EXIT ({exit_reason}): PnL ${profit:.2f}")
             except Exception as e:
                 print(f"[WS MOMENTUM | {pair}] Sell failed: {e}")
+
+    # ==========================================
+    # NPR BOTS: Event stop + trailing stop
+    # ==========================================
+    for bot_id, bot in list(ACTIVE_BOTS.items()):
+        if bot.get('strategy') != 'NPR' or bot.get('status') != 'RUNNING': continue
+        if bot.get('pair') != pair or bot.get('npr_state') != 'IN_POSITION': continue
+        if bot.get('position_side') == 'FLAT': continue
+        should_exit, exit_reason = npr_get_stop_and_trail(bot, cur_px)
+        if should_exit:
+            side = bot['position_side']
+            held, entry_px = bot.get('asset_held', 0), bot.get('entry_price', cur_px)
+            mult = get_contract_multiplier(pair)
+            try:
+                p_info = client.get_product(product_id=pair)
+                qi = str(getattr(p_info, 'quote_increment', '0.01'))
+                bi = str(getattr(p_info, 'base_increment', '0.00000001'))
+                from bot_utils import snap_to_increment
+                if side == 'LONG':
+                    sp = snap_to_increment(cur_px - float(qi), qi)
+                    sq = snap_to_increment(held, bi)
+                    client.limit_order_gtc_sell(client_order_id=str(uuid.uuid4()), product_id=pair, base_size=sq, limit_price=sp, post_only=True)
+                else:
+                    sp = snap_to_increment(cur_px + float(qi), qi)
+                    sq = snap_to_increment(held, bi)
+                    client.limit_order_gtc_buy(client_order_id=str(uuid.uuid4()), product_id=pair, base_size=sq, limit_price=sp, post_only=True)
+                pnl = (cur_px - entry_px) * held * mult if side == 'LONG' else (entry_px - cur_px) * held * mult
+                record_trade(bot, entry_px, cur_px, held, side, exit_reason, pair, mult)
+                if pnl < 0: bot['daily_loss'] = bot.get('daily_loss', 0) + abs(pnl)
+                bot['current_usd'] += held * cur_px * mult * 0.9975
+                bot['asset_held'] = 0.0; bot['position_side'] = 'FLAT'; bot['npr_state'] = 'SCANNING'
+                for k in ['event_stop','event_type','event_direction','event_bar_data','high_water_mark','low_water_mark','trail_distance','partial_filled','atr_at_entry']:
+                    bot.pop(k, None)
+                changes_made = True
+                print(f"[WS NPR | {pair}] EXIT ({exit_reason}): PnL ${pnl:.2f}")
+            except Exception as e:
+                print(f"[WS NPR | {pair}] Exit failed: {e}")
 
     # ==========================================
     # DCA BOTS: Live profit % update (display only, no stop execution)

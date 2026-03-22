@@ -30,6 +30,7 @@ STRATEGY_DEFAULT_TF = {
     "TRAP":       "15m",
     "MOMENTUM":   "5m",
     "DCA":        "5m",
+    "NPR":        "2m",
 }
 
 def get_bot_tf(bot):

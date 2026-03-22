@@ -576,8 +576,8 @@ def calculate_dca(df, dca_state="SCANNING", last_cross_direction="ABOVE"):
             return "HOLD", f"Armed. Dip deep enough but no curl-up yet (Fast={fast_prev:.2f}->{fast_cur:.2f}, Slow={slow_prev:.2f}->{slow_cur:.2f})", data
 
         # 3. ADX >= 20
-        if curr_adx < 20:
-            return "HOLD", f"Armed. Curl detected but ADX too low ({curr_adx:.1f} < 20)", data
+        if curr_adx < 10:
+            return "HOLD", f"Armed. Curl detected but ADX too low ({curr_adx:.1f} < 10)", data
 
         # All conditions met
         curl_source = "Fast" if fast_curling else "Slow"
@@ -602,3 +602,120 @@ def calculate_dca(df, dca_state="SCANNING", last_cross_direction="ABOVE"):
             return "ARM", f"Re-armed: Both ROCs below zero (Fast={fast_cur:.2f} Slow={slow_cur:.2f})", data
 
     return "HOLD", f"Accumulating. Fast={fast_cur:.2f} Slow={slow_cur:.2f} Cross={last_cross_direction}", data
+
+
+# ==========================================
+# NPR STRATEGY
+# ==========================================
+
+NPR_CONFIG = {
+    "elephant_body_mult": 2.5, "elephant_lookback": 20,
+    "tail_ratio_min": 2.0, "tail_body_max_pct": 0.35,
+    "one80_min_first_bar_pct": 0.5,
+    "ma_separation_max_atr": 3.0, "ma_flatness_slope_max": 0.0015,
+    "zone1_atr": 1.5, "zone3_atr": 3.0,
+    "sma_proximity_atr": 0.5, "stop_buffer_atr": 0.5,
+}
+
+def _detect_events(df, config):
+    events = []
+    if len(df) < 22: return events
+    curr, prev = df.iloc[-1], df.iloc[-2]
+    c_o, c_c, c_h, c_l = float(curr['open']), float(curr['close']), float(curr['high']), float(curr['low'])
+    p_o, p_c, p_h, p_l = float(prev['open']), float(prev['close']), float(prev['high']), float(prev['low'])
+    c_body, c_range, p_body = abs(c_c - c_o), c_h - c_l, abs(p_c - p_o)
+    lb = config['elephant_lookback']
+    bodies = df['close'].iloc[-(lb+1):-1].values - df['open'].iloc[-(lb+1):-1].values
+    avg_body = float(pd.Series(abs(bodies)).mean()) if len(bodies) > 0 else c_body
+    atr = float(df['atr'].iloc[-1]) if 'atr' in df.columns and not pd.isna(df['atr'].iloc[-1]) else c_range
+    sb = config['stop_buffer_atr'] * atr
+    p_bear, p_bull = p_c < p_o, p_c > p_o
+    c_bull, c_bear = c_c > c_o, c_c < c_o
+    first_ok = p_body >= config['one80_min_first_bar_pct'] * avg_body
+    # 180 bars
+    if first_ok and p_body > 0 and c_body > 0:
+        if p_bear and c_bull and c_h > p_h:
+            if min(c_o, c_c) <= min(p_o, p_c):
+                events.append({'type':'180','direction':'BULL','stop_price':min(p_l,c_l)-sb,'power':2.0,
+                    'bar_data':{'curr':{'o':c_o,'c':c_c,'h':c_h,'l':c_l},'prev':{'o':p_o,'c':p_c,'h':p_h,'l':p_l}}})
+        if p_bull and c_bear and c_l < p_l:
+            if max(c_o, c_c) >= max(p_o, p_c):
+                events.append({'type':'180','direction':'BEAR','stop_price':max(p_h,c_h)+sb,'power':2.0,
+                    'bar_data':{'curr':{'o':c_o,'c':c_c,'h':c_h,'l':c_l},'prev':{'o':p_o,'c':p_c,'h':p_h,'l':p_l}}})
+    # Tail bars
+    if c_range > 0 and c_body > 0 and (c_body / c_range) <= config['tail_body_max_pct']:
+        lo_tail = min(c_o, c_c) - c_l
+        if c_body > 0 and lo_tail / c_body >= config['tail_ratio_min']:
+            events.append({'type':'TAIL','direction':'BULL','stop_price':c_l-sb,'power':1.0,
+                'bar_data':{'curr':{'o':c_o,'c':c_c,'h':c_h,'l':c_l}}})
+        hi_tail = c_h - max(c_o, c_c)
+        if c_body > 0 and hi_tail / c_body >= config['tail_ratio_min']:
+            events.append({'type':'TAIL','direction':'BEAR','stop_price':c_h+sb,'power':1.0,
+                'bar_data':{'curr':{'o':c_o,'c':c_c,'h':c_h,'l':c_l}}})
+    # Elephant bars
+    if c_body >= config['elephant_body_mult'] * avg_body and avg_body > 0:
+        if c_bull:
+            events.append({'type':'ELEPHANT','direction':'BULL','stop_price':c_l-sb,'power':1.0,
+                'bar_data':{'curr':{'o':c_o,'c':c_c,'h':c_h,'l':c_l}}})
+        elif c_bear:
+            events.append({'type':'ELEPHANT','direction':'BEAR','stop_price':c_h+sb,'power':1.0,
+                'bar_data':{'curr':{'o':c_o,'c':c_c,'h':c_h,'l':c_l}}})
+    events.sort(key=lambda e: {'180':0,'TAIL':1,'ELEPHANT':2}.get(e['type'],9))
+    return events
+
+def _compute_zone(price, sma20, sma200, atr, config):
+    ma_mid = (sma20 + sma200) / 2.0
+    d = (price - ma_mid) / atr if atr > 0 else 0
+    z1, z3 = config['zone1_atr'], config['zone3_atr']
+    if d >= z3: return 3, d
+    elif d >= z1: return 2, d
+    elif d >= 0: return 1, d
+    elif d >= -z1: return -1, d
+    elif d >= -z3: return -2, d
+    else: return -3, d
+
+def _zone_allows_direction(zone, direction):
+    if direction == 'BULL': return zone not in (-1, 3)
+    return zone not in (1, -3)
+
+def _score_trade(event, zone, sma20, sma200, price, atr, config):
+    pos_checks = []
+    if abs(zone) == 1: pos_checks.append('zone_1')
+    elif abs(zone) == 3: pos_checks.append('zone_3')
+    if atr > 0 and abs(price - sma20) <= config['sma_proximity_atr'] * atr: pos_checks.append('near_20sma')
+    if atr > 0 and abs(price - sma200) <= config['sma_proximity_atr'] * atr: pos_checks.append('near_200sma')
+    pos_score = min(len(pos_checks), 1.0) if pos_checks else 0.5
+    return 1.0 + pos_score + 1.0, pos_checks
+
+def calculate_npr(df):
+    empty = {'signal':'HOLD','event_type':None,'event_direction':None,'event_stop':0,
+             'event_power':1.0,'event_bar_data':None,'zone':0,'check_score':0,
+             'position_checks':[],'atr':0,'reason':'No signal'}
+    if len(df) < 210: empty['reason'] = 'Not enough data'; return empty
+    c, h, l = df['close'], df['high'], df['low']
+    sma20 = ta.sma(c, 20); sma200 = ta.sma(c, 200); atr_s = ta.atr(h, l, c, 14)
+    if sma20 is None or sma200 is None or atr_s is None: empty['reason'] = 'Warming up'; return empty
+    s20, s200, atr_v = float(sma20.iloc[-1]), float(sma200.iloc[-1]), float(atr_s.iloc[-1])
+    px = float(c.iloc[-1])
+    if pd.isna(s200) or pd.isna(atr_v) or atr_v <= 0: empty['reason'] = 'Warming up'; return empty
+    empty['atr'] = atr_v; df['atr'] = atr_s; cfg = NPR_CONFIG
+    s200_st = float(sma200.iloc[-21]) if len(sma200) > 21 else float(sma200.iloc[0])
+    slope = abs((s200 - s200_st) / s200_st) if s200_st > 0 else 999
+    if slope > cfg['ma_flatness_slope_max']: empty['reason'] = f"SMA200 not flat ({slope*100:.3f}%)"; return empty
+    gap = abs(s20 - s200) / atr_v
+    if gap > cfg['ma_separation_max_atr']: empty['reason'] = f"SMAs separated ({gap:.1f} ATR)"; return empty
+    zone, dist = _compute_zone(px, s20, s200, atr_v, cfg); empty['zone'] = zone
+    events = _detect_events(df, cfg)
+    if not events: empty['reason'] = f"No event. Zone={zone:+d}"; return empty
+    for ev in events:
+        d = ev['direction']
+        if not _zone_allows_direction(zone, d): continue
+        sc, pc = _score_trade(ev, zone, s20, s200, px, atr_v, cfg)
+        if sc < 2.0: continue
+        if abs(zone) == 2 and (sc < 3.0 or ev['type'] not in ('180','ELEPHANT')): continue
+        sig = 'LONG' if d == 'BULL' else 'SHORT'
+        reason = f"NPR {ev['type']} {d} zone {zone:+d} (score={sc:.1f} checks={pc}) Stop=${ev['stop_price']:.2f}"
+        return {'signal':sig,'event_type':ev['type'],'event_direction':d,'event_stop':ev['stop_price'],
+                'event_power':ev['power'],'event_bar_data':ev['bar_data'],'zone':zone,
+                'check_score':sc,'position_checks':pc,'atr':atr_v,'reason':reason}
+    empty['reason'] = f"Event {events[0]['type']} {events[0]['direction']} blocked (zone={zone:+d})"; return empty

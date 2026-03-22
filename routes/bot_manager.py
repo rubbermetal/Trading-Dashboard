@@ -14,7 +14,7 @@ from bot_utils import (
 )
 
 # --- Engine & Strategy Imports ---
-from bot_executors import execute_orb, execute_quad, execute_trap, execute_momentum, execute_dca
+from bot_executors import execute_orb, execute_quad, execute_trap, execute_momentum, execute_dca, execute_npr
 from grid_engine import execute_grid_bot, calculate_max_loss, calculate_grid_pnl
 from bot_ws import start_ws_engine
 
@@ -65,6 +65,8 @@ def run_bot(bot_id):
                 execute_momentum(bot_id, bot, pair)
             elif strategy == 'DCA':
                 execute_dca(bot_id, bot, pair)
+            elif strategy == 'NPR':
+                execute_npr(bot_id, bot, pair)
         except Exception as e:
             print(f"[BOT ENGINE] Error in {pair} {strategy} bot: {e}")
             
@@ -170,6 +172,17 @@ def get_bots():
                 'paused': bot.get('dca_state') == 'PAUSED',
             }
         
+        if bot.get('strategy') == 'NPR':
+            b_copy['npr'] = {
+                'state': bot.get('npr_state', 'SCANNING'),
+                'event_type': bot.get('event_type'),
+                'event_direction': bot.get('event_direction'),
+                'zone': bot.get('zone', 0),
+                'check_score': bot.get('check_score', 0),
+                'event_stop': bot.get('event_stop', 0),
+                'daily_loss': round(bot.get('daily_loss', 0), 2),
+                'max_loss_day': bot.get('max_loss_per_day', 30),
+            }
         response_data[bot_id] = b_copy
     return jsonify(response_data)
 
