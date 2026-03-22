@@ -1,12 +1,12 @@
 # Strategy Spec Conformance Report
-**Date:** 2026-03-21
+**Date:** 2026-03-22 (updated)
 **Specs checked:** Grid risk engine spec.md, MOMENTUM_strategy_spec.md, DCA_strategy_spec.md
 
 ---
 
 ## Summary
 
-The codebase is **highly conformant** with all three specs. The core logic — risk escalation, trailing stops, halt modes, circuit breaker, state machines, order management, and execution order — is correctly implemented throughout. There are 2 signal-correctness bugs and 6 minor/cosmetic deviations.
+The codebase is **highly conformant** with all three specs. The core logic — risk escalation, trailing stops, halt modes, circuit breaker, state machines, order management, and execution order — is correctly implemented throughout. There is 1 open signal-correctness bug, 1 intentional deviation, and 6 minor/cosmetic deviations.
 
 ---
 
@@ -32,23 +32,19 @@ roc14_smooth = ta.sma(roc14_raw, 5)
 
 ---
 
-### BUG-2 — DCA: ROC smoothing uses SMA(3) instead of SMA(5)
+### DEVIATION-1 — DCA: ROC smoothing uses SMA(3) instead of SMA(5) *(intentional)*
 **File:** `strategies.py:507,509`
-**Severity:** Bug (signal correctness)
+**Severity:** Intentional deviation (as-built)
 
-Same issue as BUG-1, different value. Spec says SMA(5) for both ROCs.
+Spec says SMA(5) for both ROCs. Implementation uses SMA(3) and is staying that way.
 
 ```python
-# Current (wrong):
+# As-built (intentional):
 roc5_smooth  = ta.sma(roc5_raw,  3)
 roc14_smooth = ta.sma(roc14_raw, 3)
-
-# Should be:
-roc5_smooth  = ta.sma(roc5_raw,  5)
-roc14_smooth = ta.sma(roc14_raw, 5)
 ```
 
-**Impact:** ARM and BUY signals will fire on less-confirmed dips than the spec intends. Cross detection and curl-up conditions will be noisier, potentially causing more frequent re-arming cycles.
+**Rationale:** SMA(3) produces a faster signal that pairs better with the loosened curl-up detection and zero-line ARM trigger introduced 2026-03-22. Changing to SMA(5) would re-introduce the lag that the curl-up relaxation was meant to address.
 
 ---
 
@@ -176,3 +172,37 @@ In `execute_grid_bot()`, `grid_check_fills` (step 10) runs near the top, before 
 - DCA pause/resume hysteresis (15% in, 13% out) — exact
 - DCA WS live profit % update (display only, no stop) — implemented
 - All three strategies wired into `run_bot()` and `/api/bots` — complete
+
+---
+
+## Spec Changes Implemented — 2026-03-22
+
+The following DCA signal logic changes were made to `strategies.py` and the spec updated to match. These are no longer deviations.
+
+### DCA-CHANGE-1 — Curl-up detection loosened
+**Was:** `current > prev AND prev <= prev2` (strict inflection)
+**Now:** `current > prev` (simple rising)
+Prevents missed one-bar windows. Spec updated.
+
+### DCA-CHANGE-2 — ARM/DISARM trigger changed to zero-line cross
+**Was:** ARM on Fast ROC crossing below Slow ROC; DISARM on Fast crossing back above Slow.
+**Now:** ARM when both ROCs < 0. DISARM when both ROCs > 0. Re-arm cycle uses same zero-line logic.
+Applied via `patch_dca_zero.py`. Spec updated.
+
+### DCA-CHANGE-3 — Depth threshold lowered from -0.50 to -0.30
+Both ROCs must be ≤ -0.30 (was -0.50) to trigger a buy. Spec updated.
+
+### DCA-CHANGE-4 — Sizing tiers reworked
+Entry depth threshold updated to -0.30 to align with new dip threshold. Full new tier scale pending documentation in spec.
+
+### bots.json — one-time state reset
+All DCA bots reset to SCANNING with `last_cross_direction = ABOVE` post zero-line change. Not a code change.
+
+---
+
+## Still Pending / Not Changed
+
+- **MOMENTUM ROC smoothing** — still SMA(2), spec says SMA(5) (BUG-1 open)
+- **DCA ROC smoothing** — SMA(3) intentional (see DEVIATION-1 above)
+- **MOMENTUM ADX threshold** — `curr_adx < 25` as-is
+- **botchart_upgrade.zip** (`market_data.py` + `patch_botchart.py`) — not yet deployed

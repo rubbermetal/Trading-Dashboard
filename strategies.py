@@ -481,8 +481,8 @@ def calculate_dca(df, dca_state="SCANNING", last_cross_direction="ABOVE"):
     DCA: Signal-gated accumulation via dual smoothed ROC cross/curl cycle.
     
     State machine signals:
-    - "ARM": Fast ROC crossed below Slow ROC (new dip starting)
-    - "DISARM": Fast ROC crossed back above Slow before conditions met
+    - "ARM": Both ROCs crossed below zero (dip starting)
+    - "DISARM": Both ROCs crossed back above zero before conditions met
     - "BUY": Armed + both ROCs <= -0.50 + either curling up + ADX >= 20
     - "HOLD": No action this cycle
     
@@ -530,12 +530,14 @@ def calculate_dca(df, dca_state="SCANNING", last_cross_direction="ABOVE"):
     slow_prev = float(slow_prev)
     slow_prev2 = float(slow_prev2)
 
-    # Depth for sizing tier
+    # Depth for sizing tier — scales from -0.30 threshold
     depth = min(fast_cur, slow_cur)
-    if depth <= -2.0:
-        depth_mult = 1.25
-    elif depth <= -0.75:
-        depth_mult = 1.10
+    if depth <= -1.0:
+        # 2.0x at -1.0, then +0.5x per -0.5 step below
+        steps_below = int((abs(depth) - 1.0) / 0.5)
+        depth_mult = 2.0 + (steps_below * 0.5)
+    elif depth <= -0.50:
+        depth_mult = 1.20
     else:
         depth_mult = 1.0
 
@@ -546,27 +548,30 @@ def calculate_dca(df, dca_state="SCANNING", last_cross_direction="ABOVE"):
         'depth_multiplier': depth_mult,
     }
 
-    # --- SCANNING: detect Fast cross below Slow ---
+    # --- SCANNING: detect both ROCs crossing below zero ---
     if dca_state == "SCANNING":
-        # Cross below: fast was >= slow, now fast < slow
-        if fast_cur < slow_cur and fast_prev >= slow_prev:
-            return "ARM", f"Fast ROC ({fast_cur:.2f}) crossed below Slow ROC ({slow_cur:.2f})", data
+        both_below_now = fast_cur < 0 and slow_cur < 0
+        either_above_prev = fast_prev >= 0 or slow_prev >= 0
+        if both_below_now and either_above_prev:
+            return "ARM", f"Both ROCs crossed below zero (Fast={fast_cur:.2f} Slow={slow_cur:.2f})", data
         return "HOLD", f"Scanning. Fast={fast_cur:.2f} Slow={slow_cur:.2f}", data
 
     # --- ARMED: check for disarm or buy conditions ---
     if dca_state == "ARMED":
-        # Disarm: Fast crossed back above Slow without reaching buy conditions
-        if fast_cur > slow_cur and fast_prev <= slow_prev:
-            return "DISARM", f"Fast ROC ({fast_cur:.2f}) crossed back above Slow ({slow_cur:.2f}). Dip too shallow.", data
+        # Disarm: Both ROCs crossed back above zero without reaching buy conditions
+        both_above_now = fast_cur >= 0 and slow_cur >= 0
+        either_below_prev = fast_prev < 0 or slow_prev < 0
+        if both_above_now and either_below_prev:
+            return "DISARM", f"Both ROCs back above zero (Fast={fast_cur:.2f} Slow={slow_cur:.2f}). Dip resolved.", data
 
         # Check buy conditions
         # 1. Both ROCs <= -0.50
-        if fast_cur > -0.50 or slow_cur > -0.50:
-            return "HOLD", f"Armed. Waiting for depth (Fast={fast_cur:.2f} Slow={slow_cur:.2f}, need <= -0.50)", data
+        if fast_cur > -0.30 or slow_cur > -0.30:
+            return "HOLD", f"Armed. Waiting for depth (Fast={fast_cur:.2f} Slow={slow_cur:.2f}, need <= -0.30)", data
 
         # 2. Either ROC curling up
-        fast_curling = (fast_cur > fast_prev) and (fast_prev <= fast_prev2)
-        slow_curling = (slow_cur > slow_prev) and (slow_prev <= slow_prev2)
+        fast_curling = fast_cur > fast_prev
+        slow_curling = slow_cur > slow_prev
         if not fast_curling and not slow_curling:
             return "HOLD", f"Armed. Dip deep enough but no curl-up yet (Fast={fast_prev:.2f}->{fast_cur:.2f}, Slow={slow_prev:.2f}->{slow_cur:.2f})", data
 
@@ -582,14 +587,18 @@ def calculate_dca(df, dca_state="SCANNING", last_cross_direction="ABOVE"):
         return "BUY", reason, data
 
     # Default: if state is ACCUMULATING/BUYING/PAUSED, signal logic handles re-arm
-    # Check for re-arm: Fast must cross above Slow first (reset), then below (re-arm)
+    # Re-arm cycle: both ROCs must cross above zero (reset), then both cross below zero (re-arm)
     if last_cross_direction == "BELOW":
-        # Waiting for Fast to cross back above Slow (reset)
-        if fast_cur > slow_cur and fast_prev <= slow_prev:
-            return "CROSS_ABOVE", f"Fast ROC crossed above Slow (reset). Ready to re-arm on next cross below.", data
+        # Waiting for both ROCs to cross back above zero (reset)
+        both_above_now = fast_cur >= 0 and slow_cur >= 0
+        either_below_prev = fast_prev < 0 or slow_prev < 0
+        if both_above_now and either_below_prev:
+            return "CROSS_ABOVE", f"Both ROCs above zero (reset). Ready to re-arm on next cross below.", data
     elif last_cross_direction == "ABOVE":
-        # Waiting for fresh cross below (re-arm)
-        if fast_cur < slow_cur and fast_prev >= slow_prev:
-            return "ARM", f"Re-armed: Fast ROC ({fast_cur:.2f}) crossed below Slow ROC ({slow_cur:.2f})", data
+        # Waiting for both ROCs to cross below zero (re-arm)
+        both_below_now = fast_cur < 0 and slow_cur < 0
+        either_above_prev = fast_prev >= 0 or slow_prev >= 0
+        if both_below_now and either_above_prev:
+            return "ARM", f"Re-armed: Both ROCs below zero (Fast={fast_cur:.2f} Slow={slow_cur:.2f})", data
 
     return "HOLD", f"Accumulating. Fast={fast_cur:.2f} Slow={slow_cur:.2f} Cross={last_cross_direction}", data

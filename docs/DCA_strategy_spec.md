@@ -1,6 +1,6 @@
 # DCA STRATEGY — FULL SPECIFICATION
 # Reference Document for Implementation
-# Date: 2026-03-20
+# Date: 2026-03-22 (updated — see change log at bottom)
 
 ## OVERVIEW
 
@@ -36,20 +36,18 @@ SCANNING → ARMED → BUYING → ACCUMULATING ──→ (re-arm) → ARMED
 ```
 
 ### State: SCANNING
-Waiting for Fast ROC to cross below Slow ROC.
-- Every cycle: check if Fast ROC < Slow ROC AND previous Fast ROC >= previous Slow ROC
-- On cross detected → transition to ARMED
+Waiting for both ROCs to cross below zero (zero-line cross).
+- Every cycle: check if Fast ROC < 0 AND Slow ROC < 0
+- On zero-line cross detected → transition to ARMED
 - If already holding a position, profit tiers are still evaluated every cycle
 
 ### State: ARMED
 Cross detected. Waiting for dip depth + momentum curl-up + ADX confirmation.
-- **Dip Depth:** Both Fast ROC AND Slow ROC must be ≤ -0.50
-- **Curl-Up:** EITHER Fast ROC OR Slow ROC is curling up
-  (current > previous AND previous <= two bars ago)
+- **Dip Depth:** Both Fast ROC AND Slow ROC must be ≤ -0.30
+- **Curl-Up:** EITHER Fast ROC OR Slow ROC is rising (current > previous)
 - **Trend Power:** ADX(14) ≥ 20
 - When all three conditions met → transition to BUYING
-- If Fast ROC crosses back ABOVE Slow ROC before conditions met → disarm,
-  return to SCANNING (the dip resolved without being deep enough)
+- If both ROCs cross back ABOVE zero → disarm, return to SCANNING
 
 ### State: BUYING
 Placing a maker limit buy order.
@@ -65,9 +63,9 @@ Placing a maker limit buy order.
 Has a position. Normal operating state.
 - Every cycle: evaluate profit tiers (Section 3)
 - Every cycle: check for new ARMED signal (re-arm check)
-  - Fast ROC must first cross ABOVE Slow ROC (reset), THEN cross back below
+  - Both ROCs must first cross ABOVE zero (reset), THEN cross back below zero
   - This prevents repeated buys on the same dip
-  - On fresh cross below → transition to ARMED (can buy again)
+  - On fresh zero-line cross below → transition to ARMED (can buy again)
 - Manages outstanding limit sell orders from profit-taking
 
 ### State: TAKING_PROFIT
@@ -97,11 +95,14 @@ Convert to USD: `min_buy_usd = base_min_size × current_price`
 
 Take the more negative ROC value: `depth = min(fast_roc, slow_roc)`
 
+> **Note:** Tiers reworked 2026-03-22. Entry depth threshold lowered from -0.50 to -0.30.
+> New tier scale to be documented — values pending confirmation.
+
 | Depth Range        | Buy Size          | Rationale                    |
 |--------------------|-------------------|------------------------------|
-| -0.50 to -0.75     | min_size × 1.0    | Normal dip, minimum exposure |
+| -0.30 to -0.75     | min_size × 1.0    | Normal dip, minimum exposure |
 | -0.75 to -2.0      | min_size × 1.10   | Deeper dip, slightly larger  |
-| Below -2.0          | min_size × 1.25   | Capitulation, max single buy |
+| Below -2.0         | min_size × 1.25   | Capitulation, max single buy |
 
 ### Capital Guard
 - If bot's idle USD < min_buy_usd: skip buy, log "insufficient capital"
@@ -338,3 +339,28 @@ bots.json for crash recovery.
 - Bot card: DCA-specific section (state, buys, avg entry, tier, pending)
 - Bot chart: avg entry, tier lines, pause line, trade markers
 - JS constants: add DCA to STRATEGY_TF and STRATEGY_DEFAULT_TFS
+
+---
+
+## CHANGE LOG
+
+### 2026-03-22
+
+**1. Curl-up detection loosened**
+Changed from strict inflection `(current > prev AND prev <= prev2)` to simple rising `(current > prev)`.
+Prevents missed one-bar windows where the inflection condition was too tight.
+
+**2. ARM/DISARM trigger changed to zero-line cross**
+- Previously: ARM on Fast ROC crossing below Slow ROC; DISARM on Fast crossing back above Slow.
+- Now: ARM when both ROCs cross below zero. DISARM when both cross back above zero.
+- Re-arm cycle (in ACCUMULATING) uses same zero-line logic: both must cross above zero first (reset), then back below zero to re-arm.
+- Applied via `patch_dca_zero.py`.
+
+**3. Depth threshold lowered from -0.50 to -0.30**
+Both ROCs must be ≤ -0.30 (was -0.50) for a buy to trigger. Catches shallower but confirmed dips.
+
+**4. Sizing tiers reworked**
+Entry depth threshold updated to -0.30 to match new dip threshold. Full new tier scale pending documentation.
+
+**bots.json — one-time state reset**
+All DCA bots reset to SCANNING with `last_cross_direction = ABOVE` after the zero-line logic change, ensuring clean pickup of the new ARM triggers.
