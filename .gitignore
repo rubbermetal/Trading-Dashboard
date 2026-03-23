@@ -1,6 +1,7 @@
 # Secrets & runtime state
 .env
 bots.json
+stats.json
 
 # Development utilities (not part of the application)
 check_adx.py

@@ -827,6 +827,8 @@ def execute_dca(bot_id, bot, pair):
         base_inc = str(getattr(p_info, 'base_increment', '0.00000001'))
         quote_inc = str(getattr(p_info, 'quote_increment', '0.01'))
         base_min = float(getattr(p_info, 'base_min_size', '0.00001'))
+        if base_min * cur_px < 0.25:
+            base_min = 0.25 / cur_px
     except Exception as e:
         print(f"[DCA | {pair}] Data fetch error: {e}")
         return
@@ -1164,6 +1166,8 @@ def execute_npr(bot_id, bot, pair):
         base_inc = str(getattr(p_info, 'base_increment', '0.00000001'))
         quote_inc = str(getattr(p_info, 'quote_increment', '0.01'))
         base_min = float(getattr(p_info, 'base_min_size', '0.00001'))
+        if base_min * cur_px < 0.25:
+            base_min = 0.25 / cur_px
     except Exception as e:
         print(f"[NPR | {pair}] Data fetch error: {e}")
         return

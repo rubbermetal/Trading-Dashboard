@@ -378,3 +378,22 @@ def withdraw_from_bot(bot_id):
 # ==========================================
 start_ws_engine()
 load_bots()
+
+
+@bot_manager_bp.route('/api/pair_stats', methods=['GET'])
+def get_pair_stats():
+    """Returns permanent per-strategy-per-pair stats."""
+    from bot_utils import load_permanent_stats
+    stats = load_permanent_stats()
+    return jsonify(stats)
+
+@bot_manager_bp.route('/api/pair_stats/reset/<key>', methods=['POST'])
+def reset_pair_stats(key):
+    """Reset stats for a specific strategy:pair key."""
+    from bot_utils import load_permanent_stats, save_permanent_stats
+    stats = load_permanent_stats()
+    if key in stats:
+        del stats[key]
+        save_permanent_stats(stats)
+        return jsonify(success=True, message=f"Reset stats for {key}")
+    return jsonify(success=False, error=f"No stats found for {key}")

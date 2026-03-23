@@ -426,6 +426,21 @@
                         </div>
                     </div>
                 </div>
+
+                <!-- PERMANENT STATS -->
+                <div class="row mt-4">
+                    <div class="col-12">
+                        <div class="card card-custom p-4">
+                            <div class="d-flex justify-content-between align-items-center mb-4">
+                                <h5 class="fw-bold mb-0" style="color:#66fcf1;"><i class="bi bi-trophy me-2"></i>Lifetime Records</h5>
+                                <button class="btn btn-sm btn-outline-primary" onclick="loadPairStats()"><i class="bi bi-arrow-clockwise"></i></button>
+                            </div>
+                            <div id="pair-stats-grid" class="row g-3">
+                                <div class="text-center text-muted py-4">Loading stats...</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
             </div>
 
             <div class="tab-pane fade" id="screen-panel" role="tabpanel">
@@ -1794,7 +1809,7 @@
                                 <div class="d-flex justify-content-between small border-top border-secondary pt-2 mt-1">
                                     <div><span class="text-muted d-block" style="font-size: 0.6rem;">NET VALUE</span><b class="text-white">$${netVal.toFixed(2)}</b></div>
                                     <div class="text-center"><span class="text-muted d-block" style="font-size: 0.6rem;">IDLE USD</span><b class="text-white">$${b.current_usd.toFixed(2)}</b></div>
-                                    <div class="text-end"><span class="text-muted d-block" style="font-size: 0.6rem;">ASSET HELD</span><b class="text-white">${b.asset_held.toFixed(6)}</b></div>
+                                    <div class="text-end"><span class="text-muted d-block" style="font-size: 0.6rem;">ASSET HELD</span><b class="text-white">${b.asset_held.toFixed(8)}</b></div>
                                 </div>
 
                                 <!-- LIVE PNL -->
@@ -1979,12 +1994,92 @@
         // Intervals for polling data
         setInterval(refresh, 5000);
         setInterval(loadScreener, 30000);
-        setInterval(loadAllOrders, 10000); // Polling for order state changes
+        setInterval(loadAllOrders, 10000);
+        setInterval(loadPairStats, 30000); // Polling for order state changes
+
+        // ==========================================
+        // PERMANENT PAIR STATS
+        // ==========================================
+        async function loadPairStats() {
+            try {
+                const r = await fetch('/api/pair_stats');
+                const stats = await r.json();
+                const grid = document.getElementById('pair-stats-grid');
+                const keys = Object.keys(stats);
+
+                if (keys.length === 0) {
+                    grid.innerHTML = '<div class="text-center text-muted py-4">No trading history yet. Stats are recorded when bots close trades.</div>';
+                    return;
+                }
+
+                // Sort by total PnL descending
+                keys.sort((a, b) => (stats[b].total_pnl || 0) - (stats[a].total_pnl || 0));
+
+                grid.innerHTML = keys.map(key => {
+                    const s = stats[key];
+                    const pnl = s.total_pnl || 0;
+                    const pnlClass = pnl >= 0 ? 'text-success-custom' : 'text-danger-custom';
+                    const wr = s.win_rate || 0;
+                    const wrClass = wr >= 50 ? 'text-success-custom' : wr > 0 ? 'text-danger-custom' : 'text-muted';
+                    const stratColors = { GRID: 'bg-info text-dark', DCA: 'bg-success text-dark', MOMENTUM: 'bg-warning text-dark', NPR: 'bg-primary', QUAD: 'bg-secondary', QUAD_SUPER: 'bg-secondary', ORB: 'bg-secondary', TRAP: 'bg-secondary' };
+                    const lastTrade = s.last_trade ? s.last_trade.substring(0, 16).replace('T', ' ') : 'Never';
+
+                    return `<div class="col-12 col-md-6 col-lg-4">
+                        <div class="card card-custom p-3 shadow-sm h-100">
+                            <div class="d-flex justify-content-between align-items-center mb-2">
+                                <div>
+                                    <h6 class="fw-bold mb-0" style="color:#66fcf1;">${s.pair}</h6>
+                                    <span class="badge ${stratColors[s.strategy] || 'bg-secondary'}" style="font-size:0.6rem;">${s.strategy}</span>
+                                </div>
+                                <div class="text-end">
+                                    <span class="${pnlClass} fw-bold" style="font-size:1.1rem;">${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}</span>
+                                </div>
+                            </div>
+                            <div style="font-size:0.7rem;" class="border-top border-secondary pt-2">
+                                <div class="d-flex justify-content-between mb-1">
+                                    <span class="text-muted">Trades</span>
+                                    <span class="text-white fw-bold">${s.total_trades}</span>
+                                </div>
+                                <div class="d-flex justify-content-between mb-1">
+                                    <span class="text-muted">Win / Loss</span>
+                                    <span><span class="text-success-custom fw-bold">${s.winning_trades}</span> <span class="text-muted">/</span> <span class="text-danger-custom fw-bold">${s.losing_trades}</span></span>
+                                </div>
+                                <div class="d-flex justify-content-between mb-1">
+                                    <span class="text-muted">Win Rate</span>
+                                    <span class="${wrClass} fw-bold">${wr.toFixed(1)}%</span>
+                                </div>
+                                <div class="d-flex justify-content-between mb-1">
+                                    <span class="text-muted">Best / Worst</span>
+                                    <span><span class="text-success-custom">+$${(s.largest_win || 0).toFixed(4)}</span> <span class="text-muted">/</span> <span class="text-danger-custom">$${(s.largest_loss || 0).toFixed(4)}</span></span>
+                                </div>
+                                <div class="d-flex justify-content-between mb-1">
+                                    <span class="text-muted">Stopped Out</span>
+                                    <span class="text-warning-custom fw-bold">${s.stopped_out || 0}</span>
+                                </div>
+                                <div class="d-flex justify-content-between mb-1">
+                                    <span class="text-muted">Volume</span>
+                                    <span class="text-muted">$${(s.total_volume || 0).toLocaleString()}</span>
+                                </div>
+                                <div class="d-flex justify-content-between mb-1">
+                                    <span class="text-muted">Est. Fees</span>
+                                    <span class="text-muted">$${(s.total_fees_est || 0).toFixed(2)}</span>
+                                </div>
+                                <div class="d-flex justify-content-between">
+                                    <span class="text-muted">Last Trade</span>
+                                    <span class="text-muted">${lastTrade}</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>`;
+                }).join('');
+            } catch (e) { console.error('Pair stats error:', e); }
+        }
 
         // Initial Data Loads
         refresh();
         loadScreener();
         loadAllOrders();
+        loadPairStats();
     </script>
 </body>
 </html>

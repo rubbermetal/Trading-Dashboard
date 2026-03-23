@@ -127,4 +127,48 @@ def record_trade(bot, entry_px, exit_px, size, side, exit_reason, pair, multipli
         'exit_reason': exit_reason,
         'timestamp': datetime.now(timezone.utc).isoformat()
     })
+    strategy = bot.get("strategy", "UNKNOWN")
+    update_permanent_stats(strategy, pair, entry_price, exit_price, size, side, exit_reason, round(net_pnl, 4))
     save_bots()
+
+_stats_lock = threading.Lock()
+
+def load_permanent_stats():
+    try:
+        with open('stats.json', 'r') as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+def save_permanent_stats(stats):
+    with _stats_lock:
+        with open('stats.json', 'w') as f:
+            json.dump(stats, f, indent=2)
+
+def update_permanent_stats(strategy, pair, entry_price, exit_price, size, side, exit_reason, pnl):
+    key = f"{strategy}:{pair}"
+    stats = load_permanent_stats()
+    if key not in stats:
+        stats[key] = {'strategy': strategy, 'pair': pair, 'total_trades': 0, 'winning_trades': 0,
+            'losing_trades': 0, 'stopped_out': 0, 'total_pnl': 0.0, 'largest_win': 0.0,
+            'largest_loss': 0.0, 'total_fees_est': 0.0, 'total_volume': 0.0,
+            'first_trade': None, 'last_trade': None, 'win_rate': 0.0}
+    r = stats[key]
+    r['total_trades'] += 1
+    r['total_pnl'] = round(r['total_pnl'] + pnl, 6)
+    r['total_volume'] = round(r['total_volume'] + abs(size * exit_price), 2)
+    r['total_fees_est'] = round(r['total_fees_est'] + abs(size * exit_price * 0.005), 6)
+    from datetime import datetime
+    now = datetime.utcnow().isoformat() + 'Z'
+    if not r['first_trade']: r['first_trade'] = now
+    r['last_trade'] = now
+    if pnl >= 0:
+        r['winning_trades'] += 1
+        r['largest_win'] = round(max(r['largest_win'], pnl), 6)
+    else:
+        r['losing_trades'] += 1
+        r['largest_loss'] = round(min(r['largest_loss'], pnl), 6)
+    if exit_reason in ('STOP_LOSS', 'EVENT_STOP', 'TRAILING_STOP'):
+        r['stopped_out'] += 1
+    r['win_rate'] = round((r['winning_trades'] / r['total_trades']) * 100, 1) if r['total_trades'] > 0 else 0
+    save_permanent_stats(stats)
