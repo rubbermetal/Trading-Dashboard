@@ -168,6 +168,7 @@ def get_bots():
                 'next_tier': next_tier,
                 'highest_tier_sold': highest_sold,
                 'pending_buy': bool(bot.get('pending_buy_oid')),
+                'buy_pct': bot.get('buy_pct', 2.0),
                 'pending_sells': len(bot.get('pending_sells', [])),
                 'paused': bot.get('dca_state') == 'PAUSED',
             }
@@ -397,3 +398,21 @@ def reset_pair_stats(key):
         save_permanent_stats(stats)
         return jsonify(success=True, message=f"Reset stats for {key}")
     return jsonify(success=False, error=f"No stats found for {key}")
+
+
+@bot_manager_bp.route('/api/bots/buy_pct/<bot_id>', methods=['POST'])
+def set_buy_pct(bot_id):
+    """Change the DCA buy percentage on the fly."""
+    if bot_id not in ACTIVE_BOTS:
+        return jsonify(error="Bot not found")
+    bot = ACTIVE_BOTS[bot_id]
+    if bot.get('strategy') != 'DCA':
+        return jsonify(error="Only DCA bots support buy_pct")
+    data = request.get_json()
+    pct = float(data.get('buy_pct', 2.0))
+    if pct < 0.1 or pct > 50:
+        return jsonify(error="buy_pct must be between 0.1 and 50")
+    bot['buy_pct'] = round(pct, 1)
+    from bot_utils import save_bots
+    save_bots()
+    return jsonify(success=True, message=f"Buy % set to {bot['buy_pct']}%")

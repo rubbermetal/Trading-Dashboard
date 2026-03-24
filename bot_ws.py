@@ -9,7 +9,8 @@ from coinbase.websocket import WSClient
 from shared import ACTIVE_BOTS, client
 from bot_utils import (
     is_derivative, get_contract_multiplier, 
-    record_trade, save_bots, snap_to_increment
+    record_trade, save_bots, snap_to_increment,
+    extract_fee, poll_market_fill
 )
 
 from grid_engine import (
@@ -92,9 +93,13 @@ def process_price_tick(pair, cur_px):
                 str_qty = snap_to_increment(qty, base_inc)
                 client.market_order_sell(client_order_id=oid, product_id=pair, base_size=str_qty)
 
-                record_trade(bot, t['fill_price'], cur_px, qty, 'LONG', 'TRAILING_STOP', pair, mult)
+                fill_px, fill_sz, fill_fee = poll_market_fill(oid, pair, retries=2, delay=0.5)
+                actual_exit = fill_px if fill_px else cur_px
+                actual_fee = fill_fee if fill_fee is not None else (actual_exit * qty * mult * 0.0025)
+
+                record_trade(bot, t['fill_price'], actual_exit, qty, 'LONG', 'TRAILING_STOP', pair, mult, actual_fee=actual_fee)
                 bot['asset_held'] -= qty
-                bot['current_usd'] += qty * cur_px * 0.995
+                bot['current_usd'] += (qty * actual_exit * mult) - actual_fee
 
                 for g in list(active_grids):
                     if ((t.get('sell_oid') and g.get('oid') == t['sell_oid']) or
@@ -142,10 +147,14 @@ def process_price_tick(pair, cur_px):
                 str_qty = snap_to_increment(held, bot.get('settings', {}).get('base_inc', '0.00000001'))
                 client.market_order_sell(client_order_id=oid, product_id=pair, base_size=str_qty)
 
-                record_trade(bot, bot['entry_price'], cur_px, held, 'LONG', exit_reason, pair, mult)
+                fill_px, fill_sz, fill_fee = poll_market_fill(oid, pair, retries=2, delay=0.5)
+                actual_exit = fill_px if fill_px else cur_px
+                actual_fee = fill_fee if fill_fee is not None else (actual_exit * held * mult * 0.0025)
 
-                profit = (cur_px - bot['entry_price']) * held * mult
-                bot['current_usd'] = bot['allocated_usd'] + (profit * 0.995)
+                record_trade(bot, bot['entry_price'], actual_exit, held, 'LONG', exit_reason, pair, mult, actual_fee=actual_fee)
+
+                profit = (actual_exit - bot['entry_price']) * held * mult
+                bot['current_usd'] = bot['allocated_usd'] + profit - actual_fee
                 bot['asset_held'] = 0.0
                 bot['position_side'] = 'FLAT'
                 for key in ['entry_atr', 'high_water_mark', 'stop_phase', 'fee_estimate',
@@ -173,18 +182,25 @@ def process_price_tick(pair, cur_px):
                 qi = str(getattr(p_info, 'quote_increment', '0.01'))
                 bi = str(getattr(p_info, 'base_increment', '0.00000001'))
                 from bot_utils import snap_to_increment
+                exit_oid = str(uuid.uuid4())
                 if side == 'LONG':
                     sp = snap_to_increment(cur_px - float(qi), qi)
                     sq = snap_to_increment(held, bi)
-                    client.limit_order_gtc_sell(client_order_id=str(uuid.uuid4()), product_id=pair, base_size=sq, limit_price=sp, post_only=True)
+                    client.limit_order_gtc_sell(client_order_id=exit_oid, product_id=pair, base_size=sq, limit_price=sp, post_only=True)
                 else:
                     sp = snap_to_increment(cur_px + float(qi), qi)
                     sq = snap_to_increment(held, bi)
-                    client.limit_order_gtc_buy(client_order_id=str(uuid.uuid4()), product_id=pair, base_size=sq, limit_price=sp, post_only=True)
-                pnl = (cur_px - entry_px) * held * mult if side == 'LONG' else (entry_px - cur_px) * held * mult
-                record_trade(bot, entry_px, cur_px, held, side, exit_reason, pair, mult)
+                    client.limit_order_gtc_buy(client_order_id=exit_oid, product_id=pair, base_size=sq, limit_price=sp, post_only=True)
+
+                fill_px, fill_sz, fill_fee = poll_market_fill(exit_oid, pair, retries=2, delay=0.5)
+                actual_exit = fill_px if fill_px else cur_px
+                actual_fee = fill_fee if fill_fee is not None else (actual_exit * held * mult * 0.0025)
+
+                pnl = (actual_exit - entry_px) * held * mult if side == 'LONG' else (entry_px - actual_exit) * held * mult
+                record_trade(bot, entry_px, actual_exit, held, side, exit_reason, pair, mult, actual_fee=actual_fee)
                 if pnl < 0: bot['daily_loss'] = bot.get('daily_loss', 0) + abs(pnl)
-                bot['current_usd'] += held * cur_px * mult * 0.9975
+                gross_proceeds = held * actual_exit * mult
+                bot['current_usd'] += gross_proceeds - actual_fee
                 bot['asset_held'] = 0.0; bot['position_side'] = 'FLAT'; bot['npr_state'] = 'SCANNING'
                 for k in ['event_stop','event_type','event_direction','event_bar_data','high_water_mark','low_water_mark','trail_distance','partial_filled','atr_at_entry']:
                     bot.pop(k, None)

@@ -5,7 +5,8 @@ from shared import client
 from strategies import calculate_quad_rotation, calculate_quad_super, calculate_orb, calculate_trap, calculate_momentum, calculate_dca, calculate_npr, NPR_CONFIG, _compute_zone
 from bot_utils import (
     get_bot_tf, is_derivative, get_contract_multiplier, 
-    snap_to_increment, record_trade, save_bots
+    snap_to_increment, record_trade, save_bots,
+    extract_fee, poll_market_fill
 )
 
 # ==========================================
@@ -129,10 +130,15 @@ def execute_orb(bot_id, bot, pair):
             oid = str(uuid.uuid4())
             client.market_order_sell(client_order_id=oid, product_id=pair, base_size=str(abs(bot['asset_held'])))
             
-            record_trade(bot, bot['entry_price'], current_px, abs(bot['asset_held']), 'LONG', exit_reason, pair, mult)
+            fill_px, fill_sz, fill_fee = poll_market_fill(oid, pair)
+            actual_exit = fill_px if fill_px else current_px
+            held = abs(bot['asset_held'])
+            actual_fee = fill_fee if fill_fee is not None else (actual_exit * held * mult * 0.0025)
+
+            record_trade(bot, bot['entry_price'], actual_exit, held, 'LONG', exit_reason, pair, mult, actual_fee=actual_fee)
             
-            profit = (current_px - bot['entry_price']) * abs(bot['asset_held']) * mult
-            bot['current_usd'] = bot['allocated_usd'] + (profit * 0.995)
+            profit = (actual_exit - bot['entry_price']) * held * mult
+            bot['current_usd'] = bot['allocated_usd'] + profit - actual_fee
             
             bot['asset_held'] = 0.0
             bot['position_side'] = 'FLAT'
@@ -148,10 +154,15 @@ def execute_orb(bot_id, bot, pair):
             oid = str(uuid.uuid4())
             client.market_order_buy(client_order_id=oid, product_id=pair, base_size=str(abs(bot['asset_held'])))
             
-            record_trade(bot, bot['entry_price'], current_px, abs(bot['asset_held']), 'SHORT', exit_reason, pair, mult)
+            fill_px, fill_sz, fill_fee = poll_market_fill(oid, pair)
+            actual_exit = fill_px if fill_px else current_px
+            held = abs(bot['asset_held'])
+            actual_fee = fill_fee if fill_fee is not None else (actual_exit * held * mult * 0.0025)
+
+            record_trade(bot, bot['entry_price'], actual_exit, held, 'SHORT', exit_reason, pair, mult, actual_fee=actual_fee)
             
-            profit = (bot['entry_price'] - current_px) * abs(bot['asset_held']) * mult
-            bot['current_usd'] = bot['allocated_usd'] + (profit * 0.995)
+            profit = (bot['entry_price'] - actual_exit) * held * mult
+            bot['current_usd'] = bot['allocated_usd'] + profit - actual_fee
             
             bot['asset_held'] = 0.0
             bot['position_side'] = 'FLAT'
@@ -203,12 +214,18 @@ def execute_quad(bot_id, bot, pair, mode='STANDARD'):
     elif signal == 'SELL' and bot['asset_held'] > 0:
         try:
             oid = str(uuid.uuid4())
-            client.market_order_sell(client_order_id=oid, product_id=pair, base_size=str(bot['asset_held']))
+            held = bot['asset_held']
+            client.market_order_sell(client_order_id=oid, product_id=pair, base_size=str(held))
             
+            fill_px, fill_sz, fill_fee = poll_market_fill(oid, pair)
+            actual_exit = fill_px if fill_px else current_px
+            actual_fee = fill_fee if fill_fee is not None else (actual_exit * held * mult * 0.0025)
+
             entry_px = bot.get('entry_price', current_px)
-            record_trade(bot, entry_px, current_px, bot['asset_held'], 'LONG', 'SIGNAL', pair, mult)
+            record_trade(bot, entry_px, actual_exit, held, 'LONG', 'SIGNAL', pair, mult, actual_fee=actual_fee)
             
-            bot['current_usd'] += (bot['asset_held'] * current_px * mult) * 0.995 
+            profit = (actual_exit - entry_px) * held * mult
+            bot['current_usd'] += profit - actual_fee + (entry_px * held * mult)
             bot['asset_held'] = 0.0
             bot['position_side'] = 'FLAT'
             save_bots()
@@ -364,12 +381,17 @@ def execute_trap(bot_id, bot, pair):
         exit_reason = 'STOP_LOSS' if 'STOP' in reason.upper() else 'SIGNAL'
         try:
             oid = str(uuid.uuid4())
-            client.market_order_sell(client_order_id=oid, product_id=pair, base_size=str(abs(bot['asset_held'])))
+            held = abs(bot['asset_held'])
+            client.market_order_sell(client_order_id=oid, product_id=pair, base_size=str(held))
 
-            record_trade(bot, bot['avg_entry'], current_px, abs(bot['asset_held']), 'LONG', exit_reason, pair, mult)
+            fill_px, fill_sz, fill_fee = poll_market_fill(oid, pair)
+            actual_exit = fill_px if fill_px else current_px
+            actual_fee = fill_fee if fill_fee is not None else (actual_exit * held * mult * 0.0025)
 
-            profit = (current_px - bot['avg_entry']) * abs(bot['asset_held']) * mult
-            bot['current_usd'] = bot['allocated_usd'] + (profit * 0.995)
+            record_trade(bot, bot['avg_entry'], actual_exit, held, 'LONG', exit_reason, pair, mult, actual_fee=actual_fee)
+
+            profit = (actual_exit - bot['avg_entry']) * held * mult
+            bot['current_usd'] = bot['allocated_usd'] + profit - actual_fee
             bot['asset_held'] = 0.0
             bot['position_side'] = 'FLAT'
             bot['entry_stage'] = 0
@@ -384,12 +406,17 @@ def execute_trap(bot_id, bot, pair):
         exit_reason = 'STOP_LOSS' if 'STOP' in reason.upper() else 'SIGNAL'
         try:
             oid = str(uuid.uuid4())
-            client.market_order_buy(client_order_id=oid, product_id=pair, base_size=str(abs(bot['asset_held'])))
+            held = abs(bot['asset_held'])
+            client.market_order_buy(client_order_id=oid, product_id=pair, base_size=str(held))
 
-            record_trade(bot, bot['avg_entry'], current_px, abs(bot['asset_held']), 'SHORT', exit_reason, pair, mult)
+            fill_px, fill_sz, fill_fee = poll_market_fill(oid, pair)
+            actual_exit = fill_px if fill_px else current_px
+            actual_fee = fill_fee if fill_fee is not None else (actual_exit * held * mult * 0.0025)
 
-            profit = (bot['avg_entry'] - current_px) * abs(bot['asset_held']) * mult
-            bot['current_usd'] = bot['allocated_usd'] + (profit * 0.995)
+            record_trade(bot, bot['avg_entry'], actual_exit, held, 'SHORT', exit_reason, pair, mult, actual_fee=actual_fee)
+
+            profit = (bot['avg_entry'] - actual_exit) * held * mult
+            bot['current_usd'] = bot['allocated_usd'] + profit - actual_fee
             bot['asset_held'] = 0.0
             bot['position_side'] = 'FLAT'
             bot['entry_stage'] = 0
@@ -504,10 +531,14 @@ def execute_momentum(bot_id, bot, pair):
                 str_qty = snap_to_increment(held, base_inc)
                 client.market_order_sell(client_order_id=oid, product_id=pair, base_size=str_qty)
 
-                record_trade(bot, bot['entry_price'], cur_px, held, 'LONG', exit_reason, pair, mult)
+                fill_px, fill_sz, fill_fee = poll_market_fill(oid, pair)
+                actual_exit = fill_px if fill_px else cur_px
+                actual_fee = fill_fee if fill_fee is not None else (actual_exit * held * mult * 0.0025)
 
-                profit = (cur_px - bot['entry_price']) * held * mult
-                bot['current_usd'] = bot['allocated_usd'] + (profit * 0.995)
+                record_trade(bot, bot['entry_price'], actual_exit, held, 'LONG', exit_reason, pair, mult, actual_fee=actual_fee)
+
+                profit = (actual_exit - bot['entry_price']) * held * mult
+                bot['current_usd'] = bot['allocated_usd'] + profit - actual_fee
                 bot['asset_held'] = 0.0
                 bot['position_side'] = 'FLAT'
                 # Clear momentum state
@@ -537,11 +568,13 @@ def execute_momentum(bot_id, bot, pair):
                 "order_status": "FILLED", "product_id": pair, "limit": 10
             })
             filled = False
+            mom_order_obj = None
             for o in order_data.get('orders', []):
                 if o.get('client_order_id') == pending_oid:
                     filled = True
                     filled_size = float(o.get('filled_size', 0))
                     avg_fill_px = float(o.get('average_filled_price', cur_px))
+                    mom_order_obj = o
                     break
         except Exception as e:
             print(f"[MOMENTUM | {pair}] Fill check error: {e}")
@@ -553,16 +586,19 @@ def execute_momentum(bot_id, bot, pair):
             atr_series = pta.atr(df['high'], df['low'], df['close'], 14)
             entry_atr = float(atr_series.iloc[-1]) if atr_series is not None and not atr_series.empty else cur_px * 0.01
 
-            fee_est = avg_fill_px * filled_size * mult * 0.005
+            real_fee = extract_fee(mom_order_obj)
+            gross_cost = avg_fill_px * filled_size * mult
+            if real_fee is None:
+                real_fee = gross_cost * 0.0025
 
             bot['asset_held'] = filled_size
-            bot['current_usd'] -= avg_fill_px * filled_size * mult
+            bot['current_usd'] -= (gross_cost + real_fee)
             bot['position_side'] = 'LONG'
             bot['entry_price'] = avg_fill_px
             bot['entry_atr'] = entry_atr
             bot['high_water_mark'] = avg_fill_px
             bot['stop_phase'] = 1
-            bot['fee_estimate'] = fee_est
+            bot['fee_estimate'] = real_fee
             bot.pop('pending_order_oid', None)
             bot.pop('pending_order_time', None)
             bot.pop('signal_retries', None)
@@ -732,6 +768,9 @@ def _dca_check_sell_fills(bot, pair):
     if not pending:
         return
 
+    # Track processed OIDs to prevent re-processing the same fill
+    processed = set(bot.get('_processed_sell_oids', []))
+
     mult = get_contract_multiplier(pair)
     try:
         order_data = client.get("/api/v3/brokerage/orders/historical/batch", params={
@@ -742,30 +781,72 @@ def _dca_check_sell_fills(bot, pair):
         print(f"[DCA | {pair}] Sell fill check error: {e}")
         return
 
+    new_pending = []
     changes = False
-    for sell in list(pending):
-        match = filled_orders.get(sell.get('oid'))
+    for sell in pending:
+        oid = sell.get('oid', '')
+        if oid in processed:
+            # Already processed this fill, skip entirely
+            continue
+        match = filled_orders.get(oid)
         if match:
             filled_size = float(match.get('filled_size', 0))
             avg_px = float(match.get('average_filled_price', sell.get('price', 0)))
             if filled_size > 0:
+                # Mark as processed FIRST, before anything else
+                processed.add(oid)
+                bot['_processed_sell_oids'] = list(processed)[-50:]  # keep last 50
+
                 bot['asset_held'] = max(0, bot.get('asset_held', 0) - filled_size)
-                bot['current_usd'] += filled_size * avg_px * mult * 0.9975  # maker fee
-                record_trade(bot, bot.get('avg_entry', avg_px), avg_px, filled_size, 'LONG', 'DCA_TIER', pair, mult)
+                # Reduce total_cost proportionally to the fraction sold
+                old_held = bot.get('asset_held', 0) + filled_size  # what held WAS before the line above
+                if old_held > 0:
+                    sold_fraction = filled_size / old_held
+                    bot['total_cost'] = max(0, bot.get('total_cost', 0) * (1 - sold_fraction))
+                real_fee = extract_fee(match)
+                gross_proceeds = filled_size * avg_px * mult
+                if real_fee is not None:
+                    bot['current_usd'] += gross_proceeds - real_fee
+                else:
+                    real_fee = gross_proceeds * 0.0025  # fallback
+                    bot['current_usd'] += gross_proceeds - real_fee
                 tier_pct = sell.get('tier', 0)
                 bot['highest_tier_sold'] = max(bot.get('highest_tier_sold', 0), tier_pct)
-                pending.remove(sell)
                 changes = True
-                print(f"[DCA | {pair}] Tier {tier_pct}% sell FILLED: {filled_size:.8f} at ${avg_px:.2f}")
+                print(f"[DCA | {pair}] Tier {tier_pct}% sell FILLED: {filled_size:.8f} at ${avg_px:.2f} (fee=${real_fee:.4f})")
+
+                # Record trade AFTER state is fully updated and sell is NOT in new_pending
+                try:
+                    record_trade(bot, bot.get('avg_entry', avg_px), avg_px, filled_size, 'LONG', 'DCA_TIER', pair, mult, actual_fee=real_fee)
+                except Exception as e:
+                    print(f"[DCA | {pair}] record_trade error: {e}")
+                continue  # Don't add to new_pending
+        new_pending.append(sell)
 
     if changes:
-        bot['pending_sells'] = pending
-        # Check if position fully closed
-        if bot.get('asset_held', 0) * bot.get('avg_entry', 1) < 0.50:  # less than $0.50 remaining
-            print(f"[DCA | {pair}] Position fully scaled out. Resetting to SCANNING.")
-            bot['position_side'] = 'FLAT'
-            bot['avg_entry'] = 0
-            bot['total_cost'] = 0
+        bot['pending_sells'] = new_pending
+        held_remaining = bot.get('asset_held', 0)
+        min_tradeable = float(bot.get('base_min_size', 0))
+
+        # Cycle is done when remaining position is below minimum tradeable size
+        # (all meaningful tiers have been sold, only untradeable dust or nothing left)
+        cycle_done = (held_remaining < min_tradeable) and len(new_pending) == 0
+
+        if cycle_done:
+            if held_remaining > 0:
+                # Dust remains — normalize total_cost to just the dust's actual value
+                # so it doesn't inflate avg_entry on the next buy cycle
+                dust_cost = held_remaining * bot.get('avg_entry', 0)
+                bot['total_cost'] = dust_cost
+                print(f"[DCA | {pair}] Tiers scaled out. {held_remaining:.8f} remains at avg ${bot.get('avg_entry',0):.2f}. Cycling to SCANNING.")
+                bot['position_side'] = 'LONG'
+            else:
+                # Truly empty (asset_held == 0 exactly)
+                print(f"[DCA | {pair}] Position fully closed. Resetting to SCANNING.")
+                bot['position_side'] = 'FLAT'
+                bot['avg_entry'] = 0
+                bot['total_cost'] = 0
+            # Trading cycle state resets independently of position
             bot['total_buys'] = 0
             bot['buy_count_this_cycle'] = 0
             bot['highest_tier_sold'] = 0
@@ -775,20 +856,26 @@ def _dca_check_sell_fills(bot, pair):
         save_bots()
 
 def _dca_manage_stale_sells(bot, pair, cur_px):
-    """Cancel pending sells where profit has retreated below half the tier threshold."""
+    """Cancel pending sells only when profit drops to zero or below (underwater).
+    Leaves sells on the book as long as position is still profitable.
+    Also requires a minimum 10-minute pending time to avoid churn."""
     pending = bot.get('pending_sells', [])
     avg_entry = bot.get('avg_entry', 0)
     if not pending or avg_entry <= 0:
         return
 
-    mult = get_contract_multiplier(pair)
     profit_pct = ((cur_px - avg_entry) / avg_entry) * 100
+    now = time.time()
+    changed = False
 
     for sell in list(pending):
         tier_pct = sell.get('tier', 0)
-        cancel_threshold = tier_pct / 2.0  # cancel if profit below half the tier
+        placed_at = sell.get('placed_at', 0)
+        pending_secs = now - placed_at if placed_at > 0 else 9999
 
-        if profit_pct < cancel_threshold:
+        # Only cancel if profit has gone to zero or below AND sell has been
+        # pending for at least 10 minutes (avoid thrashing on fresh placements)
+        if profit_pct <= 0 and pending_secs >= 600:
             sell_oid = sell.get('oid', '')
             try:
                 open_res = client.get("/api/v3/brokerage/orders/historical/batch", params={
@@ -803,10 +890,12 @@ def _dca_manage_stale_sells(bot, pair, cur_px):
             except Exception as e:
                 print(f"[DCA | {pair}] Stale sell cancel error: {e}")
             pending.remove(sell)
-            print(f"[DCA | {pair}] Cancelled stale {tier_pct}% sell (profit now {profit_pct:.2f}% < {cancel_threshold:.2f}%)")
+            changed = True
+            print(f"[DCA | {pair}] Cancelled stale {tier_pct}% sell (profit now {profit_pct:.2f}%, underwater)")
 
-    bot['pending_sells'] = pending
-    save_bots()
+    if changed:
+        bot['pending_sells'] = pending
+        save_bots()
 
 def execute_dca(bot_id, bot, pair):
     """
@@ -856,7 +945,7 @@ def execute_dca(bot_id, bot, pair):
     # ==========================================
     # STEP 1: PAUSE CHECK (15% drawdown)
     # ==========================================
-    if held > 0 and avg_entry > 0:
+    if held >= base_min and avg_entry > 0:
         drawdown_pct = ((avg_entry - cur_px) / avg_entry) * 100
         if dca_state != 'PAUSED' and drawdown_pct >= 15:
             bot['dca_state'] = 'PAUSED'
@@ -884,11 +973,13 @@ def execute_dca(bot_id, bot, pair):
                 "order_status": "FILLED", "product_id": pair, "limit": 10
             })
             filled = False
+            buy_order_obj = None
             for o in order_data.get('orders', []):
                 if o.get('client_order_id') == pending_buy:
                     filled = True
                     filled_size = float(o.get('filled_size', 0))
                     avg_fill_px = float(o.get('average_filled_price', cur_px))
+                    buy_order_obj = o
                     break
         except Exception as e:
             print(f"[DCA | {pair}] Buy fill check error: {e}")
@@ -902,11 +993,15 @@ def execute_dca(bot_id, bot, pair):
             total_held = old_held + filled_size
             new_avg = (old_cost + new_cost) / (total_held * mult) if total_held > 0 else avg_fill_px
 
+            buy_fee = extract_fee(buy_order_obj) if buy_order_obj else None
+            if buy_fee is None:
+                buy_fee = new_cost * 0.0025  # fallback
+
             bot['asset_held'] = total_held
             bot['total_cost'] = old_cost + new_cost
             bot['avg_entry'] = new_avg
             bot['entry_price'] = new_avg
-            bot['current_usd'] -= new_cost
+            bot['current_usd'] -= (new_cost + buy_fee)
             bot['position_side'] = 'LONG'
             bot['total_buys'] = bot.get('total_buys', 0) + 1
             bot['buy_count_this_cycle'] = bot.get('buy_count_this_cycle', 0) + 1
@@ -991,11 +1086,16 @@ def execute_dca(bot_id, bot, pair):
     # ==========================================
     held = bot.get('asset_held', 0)
     avg_entry = bot.get('avg_entry', 0)
-    if held > 0 and avg_entry > 0:
+    min_tradeable = float(bot.get('base_min_size', 0))
+    if held >= min_tradeable and avg_entry > 0:
         profit_pct = ((cur_px - avg_entry) / avg_entry) * 100
         highest_sold = bot.get('highest_tier_sold', 0)
         pending_sells = bot.get('pending_sells', [])
         pending_tiers = {s.get('tier') for s in pending_sells}
+
+        # Deduct qty already committed to pending sells so tiers don't overcommit
+        committed_qty = sum(s.get('qty', 0) for s in pending_sells)
+        available_held = max(0, held - committed_qty)
 
         for tier_pct, sell_frac in DCA_PROFIT_TIERS:
             if tier_pct <= highest_sold:
@@ -1003,9 +1103,11 @@ def execute_dca(bot_id, bot, pair):
             if tier_pct in pending_tiers:
                 continue  # already have a pending sell at this tier
 
-            if profit_pct >= tier_pct:
-                sell_qty = held * sell_frac
+            if profit_pct >= tier_pct and available_held > 0:
+                sell_qty = available_held * sell_frac
                 sell_px = avg_entry * (1 + tier_pct / 100.0)
+                if sell_px <= cur_px:
+                    sell_px = cur_px + float(quote_inc)  # price already past tier, sell at market edge
                 str_price = snap_to_increment(sell_px, quote_inc)
                 str_qty = snap_to_increment(sell_qty, base_inc)
 
@@ -1025,7 +1127,9 @@ def execute_dca(bot_id, bot, pair):
                             'oid': oid,
                             'price': float(str_price),
                             'qty': float(str_qty),
+                            'placed_at': time.time(),
                         })
+                        available_held -= float(str_qty)  # deduct for next tier in this loop
                         bot['pending_sells'] = pending_sells
                         save_bots()
                         print(f"[DCA | {pair}] Placed {tier_pct}% tier sell: {str_qty} at ${str_price}")
@@ -1063,7 +1167,12 @@ def execute_dca(bot_id, bot, pair):
                 return
 
             depth_mult = data.get('depth_multiplier', 1.0)
-            buy_qty = base_min * depth_mult
+            buy_pct = bot.get('buy_pct', 2.0)
+            buy_usd = bot['current_usd'] * (buy_pct / 100.0) * depth_mult
+            min_qty = max(base_min, 0.25 / cur_px) if cur_px > 0 else base_min
+            buy_qty = buy_usd / (cur_px * mult) if cur_px > 0 else min_qty
+            if buy_qty < min_qty:
+                buy_qty = min_qty
             if deriv_flag:
                 buy_qty = max(1, int(buy_qty))
 
@@ -1213,23 +1322,30 @@ def execute_npr(bot_id, bot, pair):
         should_exit, exit_reason = npr_get_stop_and_trail(bot, cur_px)
         if should_exit:
             try:
+                held = bot['asset_held']
                 if side == 'LONG':
                     str_price = snap_to_increment(cur_px - float(quote_inc), quote_inc)
-                    str_qty = snap_to_increment(bot['asset_held'], base_inc)
+                    str_qty = snap_to_increment(held, base_inc)
                     oid = str(uuid.uuid4())
                     client.limit_order_gtc_sell(client_order_id=oid, product_id=pair,
                                                 base_size=str_qty, limit_price=str_price, post_only=True)
                 else:
                     str_price = snap_to_increment(cur_px + float(quote_inc), quote_inc)
-                    str_qty = snap_to_increment(bot['asset_held'], base_inc)
+                    str_qty = snap_to_increment(held, base_inc)
                     oid = str(uuid.uuid4())
                     client.limit_order_gtc_buy(client_order_id=oid, product_id=pair,
                                                base_size=str_qty, limit_price=str_price, post_only=True)
-                pnl = (cur_px - entry_px) * bot['asset_held'] * mult if side == 'LONG' else (entry_px - cur_px) * bot['asset_held'] * mult
-                record_trade(bot, entry_px, cur_px, bot['asset_held'], side, exit_reason, pair, mult)
+
+                fill_px, fill_sz, fill_fee = poll_market_fill(oid, pair)
+                actual_exit = fill_px if fill_px else cur_px
+                actual_fee = fill_fee if fill_fee is not None else (actual_exit * held * mult * 0.0025)
+
+                pnl = (actual_exit - entry_px) * held * mult if side == 'LONG' else (entry_px - actual_exit) * held * mult
+                record_trade(bot, entry_px, actual_exit, held, side, exit_reason, pair, mult, actual_fee=actual_fee)
                 if pnl < 0:
                     bot['daily_loss'] = bot.get('daily_loss', 0) + abs(pnl)
-                bot['current_usd'] += bot['asset_held'] * cur_px * mult * 0.9975
+                gross_proceeds = held * actual_exit * mult
+                bot['current_usd'] += gross_proceeds - actual_fee
                 bot['asset_held'] = 0.0
                 bot['position_side'] = 'FLAT'
                 bot['npr_state'] = 'SCANNING'

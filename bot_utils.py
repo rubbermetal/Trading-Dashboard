@@ -85,9 +85,10 @@ def save_bots():
         with open(BOTS_FILE, 'w') as f:
             json.dump(ACTIVE_BOTS, f)
 
-def record_trade(bot, entry_px, exit_px, size, side, exit_reason, pair, multiplier=1.0):
+def record_trade(bot, entry_px, exit_px, size, side, exit_reason, pair, multiplier=1.0, actual_fee=None):
     """
     Records a completed trade into the bot's stats and trade_log.
+    If actual_fee is provided (from Coinbase fill data), uses that instead of estimating.
     """
     stats = ensure_stats(bot)
     
@@ -96,13 +97,16 @@ def record_trade(bot, entry_px, exit_px, size, side, exit_reason, pair, multipli
     else:
         raw_pnl = (entry_px - exit_px) * abs(size) * multiplier
     
-    # Rough fee estimate (0.5% round-trip for taker, lower for maker)
-    fee_est = abs(size) * multiplier * exit_px * 0.005
-    net_pnl = raw_pnl - fee_est
+    # Use actual fee from Coinbase if available, otherwise estimate
+    if actual_fee is not None:
+        fee = actual_fee
+    else:
+        fee = abs(size) * multiplier * exit_px * 0.0025  # fallback: maker fee estimate
+    net_pnl = raw_pnl - fee
 
     stats['total_trades'] += 1
     stats['total_pnl'] += net_pnl
-    stats['total_fees_est'] += fee_est
+    stats['total_fees_est'] += fee
 
     if net_pnl >= 0:
         stats['winning_trades'] += 1
@@ -123,12 +127,15 @@ def record_trade(bot, entry_px, exit_px, size, side, exit_reason, pair, multipli
         'exit_price': round(exit_px, 6),
         'size': round(abs(size), 8),
         'pnl': round(net_pnl, 4),
-        'fee_est': round(fee_est, 4),
+        'fee_est': round(fee, 4),
         'exit_reason': exit_reason,
         'timestamp': datetime.now(timezone.utc).isoformat()
     })
     strategy = bot.get("strategy", "UNKNOWN")
-    update_permanent_stats(strategy, pair, entry_price, exit_price, size, side, exit_reason, round(net_pnl, 4))
+    try:
+        update_permanent_stats(strategy, pair, entry_px, exit_px, size, side, exit_reason, round(net_pnl, 4), actual_fee=fee)
+    except Exception as e:
+        print(f"[record_trade] update_permanent_stats failed: {e}")
     save_bots()
 
 _stats_lock = threading.Lock()
@@ -145,7 +152,7 @@ def save_permanent_stats(stats):
         with open('stats.json', 'w') as f:
             json.dump(stats, f, indent=2)
 
-def update_permanent_stats(strategy, pair, entry_price, exit_price, size, side, exit_reason, pnl):
+def update_permanent_stats(strategy, pair, entry_px, exit_px, size, side, exit_reason, pnl, actual_fee=None):
     key = f"{strategy}:{pair}"
     stats = load_permanent_stats()
     if key not in stats:
@@ -156,10 +163,10 @@ def update_permanent_stats(strategy, pair, entry_price, exit_price, size, side, 
     r = stats[key]
     r['total_trades'] += 1
     r['total_pnl'] = round(r['total_pnl'] + pnl, 6)
-    r['total_volume'] = round(r['total_volume'] + abs(size * exit_price), 2)
-    r['total_fees_est'] = round(r['total_fees_est'] + abs(size * exit_price * 0.005), 6)
-    from datetime import datetime
-    now = datetime.utcnow().isoformat() + 'Z'
+    r['total_volume'] = round(r['total_volume'] + abs(size * exit_px), 2)
+    fee = actual_fee if actual_fee is not None else abs(size * exit_px * 0.0025)
+    r['total_fees_est'] = round(r['total_fees_est'] + fee, 6)
+    now = datetime.now(timezone.utc).isoformat()
     if not r['first_trade']: r['first_trade'] = now
     r['last_trade'] = now
     if pnl >= 0:
@@ -172,3 +179,38 @@ def update_permanent_stats(strategy, pair, entry_price, exit_price, size, side, 
         r['stopped_out'] += 1
     r['win_rate'] = round((r['winning_trades'] / r['total_trades']) * 100, 1) if r['total_trades'] > 0 else 0
     save_permanent_stats(stats)
+
+# ==========================================
+# FEE HELPERS
+# ==========================================
+def extract_fee(order_obj):
+    """Extract total_fees from a Coinbase order dict. Returns float or None."""
+    try:
+        fee = order_obj.get('total_fees')
+        if fee is not None:
+            return float(fee)
+    except (TypeError, ValueError):
+        pass
+    return None
+
+def poll_market_fill(client_oid, pair, retries=3, delay=1.0):
+    """Poll for a market order fill to get actual fill price and fees.
+    Returns (avg_fill_px, filled_size, total_fee) or (None, None, None)."""
+    from shared import client as _client
+    import time as _time
+    for _ in range(retries):
+        _time.sleep(delay)
+        try:
+            order_data = _client.get("/api/v3/brokerage/orders/historical/batch", params={
+                "order_status": "FILLED", "product_id": pair, "limit": 10
+            })
+            for o in order_data.get('orders', []):
+                if o.get('client_order_id') == client_oid:
+                    return (
+                        float(o.get('average_filled_price', 0)),
+                        float(o.get('filled_size', 0)),
+                        extract_fee(o)
+                    )
+        except Exception:
+            pass
+    return (None, None, None)

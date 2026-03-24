@@ -1701,6 +1701,16 @@
             } catch (e) { alert('Network error toggling follow: ' + e.message); }
         }
 
+        async function setDcaBuyPct(botId, value) {
+            try {
+                const res = await fetch(`/api/bots/buy_pct/${botId}`, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ buy_pct: parseFloat(value) })
+                });
+                const d = await res.json();
+                if (!d.success) alert(d.error || 'Failed to set buy %');
+            } catch (e) { alert('Network error setting buy %'); }
+        }
+
         async function deleteBot(botId) {
             if (!confirm("Are you sure you want to completely delete this bot? Any crypto it holds will remain in your main portfolio, but the bot's sandbox will be destroyed.")) return;
             const res = await fetch(`/api/bots/delete/${botId}`, { method: 'DELETE' });
@@ -1884,6 +1894,7 @@
                                         ${b.dca.next_tier ? `<span class="text-muted">Tier: <b class="text-warning-custom">${b.dca.next_tier}%</b></span>` : ''}
                                         ${b.dca.pending_sells > 0 ? `<span class="badge bg-info text-dark">${b.dca.pending_sells} sells</span>` : ''}
                                         ${b.dca.pending_buy ? '<span class="badge bg-primary">BUY PENDING</span>' : ''}
+                                        <span class="text-muted">Buy%: <input type="number" class="bg-dark text-white border-secondary rounded" style="width:45px;font-size:0.6rem;padding:1px 3px;border:1px solid #45a29e;" value="${b.dca.buy_pct || 2.0}" step="0.5" min="0.1" max="50" onchange="setDcaBuyPct('${id}', this.value)"></span>
                                     </div>
                                 </div>` : ''}
 
