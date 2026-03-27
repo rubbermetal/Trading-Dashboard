@@ -1082,7 +1082,7 @@ def execute_dca(bot_id, bot, pair):
     _dca_manage_stale_sells(bot, pair, cur_px)
 
     # ==========================================
-    # STEP 5: EVALUATE PROFIT TIERS
+    # STEP 4.5: TIER RESET AT -2.5% DRAWDOWN
     # ==========================================
     held = bot.get('asset_held', 0)
     avg_entry = bot.get('avg_entry', 0)
@@ -1090,54 +1090,78 @@ def execute_dca(bot_id, bot, pair):
     if held >= min_tradeable and avg_entry > 0:
         profit_pct = ((cur_px - avg_entry) / avg_entry) * 100
         highest_sold = bot.get('highest_tier_sold', 0)
-        pending_sells = bot.get('pending_sells', [])
-        pending_tiers = {s.get('tier') for s in pending_sells}
+        if profit_pct <= -2.5 and highest_sold > 0:
+            print(f"[DCA | {pair}] TIER RESET: profit {profit_pct:.2f}% hit -2.5% with tier {highest_sold}% sold. Resetting tiers.")
+            _dca_cancel_all_sells(bot, pair)
+            bot['highest_tier_sold'] = 0
+            bot['tier_reset_at'] = time.time()
+            save_bots()
 
-        # Deduct qty already committed to pending sells so tiers don't overcommit
-        committed_qty = sum(s.get('qty', 0) for s in pending_sells)
-        available_held = max(0, held - committed_qty)
+    # ==========================================
+    # STEP 5: EVALUATE PROFIT TIERS
+    # ==========================================
+    held = bot.get('asset_held', 0)
+    avg_entry = bot.get('avg_entry', 0)
+    min_tradeable = float(bot.get('base_min_size', 0))
+    if held >= min_tradeable and avg_entry > 0:
+        # Cooldown: don't place new tier sells within 10 min of a tier reset
+        tier_reset_at = bot.get('tier_reset_at', 0)
+        if tier_reset_at > 0 and (time.time() - tier_reset_at) < 600:
+            pass  # skip tier evaluation, still in cooldown
+        else:
+            if tier_reset_at > 0:
+                bot.pop('tier_reset_at', None)  # cooldown expired, clean up
 
-        for tier_pct, sell_frac in DCA_PROFIT_TIERS:
-            if tier_pct <= highest_sold:
-                continue  # already sold at this tier
-            if tier_pct in pending_tiers:
-                continue  # already have a pending sell at this tier
+            profit_pct = ((cur_px - avg_entry) / avg_entry) * 100
+            highest_sold = bot.get('highest_tier_sold', 0)
+            pending_sells = bot.get('pending_sells', [])
+            pending_tiers = {s.get('tier') for s in pending_sells}
 
-            if profit_pct >= tier_pct and available_held > 0:
-                sell_qty = available_held * sell_frac
-                sell_px = avg_entry * (1 + tier_pct / 100.0)
-                if sell_px <= cur_px:
-                    sell_px = cur_px + float(quote_inc)  # price already past tier, sell at market edge
-                str_price = snap_to_increment(sell_px, quote_inc)
-                str_qty = snap_to_increment(sell_qty, base_inc)
+            # Deduct qty already committed to pending sells so tiers don't overcommit
+            committed_qty = sum(s.get('qty', 0) for s in pending_sells)
+            available_held = max(0, held - committed_qty)
 
-                if float(str_qty) <= 0:
-                    continue
+            for tier_pct, sell_frac in DCA_PROFIT_TIERS:
+                if tier_pct <= highest_sold:
+                    continue  # already sold at this tier
+                if tier_pct in pending_tiers:
+                    continue  # already have a pending sell at this tier
 
-                try:
-                    oid = str(uuid.uuid4())
-                    api_res = client.limit_order_gtc_sell(
-                        client_order_id=oid, product_id=pair,
-                        base_size=str_qty, limit_price=str_price, post_only=True
-                    )
-                    success = getattr(api_res, 'success', False) or (isinstance(api_res, dict) and api_res.get('success', False))
-                    if success or (isinstance(api_res, dict) and api_res.get('failure_reason') == 'UNKNOWN_FAILURE_REASON') or getattr(api_res, 'failure_reason', '') == 'UNKNOWN_FAILURE_REASON':
-                        pending_sells.append({
-                            'tier': tier_pct,
-                            'oid': oid,
-                            'price': float(str_price),
-                            'qty': float(str_qty),
-                            'placed_at': time.time(),
-                        })
-                        available_held -= float(str_qty)  # deduct for next tier in this loop
-                        bot['pending_sells'] = pending_sells
-                        save_bots()
-                        print(f"[DCA | {pair}] Placed {tier_pct}% tier sell: {str_qty} at ${str_price}")
-                    else:
-                        fail = getattr(api_res, 'failure_reason', '') or (isinstance(api_res, dict) and api_res.get('failure_reason', ''))
-                        print(f"[DCA | {pair}] Tier sell rejected: {fail}")
-                except Exception as e:
-                    print(f"[DCA | {pair}] Tier sell error: {e}")
+                if profit_pct >= tier_pct and available_held > 0:
+                    sell_qty = available_held * sell_frac
+                    sell_px = avg_entry * (1 + tier_pct / 100.0)
+                    if sell_px <= cur_px:
+                        sell_px = cur_px + float(quote_inc)  # price already past tier, sell at market edge
+                    str_price = snap_to_increment(sell_px, quote_inc)
+                    str_qty = snap_to_increment(sell_qty, base_inc)
+
+                    if float(str_qty) <= 0:
+                        continue
+
+                    try:
+                        oid = str(uuid.uuid4())
+                        api_res = client.limit_order_gtc_sell(
+                            client_order_id=oid, product_id=pair,
+                            base_size=str_qty, limit_price=str_price, post_only=True
+                        )
+                        success = getattr(api_res, 'success', False) or (isinstance(api_res, dict) and api_res.get('success', False))
+                        if success or (isinstance(api_res, dict) and api_res.get('failure_reason') == 'UNKNOWN_FAILURE_REASON') or getattr(api_res, 'failure_reason', '') == 'UNKNOWN_FAILURE_REASON':
+                            pending_sells.append({
+                                'tier': tier_pct,
+                                'oid': oid,
+                                'price': float(str_price),
+                                'qty': float(str_qty),
+                                'placed_at': time.time(),
+                            })
+                            available_held -= float(str_qty)  # deduct for next tier in this loop
+                            bot['pending_sells'] = pending_sells
+                            save_bots()
+                            print(f"[DCA | {pair}] Placed {tier_pct}% tier sell: {str_qty} at ${str_price}")
+                        else:
+                            fail = getattr(api_res, 'failure_reason', '') or (isinstance(api_res, dict) and api_res.get('failure_reason', ''))
+                            print(f"[DCA | {pair}] Tier sell rejected: {fail}")
+                    except Exception as e:
+                        print(f"[DCA | {pair}] Tier sell error: {e}")
 
     # ==========================================
     # STEP 6: SIGNAL EVALUATION
