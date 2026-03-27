@@ -106,13 +106,15 @@ GRANULARITY_MAP = {
 @market_data_bp.route('/api/candles/<pair>/<granularity>')
 def get_candles(pair, granularity):
     """Returns OHLCV candles for Lightweight Charts. Max 300 per Coinbase limit."""
+    from flask import request
     g = GRANULARITY_MAP.get(granularity)
     if not g:
         return jsonify(error=f"Invalid granularity. Use: {', '.join(GRANULARITY_MAP.keys())}")
     
     try:
+        limit = min(int(request.args.get('limit', 300)), 300)
         end_ts = int(time.time())
-        start_ts = end_ts - (300 * g['seconds'])
+        start_ts = end_ts - (limit * g['seconds'])
         
         res = client.get(f"/api/v3/brokerage/products/{pair}/candles", params={
             "start": str(start_ts), "end": str(end_ts), "granularity": g['cb']

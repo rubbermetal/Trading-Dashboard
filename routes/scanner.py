@@ -11,9 +11,12 @@ scanner_bp = Blueprint('scanner', __name__)
 # COINBASE GRANULARITY MAPPING
 # ==========================================
 CB_GRAN = {
+    "5m":  ("FIVE_MINUTE",     300),
     "15m": ("FIFTEEN_MINUTE", 900),
     "30m": ("THIRTY_MINUTE",  1800),
     "1h":  ("ONE_HOUR",       3600),
+    "6h":  ("SIX_HOURS",      21600),
+    "1d":  ("ONE_DAY",        86400),
 }
 
 # ==========================================
@@ -338,30 +341,45 @@ def compute_confluence(rows):
 @scanner_bp.route('/api/scanner/<pair>')
 def get_scanner(pair):
     """
-    On-demand scanner: 4 API calls to Coinbase (15m, 30m, 1h for 4h aggregation).
-    No polling. Called only when user clicks the SCANNER button.
+    On-demand scanner: fetches 15m/30m/1h/4h for the dashboard rows,
+    plus the user's selected TF for chart candles and overlays.
     """
+    from flask import request
+    base_tf = request.args.get('tf', '15m')
+    if base_tf not in CB_GRAN:
+        base_tf = '15m'
+
     try:
-        # Fetch candles for each timeframe
+        # Dashboard rows always use these 4 timeframes
         df_15m = fetch_ohlcv(pair, "15m", 300)
-        time.sleep(0.15)  # Gentle rate-limit spacing
+        time.sleep(0.15)
         df_30m = fetch_ohlcv(pair, "30m", 300)
         time.sleep(0.15)
         df_1h  = fetch_ohlcv(pair, "1h",  300)
         df_4h  = aggregate_4h(df_1h)
 
-        # Dashboard rows
         rows = []
         for label, df in [("15m", df_15m), ("30m", df_30m), ("1H", df_1h), ("4H", df_4h)]:
             r = compute_latest(df)
             r['label'] = label
             rows.append(r)
 
-        # Volume-colored candles for base TF
-        vol_colors = compute_volume_colors(df_15m)
+        # Base TF candles for the chart — use whichever TF the user has selected
+        # Reuse already-fetched data if it matches, otherwise fetch
+        tf_df_map = {"15m": df_15m, "30m": df_30m, "1h": df_1h}
+        if base_tf in tf_df_map:
+            df_base = tf_df_map[base_tf]
+        elif base_tf == "4h":
+            df_base = df_4h
+        else:
+            time.sleep(0.15)
+            df_base = fetch_ohlcv(pair, base_tf, 300)
+
+        # Volume-colored candles for the selected TF
+        vol_colors = compute_volume_colors(df_base)
         candles = []
-        for i in range(len(df_15m)):
-            row = df_15m.iloc[i]
+        for i in range(len(df_base)):
+            row = df_base.iloc[i]
             candles.append({
                 'time': int(row['time']),
                 'open':  round(float(row['open']), 6),
@@ -372,10 +390,9 @@ def get_scanner(pair):
                 'color': vol_colors[i]
             })
 
-        # Overlay line series for base TF chart
-        overlays = compute_overlays(df_15m)
+        # Overlay line series for the selected TF
+        overlays = compute_overlays(df_base)
 
-        # Master confluence
         confluence = compute_confluence(rows)
 
         return jsonify({

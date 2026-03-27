@@ -104,6 +104,23 @@
         .bot-chart-fullscreen .modal-content {
             height: 100vh !important; border-radius: 0 !important;
         }
+        .main-chart-fullscreen {
+            position: fixed !important;
+            top: 0; left: 0; right: 0; bottom: 0;
+            z-index: 9999;
+            background: #1f2833;
+            border-radius: 0 !important;
+            border: none !important;
+            padding: 8px !important;
+        }
+        .main-chart-fullscreen #tv_chart_container {
+            height: calc(100vh - 90px) !important;
+            min-height: unset !important;
+        }
+        .main-chart-fullscreen #scanner-sub-panel {
+            max-height: 30vh;
+            overflow-y: auto;
+        }
 
         .progress-ask {
             background: #ff4b5c;
@@ -164,6 +181,7 @@
                                         <button class="btn btn-outline-secondary btn-sm" onclick="switchTF('1d')">1D</button>
                                     </div>
                                     <button class="btn btn-sm btn-outline-info fw-bold" id="scanner-toggle-btn" onclick="toggleScanner()"><i class="bi bi-broadcast me-1"></i>SCANNER</button>
+                                    <button class="btn btn-sm btn-outline-secondary" id="main-chart-fs-btn" onclick="toggleMainChartFullscreen()" title="Fullscreen"><i class="bi bi-arrows-fullscreen"></i></button>
                                 </div>
                             </div>
                             <div id="overlay-controls" class="d-none d-flex gap-1 flex-wrap px-2 pb-1">
@@ -176,6 +194,19 @@
                                 <button class="btn btn-sm btn-outline-light overlay-btn" data-group="alma" onclick="toggleOverlayGroup('alma', this)">ALMA</button>
                             </div>
                             <div id="tv_chart_container" style="height:100%; width:100%; min-height:360px;"></div>
+                            <!-- SCANNER SUB-PANEL (inside chart card) -->
+                            <div id="scanner-sub-panel" class="d-none px-2 pb-2" style="max-height:200px; overflow-y:auto;">
+                                <div class="d-flex justify-content-between align-items-center py-1">
+                                    <span class="fw-bold" style="color:#66fcf1; font-size:0.7rem;"><i class="bi bi-broadcast me-1"></i>SCANNER</span>
+                                    <div id="confluence-badge" class="badge bg-secondary px-2 py-1" style="font-size:0.65rem;">LOADING...</div>
+                                </div>
+                                <div class="table-responsive">
+                                    <table class="table table-dark table-sm table-hover mb-0" style="font-size:0.65rem; white-space:nowrap;">
+                                        <thead id="scanner-header"></thead>
+                                        <tbody id="scanner-body"></tbody>
+                                    </table>
+                                </div>
+                            </div>
                         </div>
                     </div>
                     <div class="col-lg-4 mb-3">
@@ -243,22 +274,6 @@
                                 <hr class="my-2 border-secondary">
                                 <div class="text-success" id="bids-list"></div>
                             </div>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- SCANNER DASHBOARD (hidden by default) -->
-                <div id="scanner-dashboard" class="d-none mb-4">
-                    <div class="card card-custom p-3 shadow-sm">
-                        <div class="d-flex justify-content-between align-items-center mb-2">
-                            <h6 class="fw-bold mb-0" style="color:#66fcf1;"><i class="bi bi-broadcast me-2"></i>SCANNER DASHBOARD</h6>
-                            <div id="confluence-badge" class="badge bg-secondary px-3 py-2" style="font-size:0.8rem;">LOADING...</div>
-                        </div>
-                        <div class="table-responsive">
-                            <table class="table table-dark table-sm table-hover mb-0" style="font-size:0.7rem; white-space:nowrap;">
-                                <thead id="scanner-header"></thead>
-                                <tbody id="scanner-body"></tbody>
-                            </table>
                         </div>
                     </div>
                 </div>
@@ -701,14 +716,81 @@
             if (scannerActive) {
                 await loadScanner();
             }
+
+            // Start live candle updates
+            startLiveUpdates();
         }
 
         function switchTF(tf) {
             chartTF = tf;
-            // Update active button
             document.querySelectorAll('#tf-buttons .btn').forEach(b => b.classList.remove('active'));
             event.target.classList.add('active');
             renderChart(chartPair);
+        }
+
+        // ==========================================
+        // MAIN CHART FULLSCREEN
+        // ==========================================
+        function toggleMainChartFullscreen() {
+            const card = document.getElementById('tv_chart_container').closest('.card-custom');
+            const btn = document.getElementById('main-chart-fs-btn');
+            if (card.classList.contains('main-chart-fullscreen')) {
+                card.classList.remove('main-chart-fullscreen');
+                btn.innerHTML = '<i class="bi bi-arrows-fullscreen"></i>';
+            } else {
+                card.classList.add('main-chart-fullscreen');
+                btn.innerHTML = '<i class="bi bi-fullscreen-exit"></i>';
+            }
+            // Resize chart to fill new container size
+            setTimeout(() => {
+                if (mainChart) {
+                    const container = document.getElementById('tv_chart_container');
+                    mainChart.applyOptions({ width: container.clientWidth, height: container.clientHeight });
+                }
+            }, 50);
+        }
+        // ESC key exits fullscreen
+        document.addEventListener('keydown', e => {
+            if (e.key === 'Escape') {
+                const card = document.getElementById('tv_chart_container').closest('.card-custom');
+                if (card && card.classList.contains('main-chart-fullscreen')) {
+                    toggleMainChartFullscreen();
+                }
+            }
+        });
+
+        // ==========================================
+        // LIVE CANDLE UPDATES (every 5 seconds)
+        // ==========================================
+        let liveUpdateTimer = null;
+
+        function startLiveUpdates() {
+            stopLiveUpdates();
+            liveUpdateTimer = setInterval(async () => {
+                if (!chartPair || !mainCandleSeries) return;
+                try {
+                    const r = await fetch(`/api/candles/${chartPair}/${chartTF}?limit=2`);
+                    const data = await r.json();
+                    if (!data.length) return;
+                    // Update the latest candle (or add new one)
+                    const latest = data[data.length - 1];
+                    mainCandleSeries.update(latest);
+                    if (mainVolumeSeries) {
+                        mainVolumeSeries.update({
+                            time: latest.time,
+                            value: latest.volume,
+                            color: latest.close >= latest.open ? CHART_COLORS.volUp : CHART_COLORS.volDown
+                        });
+                    }
+                    // Update live price display
+                    activePairPrice = latest.close;
+                    document.getElementById('trade-live-price').innerText = '$' + latest.close.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 6});
+                } catch (e) { /* silent */ }
+            }, 5000);
+        }
+
+        function stopLiveUpdates() {
+            if (liveUpdateTimer) { clearInterval(liveUpdateTimer); liveUpdateTimer = null; }
         }
 
         // ==========================================
@@ -1200,23 +1282,21 @@
         async function toggleScanner() {
             scannerActive = !scannerActive;
             const btn = document.getElementById('scanner-toggle-btn');
-            const dash = document.getElementById('scanner-dashboard');
+            const panel = document.getElementById('scanner-sub-panel');
             const controls = document.getElementById('overlay-controls');
 
             if (scannerActive) {
                 btn.classList.remove('btn-outline-info');
                 btn.classList.add('btn-info', 'text-dark');
                 controls.classList.remove('d-none');
-                dash.classList.remove('d-none');
+                panel.classList.remove('d-none');
                 await loadScanner();
             } else {
                 btn.classList.remove('btn-info', 'text-dark');
                 btn.classList.add('btn-outline-info');
                 controls.classList.add('d-none');
-                dash.classList.add('d-none');
-                // Remove all overlays
+                panel.classList.add('d-none');
                 removeAllOverlays();
-                // Restore original candle colors
                 if (rawCandles && mainCandleSeries) {
                     mainCandleSeries.setData(rawCandles);
                 }
@@ -1226,9 +1306,9 @@
 
         async function loadScanner() {
             document.getElementById('confluence-badge').innerText = 'SCANNING...';
-            document.getElementById('confluence-badge').className = 'badge bg-secondary px-3 py-2';
+            document.getElementById('confluence-badge').className = 'badge bg-secondary px-2 py-1';
             try {
-                const r = await fetch(`/api/scanner/${chartPair}`);
+                const r = await fetch(`/api/scanner/${chartPair}?tf=${chartTF}`);
                 scannerData = await r.json();
                 if (scannerData.error) { console.error('Scanner error:', scannerData.error); return; }
 
