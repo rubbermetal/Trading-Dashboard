@@ -16,8 +16,8 @@ LOG_INTERVAL = 900  # 15 minutes
 # ==========================================
 _dms_config = {
     "enabled": False,
-    "timeout_hours": 12,
-    "drawdown_threshold": 15,  # only flatten if a bot exceeds this drawdown %
+    "timeout_hours": 48,
+    "drawdown_threshold": 35,  # emergency-only — well above normal DCA operating range
     "last_heartbeat": time.time(),
     "triggered": False,
 }
@@ -120,17 +120,18 @@ def _log_equity():
                         if px <= 0: continue
                         drawdown = ((avg_entry - px) / avg_entry) * 100
                         if drawdown >= threshold:
-                            # Flatten this bot
+                            # Pause buying only — don't kill the bot or its position
                             try:
                                 from bot_utils import save_bots
-                                bot['status'] = 'STOPPED'
-                                bot['dca_state'] = 'SCANNING'
-                                save_bots()
-                                print(f"[DEAD-MAN] Stopped bot {bid} ({pair}) at -{drawdown:.1f}% drawdown")
-                                from notifier import notify
-                                notify("DEAD-MAN SWITCH", f"Stopped {bot.get('strategy','')} {pair} at -{drawdown:.1f}% drawdown. No heartbeat for {since_heartbeat/3600:.1f}h.", priority="urgent", tags=["rotating_light"])
+                                if bot.get('dca_state') != 'PAUSED':
+                                    bot['dca_state'] = 'PAUSED'
+                                    bot['paused_at'] = time.time()
+                                    save_bots()
+                                    print(f"[DEAD-MAN] Paused {bid} ({pair}) at -{drawdown:.1f}% drawdown — no heartbeat for {since_heartbeat/3600:.1f}h")
+                                    from notifier import notify
+                                    notify("DEAD-MAN SWITCH", f"Paused {bot.get('strategy','')} {pair} at -{drawdown:.1f}% drawdown. No heartbeat for {since_heartbeat/3600:.1f}h. Bot still holds position, just stopped new buys.", priority="urgent", tags=["rotating_light"])
                             except Exception as e:
-                                print(f"[DEAD-MAN] Error stopping {bid}: {e}")
+                                print(f"[DEAD-MAN] Error pausing {bid}: {e}")
                     _dms_config['triggered'] = True
                     _save_dms()
 
