@@ -586,6 +586,22 @@
                     <!-- Bot breakdown -->
                     <h6 class="fw-bold mt-4 mb-2" style="color:#66fcf1; font-size:0.8rem;"><i class="bi bi-pie-chart me-1"></i>BOT CAPITAL ALLOCATION</h6>
                     <div id="bot-waterfall" class="row g-2"></div>
+
+                    <!-- P&L Waterfall -->
+                    <h6 class="fw-bold mt-4 mb-2" style="color:#66fcf1; font-size:0.8rem;"><i class="bi bi-bar-chart me-1"></i>REALIZED P&L BY STRATEGY/PAIR</h6>
+                    <div id="pnl-waterfall"></div>
+                    <!-- Trade Stats Table -->
+                    <div class="table-responsive mt-3">
+                        <table class="table table-dark table-sm table-hover mb-0" style="font-size:0.7rem;">
+                            <thead>
+                                <tr>
+                                    <th>Strategy</th><th>Pair</th><th>Trades</th><th>Win Rate</th>
+                                    <th>Total P&L</th><th>Best</th><th>Worst</th><th>Fees</th><th>Volume</th>
+                                </tr>
+                            </thead>
+                            <tbody id="pnl-stats-body"></tbody>
+                        </table>
+                    </div>
                 </div>
             </div>
         </div>
@@ -2782,8 +2798,53 @@
             }).join('');
         }
 
-        // Load equity when analytics tab is shown
-        document.getElementById('analytics-tab').addEventListener('shown.bs.tab', () => loadEquity());
+        async function loadPnlWaterfall() {
+            try {
+                const res = await fetch('/api/pair_stats');
+                const stats = await res.json();
+                const entries = Object.entries(stats).map(([k, v]) => ({ key: k, ...v }));
+                entries.sort((a, b) => b.total_pnl - a.total_pnl);
+
+                // Waterfall bars
+                const el = document.getElementById('pnl-waterfall');
+                if (!entries.length) { el.innerHTML = '<span class="text-muted">No trades recorded yet.</span>'; return; }
+                const maxPnl = Math.max(...entries.map(e => Math.abs(e.total_pnl)), 0.01);
+                const colors = { DCA: '#66fcf1', GRID: '#FFA500', MOMENTUM: '#ff6bcb', QUAD: '#4ecdc4', TRAP: '#ffe66d', ORB: '#95e1d3', NPR: '#c3aed6' };
+                el.innerHTML = entries.map(e => {
+                    const pct = Math.min(100, Math.abs(e.total_pnl) / maxPnl * 100);
+                    const color = e.total_pnl >= 0 ? (colors[e.strategy] || '#66fcf1') : '#ff4b5c';
+                    const sign = e.total_pnl >= 0 ? '+' : '';
+                    return `<div class="d-flex align-items-center mb-1">
+                        <span class="text-muted me-2" style="font-size:0.65rem; min-width:100px;">${e.strategy} ${e.pair}</span>
+                        <div class="flex-grow-1" style="height:18px; background:#1a1c23; border-radius:3px; overflow:hidden;">
+                            <div style="width:${pct}%; height:100%; background:${color}; border-radius:3px; transition:width 0.5s;"></div>
+                        </div>
+                        <span class="ms-2 fw-bold ${e.total_pnl >= 0 ? 'text-success-custom' : 'text-danger-custom'}" style="font-size:0.7rem; min-width:70px; text-align:right;">${sign}$${e.total_pnl.toFixed(2)}</span>
+                    </div>`;
+                }).join('');
+
+                // Stats table
+                const tbody = document.getElementById('pnl-stats-body');
+                tbody.innerHTML = entries.map(e => {
+                    const wrClass = e.win_rate >= 60 ? 'text-success-custom' : e.win_rate >= 40 ? 'text-warning-custom' : 'text-danger-custom';
+                    const pnlClass = e.total_pnl >= 0 ? 'text-success-custom' : 'text-danger-custom';
+                    return `<tr>
+                        <td><span class="badge" style="background:${colors[e.strategy] || '#888'}; color:#000; font-size:0.6rem;">${e.strategy}</span></td>
+                        <td>${e.pair}</td>
+                        <td>${e.total_trades}</td>
+                        <td class="${wrClass}">${e.win_rate.toFixed(0)}%</td>
+                        <td class="${pnlClass} fw-bold">${e.total_pnl >= 0 ? '+' : ''}$${e.total_pnl.toFixed(4)}</td>
+                        <td class="text-success-custom">$${e.largest_win.toFixed(4)}</td>
+                        <td class="text-danger-custom">${e.largest_loss > 0 ? '-' : ''}$${e.largest_loss.toFixed(4)}</td>
+                        <td class="text-muted">$${e.total_fees_est.toFixed(4)}</td>
+                        <td>$${e.total_volume.toFixed(2)}</td>
+                    </tr>`;
+                }).join('');
+            } catch (e) { console.error('P&L waterfall error:', e); }
+        }
+
+        // Load equity + P&L when analytics tab is shown
+        document.getElementById('analytics-tab').addEventListener('shown.bs.tab', () => { loadEquity(); loadPnlWaterfall(); });
     </script>
 </body>
 </html>
