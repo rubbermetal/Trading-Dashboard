@@ -550,38 +550,34 @@ def calculate_dca(df, dca_state="SCANNING", last_cross_direction="ABOVE"):
         'depth_multiplier': depth_mult,
     }
 
-    # --- SCANNING: detect both ROCs crossing below zero ---
+    # --- SCANNING: wait for both ROCs below zero AND at depth threshold ---
+    # Zero-cross is just a prerequisite — ARM only when depth is reached
     if dca_state == "SCANNING":
         both_below_now = fast_cur < 0 and slow_cur < 0
-        either_above_prev = fast_prev >= 0 or slow_prev >= 0
-        if both_below_now and either_above_prev:
-            return "ARM", f"Both ROCs crossed below zero (Fast={fast_cur:.2f} Slow={slow_cur:.2f})", data
+        at_depth = fast_cur <= -0.30 and slow_cur <= -0.30
+        if both_below_now and at_depth:
+            return "ARM", f"Depth threshold reached (Fast={fast_cur:.2f} Slow={slow_cur:.2f}, both <= -0.30)", data
         return "HOLD", f"Scanning. Fast={fast_cur:.2f} Slow={slow_cur:.2f}", data
 
-    # --- ARMED: check for disarm or buy conditions ---
+    # --- ARMED: target acquired, waiting for curl-up confirmation to fire ---
     if dca_state == "ARMED":
-        # Disarm: Both ROCs crossed back above zero without reaching buy conditions
+        # Disarm: Both ROCs crossed back above zero — dip fizzled without curling
         both_above_now = fast_cur >= 0 and slow_cur >= 0
-        either_below_prev = fast_prev < 0 or slow_prev < 0
-        if both_above_now and either_below_prev:
+        if both_above_now:
             return "DISARM", f"Both ROCs back above zero (Fast={fast_cur:.2f} Slow={slow_cur:.2f}). Dip resolved.", data
 
-        # Check buy conditions
-        # 1. Both ROCs <= -0.50
-        if fast_cur > -0.30 or slow_cur > -0.30:
-            return "HOLD", f"Armed. Waiting for depth (Fast={fast_cur:.2f} Slow={slow_cur:.2f}, need <= -0.30)", data
-
-        # 2. Either ROC curling up
+        # Check buy conditions — depth already confirmed by ARM, now need curl + ADX
+        # 1. Either ROC curling up (momentum reversing)
         fast_curling = fast_cur > fast_prev
         slow_curling = slow_cur > slow_prev
         if not fast_curling and not slow_curling:
-            return "HOLD", f"Armed. Dip deep enough but no curl-up yet (Fast={fast_prev:.2f}->{fast_cur:.2f}, Slow={slow_prev:.2f}->{slow_cur:.2f})", data
+            return "HOLD", f"Armed. Waiting for curl-up (Fast={fast_prev:.2f}->{fast_cur:.2f}, Slow={slow_prev:.2f}->{slow_cur:.2f})", data
 
-        # 3. ADX >= 20
+        # 2. ADX filter
         if curr_adx < 10:
             return "HOLD", f"Armed. Curl detected but ADX too low ({curr_adx:.1f} < 10)", data
 
-        # All conditions met
+        # All conditions met — fire
         curl_source = "Fast" if fast_curling else "Slow"
         reason = (f"DCA BUY: {curl_source} ROC curled up. "
                   f"Fast={fast_cur:.2f} Slow={slow_cur:.2f} ADX={curr_adx:.1f} "
@@ -589,19 +585,19 @@ def calculate_dca(df, dca_state="SCANNING", last_cross_direction="ABOVE"):
         return "BUY", reason, data
 
     # Default: if state is ACCUMULATING/BUYING/PAUSED, signal logic handles re-arm
-    # Re-arm cycle: both ROCs must cross above zero (reset), then both cross below zero (re-arm)
+    # Re-arm cycle: both ROCs must cross above zero (reset), then reach depth again
     if last_cross_direction == "BELOW":
         # Waiting for both ROCs to cross back above zero (reset)
         both_above_now = fast_cur >= 0 and slow_cur >= 0
         either_below_prev = fast_prev < 0 or slow_prev < 0
         if both_above_now and either_below_prev:
-            return "CROSS_ABOVE", f"Both ROCs above zero (reset). Ready to re-arm on next cross below.", data
+            return "CROSS_ABOVE", f"Both ROCs above zero (reset). Ready to re-arm on next depth cross.", data
     elif last_cross_direction == "ABOVE":
-        # Waiting for both ROCs to cross below zero (re-arm)
+        # Waiting for depth threshold — not just zero-cross
         both_below_now = fast_cur < 0 and slow_cur < 0
-        either_above_prev = fast_prev >= 0 or slow_prev >= 0
-        if both_below_now and either_above_prev:
-            return "ARM", f"Re-armed: Both ROCs below zero (Fast={fast_cur:.2f} Slow={slow_cur:.2f})", data
+        at_depth = fast_cur <= -0.30 and slow_cur <= -0.30
+        if both_below_now and at_depth:
+            return "ARM", f"Re-armed: Depth threshold reached (Fast={fast_cur:.2f} Slow={slow_cur:.2f})", data
 
     return "HOLD", f"Accumulating. Fast={fast_cur:.2f} Slow={slow_cur:.2f} Cross={last_cross_direction}", data
 

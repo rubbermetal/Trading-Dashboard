@@ -36,17 +36,17 @@ SCANNING → ARMED → BUYING → ACCUMULATING ──→ (re-arm) → ARMED
 ```
 
 ### State: SCANNING
-Waiting for both ROCs to cross below zero (zero-line cross).
-- Every cycle: check if Fast ROC < 0 AND Slow ROC < 0
-- On zero-line cross detected → transition to ARMED
+Waiting for both ROCs to reach the depth threshold (not just zero-cross).
+- Every cycle: check if Fast ROC <= -0.30 AND Slow ROC <= -0.30
+- Zero-cross alone is not sufficient — the dip must reach meaningful depth
+- On depth threshold reached → transition to ARMED
 - If already holding a position, profit tiers are still evaluated every cycle
 
 ### State: ARMED
-Cross detected. Waiting for dip depth + momentum curl-up + ADX confirmation.
-- **Dip Depth:** Both Fast ROC AND Slow ROC must be ≤ -0.30
+Dip target acquired. Waiting for momentum curl-up + ADX confirmation.
 - **Curl-Up:** EITHER Fast ROC OR Slow ROC is rising (current > previous)
-- **Trend Power:** ADX(14) ≥ 20
-- When all three conditions met → transition to BUYING
+- **Trend Power:** ADX(14) ≥ 10
+- When both conditions met → transition to BUYING
 - If both ROCs cross back ABOVE zero → disarm, return to SCANNING
 
 ### State: BUYING
@@ -63,9 +63,9 @@ Placing a maker limit buy order.
 Has a position. Normal operating state.
 - Every cycle: evaluate profit tiers (Section 3)
 - Every cycle: check for new ARMED signal (re-arm check)
-  - Both ROCs must first cross ABOVE zero (reset), THEN cross back below zero
+  - Both ROCs must first cross ABOVE zero (reset), THEN reach depth threshold again
   - This prevents repeated buys on the same dip
-  - On fresh zero-line cross below → transition to ARMED (can buy again)
+  - On fresh depth threshold reached (both <= -0.30) → transition to ARMED (can buy again)
 - Manages outstanding limit sell orders from profit-taking
 
 ### State: TAKING_PROFIT
@@ -406,3 +406,8 @@ Keeps averaging down through normal drawdowns while still protecting against cat
 
 **4. Tier reset threshold bumped from -2.5% to -3.0%**
 Matches new first profit tier at 3%.
+
+**5. ARM trigger moved from zero-cross to depth threshold**
+Old: ARM fired when both ROCs crossed below zero — too early, dip barely starting.
+New: SCANNING waits for both ROCs <= -0.30 before ARMing. ARM now means "target acquired,
+waiting for curl-up confirmation." Re-arm cycle also requires depth, not just zero-cross.
