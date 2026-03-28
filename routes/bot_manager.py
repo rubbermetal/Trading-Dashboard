@@ -383,6 +383,37 @@ def start_bot():
     threading.Thread(target=run_bot, args=(bot_id,), daemon=True).start()
     return jsonify(success=True, message=f"Bot started on {tf} timeframe!")
 
+@bot_manager_bp.route('/api/bots/clone/<bot_id>', methods=['POST'])
+def clone_bot(bot_id):
+    """Clone a bot's strategy/settings to a new pair with fresh capital."""
+    if bot_id not in ACTIVE_BOTS:
+        return jsonify(success=False, error="Bot not found.")
+    d = request.json or {}
+    source = ACTIVE_BOTS[bot_id]
+    new_pair = d.get('pair', source['pair']).upper()
+    new_amount = float(d.get('amount', source.get('allocated_usd', 50)))
+
+    new_id = str(uuid.uuid4())[:8]
+    ACTIVE_BOTS[new_id] = {
+        "pair": new_pair,
+        "strategy": source['strategy'],
+        "status": "RUNNING",
+        "allocated_usd": new_amount,
+        "current_usd": new_amount,
+        "asset_held": 0.0,
+        "position_side": "FLAT",
+        "timeframe": source.get('timeframe', '15m'),
+        "settings": {k: v for k, v in source.get('settings', {}).items() if k not in ('active_grids', 'risk')},
+        "stats": new_bot_stats(),
+        "created_at": datetime.now(timezone.utc).isoformat()
+    }
+    if source.get('buy_pct'):
+        ACTIVE_BOTS[new_id]['buy_pct'] = source['buy_pct']
+    ACTIVE_BOTS[new_id]['stats']['deposits'] = new_amount
+    save_bots()
+    threading.Thread(target=run_bot, args=(new_id,), daemon=True).start()
+    return jsonify(success=True, message=f"Cloned {source['strategy']} to {new_pair} with ${new_amount:.2f}", bot_id=new_id)
+
 @bot_manager_bp.route('/api/bots/timeframe/<bot_id>', methods=['POST'])
 def update_bot_tf(bot_id):
     if bot_id not in ACTIVE_BOTS:

@@ -2402,6 +2402,21 @@
             refresh(); // Return the locked funds to free balance immediately
         }
 
+        async function cloneBot(botId) {
+            const pair = prompt("Clone to which pair? (leave blank for same pair)");
+            if (pair === null) return; // cancelled
+            const amount = prompt("Starting capital (USD)?", "50");
+            if (!amount) return;
+            try {
+                const body = { amount: parseFloat(amount) };
+                if (pair.trim()) body.pair = pair.trim().toUpperCase();
+                const res = await fetch(`/api/bots/clone/${botId}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+                const d = await res.json();
+                alert(d.message || d.error);
+                loadBots();
+            } catch (e) { alert('Network error.'); }
+        }
+
         function openBotFunds(botId, pair, idleUsd) {
             activeFundBotId = botId;
             document.getElementById('fund-bot-label').innerText = `${pair} -- Bot ${botId} (Idle: $${idleUsd.toFixed(2)})`;
@@ -2471,12 +2486,13 @@
                     const botTf = b.timeframe || STRATEGY_DEFAULT_TFS[b.strategy] || '15m';
 
                     let actionButtons = '';
+                    const cloneBtn = `<button class="btn btn-sm btn-outline-info ms-1" onclick="cloneBot('${id}')" title="Clone"><i class="bi bi-copy"></i></button>`;
                     if (b.status === 'RUNNING') {
-                        actionButtons = `<button class="btn btn-sm btn-outline-danger" onclick="stopBot('${id}')"><i class="bi bi-stop-circle"></i> STOP</button>`;
+                        actionButtons = `<button class="btn btn-sm btn-outline-danger" onclick="stopBot('${id}')"><i class="bi bi-stop-circle"></i> STOP</button>${cloneBtn}`;
                     } else {
                         actionButtons = `
                                 <button class="btn btn-sm btn-outline-success me-1" onclick="restartBot('${id}')"><i class="bi bi-play-circle"></i></button>
-                                <button class="btn btn-sm btn-outline-secondary" onclick="deleteBot('${id}')"><i class="bi bi-trash"></i></button>
+                                <button class="btn btn-sm btn-outline-secondary" onclick="deleteBot('${id}')"><i class="bi bi-trash"></i></button>${cloneBtn}
                             `;
                     }
 
