@@ -34,7 +34,7 @@ def get_products():
                 "id": pid,
                 "base": p.get('base_currency_id', ''),
                 "quote": p.get('quote_currency_id', ''),
-                "price": float(p.get('price', 0)),
+                "price": float(p.get('price') or 0),
                 "type": ptype
             }
             if ptype == 'SPOT':
