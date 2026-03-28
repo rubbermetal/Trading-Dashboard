@@ -54,6 +54,71 @@ def get_contract_multiplier(pair):
     return 1.0
 
 # ==========================================
+# KELLY CRITERION SIZING
+# ==========================================
+MIN_KELLY_TRADES = 20  # minimum trades before Kelly overrides default
+DEFAULT_BUY_PCT = 2.0  # the default buy_pct — Kelly only applies when bot is at this value
+
+def calculate_kelly_pct(strategy, pair):
+    """
+    Calculate half-Kelly buy_pct from permanent stats for a strategy:pair.
+    Returns None if insufficient data, otherwise a buy_pct value (0.5 to 10.0).
+    """
+    stats = load_permanent_stats()
+    key = f"{strategy}:{pair}"
+    s = stats.get(key)
+    if not s or s.get('total_trades', 0) < MIN_KELLY_TRADES:
+        return None
+
+    wins = s.get('winning_trades', 0)
+    losses = s.get('losing_trades', 0)
+    total = wins + losses
+    if total == 0 or wins == 0:
+        return None
+
+    win_rate = wins / total  # W
+
+    # Calculate average win and average loss from trade log in the bot's stats
+    # Fall back to permanent stats totals if we can't get per-trade data
+    total_pnl = s.get('total_pnl', 0)
+    if losses > 0 and wins > 0:
+        # Estimate avg win/loss from totals
+        # avg_win ≈ total positive pnl / wins, avg_loss ≈ total negative pnl / losses
+        # We have total_pnl, largest_win, largest_loss but not sum of wins vs sum of losses
+        # Use: avg_win ≈ (total_pnl + |total_loss_est|) / wins
+        # Simpler: use largest_win/largest_loss as proxies with dampening
+        avg_win = s.get('largest_win', 0) * 0.6   # dampen — largest != average
+        avg_loss = abs(s.get('largest_loss', 0)) * 0.6
+        if avg_loss == 0:
+            avg_loss = avg_win * 0.5  # assume loss is half of win if no losses recorded
+    elif losses == 0:
+        # All wins — Kelly would say go all-in, which is dangerous
+        # Use a conservative estimate: assume eventual losses at 50% of avg win
+        avg_win = total_pnl / wins if wins > 0 else 0
+        avg_loss = avg_win * 0.5
+    else:
+        return None
+
+    if avg_loss <= 0 or avg_win <= 0:
+        return None
+
+    R = avg_win / avg_loss  # payoff ratio
+
+    # Kelly formula: f = W - (1-W)/R
+    kelly_f = win_rate - (1 - win_rate) / R
+
+    if kelly_f <= 0:
+        # Negative Kelly means no edge — use minimum sizing
+        return 0.5
+
+    # Half-Kelly for safety, clamped to reasonable range
+    half_kelly_pct = kelly_f * 50  # scale: kelly_f of 0.04 → 2%, 0.10 → 5%
+    half_kelly_pct = max(0.5, min(10.0, half_kelly_pct))
+
+    return round(half_kelly_pct, 1)
+
+
+# ==========================================
 # INCREMENT SNAPPING LOGIC
 # ==========================================
 def snap_to_increment(value, increment):

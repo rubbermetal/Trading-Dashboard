@@ -257,6 +257,11 @@ def get_bots():
                 and b.get('pair') != bot.get('pair')
                 and b.get('dca_state') in ('ARMED', 'BUYING')
             )
+            # Kelly sizing info
+            from bot_utils import calculate_kelly_pct
+            kelly_pct = calculate_kelly_pct('DCA', bot.get('pair', ''))
+            kelly_active = kelly_pct is not None and not bot.get('buy_pct_manual')
+
             b_copy['dca'] = {
                 'state': bot.get('dca_state', 'SCANNING'),
                 'avg_entry': round(avg_e, 6),
@@ -266,6 +271,8 @@ def get_bots():
                 'highest_tier_sold': highest_sold,
                 'pending_buy': bool(bot.get('pending_buy_oid')),
                 'buy_pct': bot.get('buy_pct', 2.0),
+                'kelly_pct': kelly_pct,
+                'kelly_active': kelly_active,
                 'pending_sells': len(bot.get('pending_sells', [])),
                 'paused': bot.get('dca_state') == 'PAUSED',
                 'corr_count': concurrent,
@@ -589,6 +596,7 @@ def set_buy_pct(bot_id):
     if pct < 0.1 or pct > 50:
         return jsonify(error="buy_pct must be between 0.1 and 50")
     bot['buy_pct'] = round(pct, 1)
+    bot['buy_pct_manual'] = True  # user explicitly set this — Kelly won't override
     from bot_utils import save_bots
     save_bots()
-    return jsonify(success=True, message=f"Buy % set to {bot['buy_pct']}%")
+    return jsonify(success=True, message=f"Buy % set to {bot['buy_pct']}% (manual — Kelly disabled)")

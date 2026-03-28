@@ -1279,6 +1279,17 @@ def execute_dca(bot_id, bot, pair):
 
             depth_mult = data.get('depth_multiplier', 1.0)
             buy_pct = bot.get('buy_pct', 2.0)
+
+            # Kelly Criterion: override buy_pct if user hasn't manually set it
+            if not bot.get('buy_pct_manual'):
+                from bot_utils import calculate_kelly_pct
+                kelly_pct = calculate_kelly_pct('DCA', pair)
+                if kelly_pct is not None:
+                    buy_pct = kelly_pct
+                    if buy_pct != bot.get('_last_kelly_pct'):
+                        print(f"[DCA | {pair}] Kelly sizing: {kelly_pct}% (was {bot.get('buy_pct', 2.0)}%)")
+                        bot['_last_kelly_pct'] = buy_pct
+
             buy_usd = bot['current_usd'] * (buy_pct / 100.0) * depth_mult * drawdown_mult * corr_mult
             min_qty = max(base_min, 0.25 / cur_px) if cur_px > 0 else base_min
             buy_qty = buy_usd / (cur_px * mult) if cur_px > 0 else min_qty

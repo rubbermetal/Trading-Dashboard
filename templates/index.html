@@ -1751,7 +1751,8 @@
                     const profitBadge = d.avg_entry > 0 ? `<span class="badge bg-dark border border-${d.profit_pct >= 0 ? 'success' : 'danger'}">${d.profit_pct >= 0 ? '+' : ''}${d.profit_pct.toFixed(2)}%</span>` : '';
                     const tierBadge = d.next_tier ? `<span class="badge bg-dark border border-warning">Next: ${d.next_tier}%</span>` : '';
                     const corrBadge = d.corr_count >= 2 ? `<span class="badge bg-danger border border-danger" title="${d.corr_count} other bots entering simultaneously">CORR ${d.corr_count}</span>` : '';
-                    statusBadges = `<div class="d-flex gap-1 flex-wrap mb-1">${stateBadge}${buysBadge}${avgBadge}${profitBadge}${tierBadge}${corrBadge}</div>`;
+                    const kellyBadge = d.kelly_active ? `<span class="badge bg-dark border border-info" title="Kelly sizing active: ${d.kelly_pct}%">K:${d.kelly_pct}%</span>` : (d.kelly_pct !== null && d.kelly_pct !== undefined ? `<span class="badge bg-dark border border-secondary" title="Kelly suggests ${d.kelly_pct}% but manual override active">K:off</span>` : '');
+                    statusBadges = `<div class="d-flex gap-1 flex-wrap mb-1">${stateBadge}${buysBadge}${avgBadge}${profitBadge}${tierBadge}${corrBadge}${kellyBadge}</div>`;
                 }
 
                 infoEl.innerHTML = `${statusBadges}<div class="d-flex flex-wrap gap-3">
