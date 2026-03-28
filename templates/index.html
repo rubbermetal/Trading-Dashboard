@@ -1995,7 +1995,16 @@
                             <div><b class="text-white">${r.asset}</b> <span class="text-muted">Target: ${r.target}</span><br><span class="text-muted">Actual: <span class="${r.status === 'Balanced' ? 'text-success-custom' : r.status === 'Over' ? 'text-danger-custom' : 'text-warning-custom'}">${r.actual}</span></span></div>
                             <div class="text-end"><span class="badge ${r.status === 'Balanced' ? 'bg-success' : r.status === 'Over' ? 'bg-danger' : 'bg-warning text-dark'}">${r.status}</span><br><span class="text-muted" style="font-size:0.65rem;">${r.action}</span></div>
                         </div>`).join('');
-                rebHTML = `${listHTML}<button class="btn btn-outline-warning w-100 fw-bold py-2 mt-2" onclick="executeRebalance()">1-CLICK REBALANCE</button>`;
+                rebHTML = `${listHTML}<button class="btn btn-outline-warning w-100 fw-bold py-2 mt-2" onclick="executeRebalance()">1-CLICK REBALANCE</button>
+                    <div class="border-top border-secondary mt-2 pt-2">
+                        <div class="d-flex align-items-center gap-2">
+                            <div class="form-check form-switch mb-0"><input class="form-check-input" type="checkbox" id="auto-rebal-enabled" onchange="saveRebalSchedule()"><label class="form-check-label small" for="auto-rebal-enabled">Auto</label></div>
+                            <select id="auto-rebal-interval" class="form-select form-select-sm bg-dark text-white border-secondary" style="max-width:100px; font-size:0.7rem;" onchange="saveRebalSchedule()">
+                                <option value="6">6h</option><option value="12">12h</option><option value="24" selected>24h</option><option value="72">3d</option><option value="168">7d</option>
+                            </select>
+                            <span id="auto-rebal-status" class="text-muted" style="font-size:0.6rem;"></span>
+                        </div>
+                    </div>`;
             }
             document.getElementById('rebalance-content').innerHTML = rebHTML;
 
@@ -2754,6 +2763,29 @@
             const res = await fetch('/api/execute_rebalance', { method: 'POST' });
             const d = await res.json(); alert(d.message || d.error); refresh();
         }
+
+        async function loadRebalSchedule() {
+            try {
+                const res = await fetch('/api/rebalance_schedule');
+                const s = await res.json();
+                document.getElementById('auto-rebal-enabled').checked = s.enabled;
+                document.getElementById('auto-rebal-interval').value = s.interval_hours || 24;
+                const last = s.last_run ? new Date(s.last_run * 1000).toLocaleString() : 'Never';
+                document.getElementById('auto-rebal-status').innerText = `Last: ${last}`;
+            } catch (e) {}
+        }
+
+        async function saveRebalSchedule() {
+            try {
+                await fetch('/api/rebalance_schedule', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
+                    enabled: document.getElementById('auto-rebal-enabled').checked,
+                    interval_hours: parseInt(document.getElementById('auto-rebal-interval').value),
+                })});
+            } catch (e) { console.error('Rebal schedule save error:', e); }
+        }
+
+        // Load schedule state on refresh
+        setTimeout(loadRebalSchedule, 2000);
 
         // ==========================================
         // MANUAL TRADING LOGIC

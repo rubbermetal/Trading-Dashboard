@@ -1,8 +1,64 @@
-import uuid, time
+import uuid, time, json, os, threading
 from flask import Blueprint, jsonify, request
 from shared import client, MANUAL_SPOT_ENTRIES, REBALANCE_TARGETS, TRAILING_STOPS, BRACKET_ORDERS, ACTIVE_BOTS
 
 portfolio_bp = Blueprint('portfolio', __name__)
+
+# Auto-rebalance scheduler
+_rebalance_schedule = {"enabled": False, "interval_hours": 24, "last_run": 0}
+_REBAL_CONFIG = "rebalance_schedule.json"
+
+def _load_rebal_schedule():
+    if os.path.exists(_REBAL_CONFIG):
+        try:
+            with open(_REBAL_CONFIG, 'r') as f:
+                _rebalance_schedule.update(json.load(f))
+        except: pass
+
+def _save_rebal_schedule():
+    with open(_REBAL_CONFIG, 'w') as f:
+        json.dump(_rebalance_schedule, f)
+
+_load_rebal_schedule()
+
+def _auto_rebalance_thread():
+    """Background thread: execute rebalance on schedule."""
+    while True:
+        try:
+            if _rebalance_schedule.get('enabled') and REBALANCE_TARGETS:
+                interval = _rebalance_schedule.get('interval_hours', 24) * 3600
+                last = _rebalance_schedule.get('last_run', 0)
+                if time.time() - last >= interval:
+                    print("[AUTO-REBALANCE] Running scheduled rebalance...")
+                    _, total, _, spot_map, _ = fetch_data()
+                    sells, buys = [], []
+                    for asset, target_pct in REBALANCE_TARGETS.items():
+                        current_usd = spot_map.get(asset, {}).get('usd', 0)
+                        px = spot_map.get(asset, {}).get('px', 0)
+                        if px == 0: continue
+                        diff_usd = current_usd - (total * target_pct)
+                        actual_pct = current_usd / total if total > 0 else 0
+                        if abs(actual_pct - target_pct) > 0.05 and abs(diff_usd) > 5.0:
+                            if diff_usd > 0: sells.append({"pair": f"{asset}-USD", "size": str(round(diff_usd / px, 6))})
+                            else: buys.append({"pair": f"{asset}-USD", "size": str(round(abs(diff_usd), 2))})
+                    for s in sells:
+                        client.market_order_sell(client_order_id=str(uuid.uuid4()), product_id=s['pair'], base_size=s['size'])
+                        print(f"[AUTO-REBALANCE] Sold {s['size']} {s['pair']}")
+                    if sells and buys: time.sleep(2)
+                    for b in buys:
+                        client.market_order_buy(client_order_id=str(uuid.uuid4()), product_id=b['pair'], quote_size=b['size'])
+                        print(f"[AUTO-REBALANCE] Bought ${b['size']} of {b['pair']}")
+                    _rebalance_schedule['last_run'] = time.time()
+                    _save_rebal_schedule()
+                    if not sells and not buys:
+                        print("[AUTO-REBALANCE] Already balanced, no trades needed.")
+                    from notifier import notify
+                    notify("Auto-Rebalance", f"Executed {len(sells)} sells, {len(buys)} buys", tags=["scales"])
+        except Exception as e:
+            print(f"[AUTO-REBALANCE] Error: {e}")
+        time.sleep(300)  # check every 5 minutes
+
+threading.Thread(target=_auto_rebalance_thread, daemon=True).start()
 
 def fetch_data():
     active, history, total = [], [], 0.0
@@ -222,6 +278,17 @@ def config_rebalance():
         REBALANCE_TARGETS.update({k.upper(): float(v)/100 for k, v in d.items() if float(v) > 0})
         return jsonify(success=True, message="Rebalance configuration saved!")
     except Exception as e: return jsonify(success=False, error=str(e))
+
+@portfolio_bp.route('/api/rebalance_schedule', methods=['GET'])
+def get_rebalance_schedule():
+    return jsonify(_rebalance_schedule)
+
+@portfolio_bp.route('/api/rebalance_schedule', methods=['POST'])
+def set_rebalance_schedule():
+    d = request.json
+    _rebalance_schedule.update(d)
+    _save_rebal_schedule()
+    return jsonify(success=True, schedule=_rebalance_schedule)
 
 @portfolio_bp.route('/api/execute_rebalance', methods=['POST'])
 def execute_rebalance():
