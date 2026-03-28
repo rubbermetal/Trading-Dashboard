@@ -20,16 +20,25 @@ def get_products():
         return jsonify(_product_cache["data"])
 
     try:
+        # Spot products
         res = client.get("/api/v3/brokerage/products", params={"limit": 5000})
         products = res.get('products', [])
+
+        # Futures require a separate query — the default only returns SPOT
+        try:
+            fut_res = client.get("/api/v3/brokerage/products", params={"limit": 5000, "product_type": "FUTURE"})
+            products += fut_res.get('products', [])
+        except Exception as e:
+            print(f"[PRODUCTS] Failed to fetch futures: {e}")
 
         spot, deriv = [], []
         for p in products:
             pid = p.get('product_id', '')
             status = p.get('status', '').upper()
-            if status != 'ONLINE':
-                continue
             ptype = p.get('product_type', 'SPOT').upper()
+            # Spot products use ONLINE status; futures have no status field
+            if ptype == 'SPOT' and status != 'ONLINE':
+                continue
             entry = {
                 "id": pid,
                 "base": p.get('base_currency_id', ''),
