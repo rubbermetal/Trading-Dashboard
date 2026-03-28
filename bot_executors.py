@@ -1278,7 +1278,7 @@ def execute_dca(bot_id, bot, pair):
                 print(f"[DCA | {pair}] CORRELATION GUARD: {concurrent_entries} other bots entering, sizing to 50%")
 
             depth_mult = data.get('depth_multiplier', 1.0)
-            buy_pct = bot.get('buy_pct', 2.0)
+            buy_pct = bot.get('buy_pct', 5.0)
 
             # Kelly Criterion: override buy_pct if user hasn't manually set it
             if not bot.get('buy_pct_manual'):
@@ -1287,7 +1287,7 @@ def execute_dca(bot_id, bot, pair):
                 if kelly_pct is not None:
                     buy_pct = kelly_pct
                     if buy_pct != bot.get('_last_kelly_pct'):
-                        print(f"[DCA | {pair}] Kelly sizing: {kelly_pct}% (was {bot.get('buy_pct', 2.0)}%)")
+                        print(f"[DCA | {pair}] Kelly sizing: {kelly_pct}% (was {bot.get('buy_pct', 5.0)}%)")
                         bot['_last_kelly_pct'] = buy_pct
 
             buy_usd = bot['current_usd'] * (buy_pct / 100.0) * depth_mult * drawdown_mult * corr_mult

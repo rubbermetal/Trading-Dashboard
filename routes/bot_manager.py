@@ -270,7 +270,7 @@ def get_bots():
                 'next_tier': next_tier,
                 'highest_tier_sold': highest_sold,
                 'pending_buy': bool(bot.get('pending_buy_oid')),
-                'buy_pct': bot.get('buy_pct', 2.0),
+                'buy_pct': bot.get('buy_pct', 5.0),
                 'kelly_pct': kelly_pct,
                 'kelly_active': kelly_active,
                 'pending_sells': len(bot.get('pending_sells', [])),
@@ -592,7 +592,7 @@ def set_buy_pct(bot_id):
     if bot.get('strategy') != 'DCA':
         return jsonify(error="Only DCA bots support buy_pct")
     data = request.get_json()
-    pct = float(data.get('buy_pct', 2.0))
+    pct = float(data.get('buy_pct', 5.0))
     if pct < 0.1 or pct > 50:
         return jsonify(error="buy_pct must be between 0.1 and 50")
     bot['buy_pct'] = round(pct, 1)

@@ -57,7 +57,7 @@ def get_contract_multiplier(pair):
 # KELLY CRITERION SIZING
 # ==========================================
 MIN_KELLY_TRADES = 20  # minimum trades before Kelly overrides default
-DEFAULT_BUY_PCT = 2.0  # the default buy_pct — Kelly only applies when bot is at this value
+DEFAULT_BUY_PCT = 5.0  # the default buy_pct — Kelly only applies when bot is at this value
 
 def calculate_kelly_pct(strategy, pair):
     """
