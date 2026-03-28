@@ -14,6 +14,8 @@ MANUAL_SPOT_ENTRIES = {
 
 TRAILING_STOPS = {}   # {pair: {side, trail_pct, highest_price/lowest_price, size, entry_price}}
 BRACKET_ORDERS = {}   # {pair: {size, side, entry_price, tp_price, sl_price, tp_oid, sl_oid}}
+TWAP_ORDERS = {}      # {id: {pair, side, total_usd, slices, interval_sec, filled, remaining, status}}
+SNIPER_ORDERS = {}    # {id: {pair, side, trigger_price, amount, direction, status}}
 REBALANCE_TARGETS = {}
 SCREENER_DATA = []
 

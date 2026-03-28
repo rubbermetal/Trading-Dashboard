@@ -3,7 +3,7 @@ from decimal import Decimal, ROUND_DOWN
 import pandas as pd
 import pandas_ta as ta
 from flask import Blueprint, jsonify, request
-from shared import client, TRAILING_STOPS, BRACKET_ORDERS
+from shared import client, TRAILING_STOPS, BRACKET_ORDERS, TWAP_ORDERS, SNIPER_ORDERS
 from bot_utils import snap_to_increment
 
 trading_bp = Blueprint('trading', __name__)
@@ -42,6 +42,92 @@ def background_watcher():
                             print(f"[TRAIL] {pair} BUY triggered @ {cur_px:.2f} (trough {data.get('lowest_price', 0):.2f})")
                 except Exception as e:
                     print(f"[TRAIL] Error checking {pair}: {e}")
+
+            # --- TWAP Orders ---
+            for twap_id, tw in list(TWAP_ORDERS.items()):
+                try:
+                    if tw['status'] != 'RUNNING':
+                        continue
+                    now = time.time()
+                    if now < tw.get('next_slice_at', 0):
+                        continue
+
+                    pair = tw['pair']
+                    product = client.get_product(product_id=pair)
+                    cur_px = float(product.price)
+                    quote_inc = product.quote_increment
+                    base_inc = product.base_increment
+                    slice_usd = tw['total_usd'] / tw['slices']
+                    remaining_slices = tw['slices'] - tw['filled_slices']
+
+                    if remaining_slices <= 0:
+                        tw['status'] = 'COMPLETED'
+                        print(f"[TWAP] {twap_id} completed: {tw['filled_slices']} slices filled")
+                        continue
+
+                    # Place maker limit at best bid/ask
+                    book = client.get_product_book(product_id=pair, limit=1)
+                    oid = str(uuid.uuid4())
+
+                    if tw['side'] == 'BUY':
+                        limit_px = float(book.pricebook.bids[0].price)
+                        str_price = snap_to_increment(limit_px, quote_inc)
+                        base_qty = slice_usd / limit_px
+                        str_qty = snap_to_increment(base_qty, base_inc)
+                        if float(str_qty) > 0:
+                            client.limit_order_gtc_buy(client_order_id=oid, product_id=pair, base_size=str_qty, limit_price=str_price, post_only=True)
+                    else:
+                        limit_px = float(book.pricebook.asks[0].price)
+                        str_price = snap_to_increment(limit_px, quote_inc)
+                        str_qty = snap_to_increment(slice_usd / limit_px, base_inc)
+                        if float(str_qty) > 0:
+                            client.limit_order_gtc_sell(client_order_id=oid, product_id=pair, base_size=str_qty, limit_price=str_price, post_only=True)
+
+                    tw['filled_slices'] = tw.get('filled_slices', 0) + 1
+                    tw['next_slice_at'] = now + tw['interval_sec']
+                    tw['last_price'] = cur_px
+                    print(f"[TWAP] {pair} slice {tw['filled_slices']}/{tw['slices']} @ ${str_price} ({str_qty})")
+                except Exception as e:
+                    print(f"[TWAP] Error on {twap_id}: {e}")
+
+            # --- Sniper Orders ---
+            for snip_id, sn in list(SNIPER_ORDERS.items()):
+                try:
+                    if sn['status'] != 'WATCHING':
+                        continue
+                    pair = sn['pair']
+                    product = client.get_product(product_id=pair)
+                    cur_px = float(product.price)
+                    quote_inc = product.quote_increment
+                    base_inc = product.base_increment
+                    trigger = sn['trigger_price']
+
+                    triggered = False
+                    if sn['direction'] == 'BELOW' and cur_px <= trigger:
+                        triggered = True
+                    elif sn['direction'] == 'ABOVE' and cur_px >= trigger:
+                        triggered = True
+
+                    if triggered:
+                        book = client.get_product_book(product_id=pair, limit=1)
+                        oid = str(uuid.uuid4())
+                        if sn['side'] == 'BUY':
+                            limit_px = float(book.pricebook.bids[0].price)
+                            str_price = snap_to_increment(limit_px, quote_inc)
+                            base_qty = float(sn['amount']) / limit_px
+                            str_qty = snap_to_increment(base_qty, base_inc)
+                            client.limit_order_gtc_buy(client_order_id=oid, product_id=pair, base_size=str_qty, limit_price=str_price, post_only=True)
+                        else:
+                            limit_px = float(book.pricebook.asks[0].price)
+                            str_price = snap_to_increment(limit_px, quote_inc)
+                            str_qty = snap_to_increment(float(sn['amount']), base_inc)
+                            client.limit_order_gtc_sell(client_order_id=oid, product_id=pair, base_size=str_qty, limit_price=str_price, post_only=True)
+
+                        sn['status'] = 'TRIGGERED'
+                        sn['triggered_at'] = cur_px
+                        print(f"[SNIPER] {pair} triggered @ ${cur_px:.2f} (target ${trigger:.2f}), {sn['side']} placed @ ${str_price}")
+                except Exception as e:
+                    print(f"[SNIPER] Error on {snip_id}: {e}")
 
             # --- Bracket Orders (software OCO) ---
             for pair, bkt in list(BRACKET_ORDERS.items()):
@@ -291,6 +377,167 @@ def move_to_breakeven():
         BRACKET_ORDERS[pair]['sl_price'] = BRACKET_ORDERS[pair]['entry_price']
         return jsonify(success=True, message=f"SL moved to break-even @ ${BRACKET_ORDERS[pair]['entry_price']:,.2f}")
     return jsonify(success=False, error="No bracket order found for this pair.")
+
+# ==========================================
+# TWAP ORDERS
+# ==========================================
+@trading_bp.route('/api/twap', methods=['POST'])
+def create_twap():
+    """Create a TWAP order: split total_usd into N slices over duration minutes."""
+    d = request.json
+    try:
+        pair = d['pair']
+        side = d.get('side', 'BUY')
+        total_usd = float(d['total_usd'])
+        slices = int(d.get('slices', 5))
+        duration_min = float(d.get('duration_min', 30))
+
+        if slices < 2: return jsonify(success=False, error="Need at least 2 slices.")
+        if total_usd <= 0: return jsonify(success=False, error="Amount must be positive.")
+
+        interval_sec = (duration_min * 60) / slices
+        twap_id = str(uuid.uuid4())[:8]
+
+        TWAP_ORDERS[twap_id] = {
+            'pair': pair,
+            'side': side,
+            'total_usd': total_usd,
+            'slices': slices,
+            'interval_sec': interval_sec,
+            'filled_slices': 0,
+            'status': 'RUNNING',
+            'next_slice_at': time.time(),  # first slice immediately
+            'created': time.time(),
+            'last_price': 0,
+        }
+
+        return jsonify(success=True, message=f"TWAP started: {slices} slices of ${total_usd/slices:.2f} over {duration_min:.0f}min", id=twap_id)
+    except Exception as e:
+        return jsonify(success=False, error=str(e))
+
+@trading_bp.route('/api/twap/cancel', methods=['POST'])
+def cancel_twap():
+    d = request.json
+    twap_id = d.get('id', '')
+    if twap_id in TWAP_ORDERS:
+        TWAP_ORDERS[twap_id]['status'] = 'CANCELLED'
+        return jsonify(success=True, message=f"TWAP {twap_id} cancelled ({TWAP_ORDERS[twap_id]['filled_slices']} slices already filled)")
+    return jsonify(success=False, error="TWAP order not found.")
+
+# ==========================================
+# SNIPER ENTRY
+# ==========================================
+@trading_bp.route('/api/sniper', methods=['POST'])
+def create_sniper():
+    """Watch for a price level and auto-fire a maker limit when hit."""
+    d = request.json
+    try:
+        pair = d['pair']
+        side = d.get('side', 'BUY')
+        trigger_price = float(d['trigger_price'])
+        amount = d['amount']  # USD for buys, units for sells
+        direction = d.get('direction', 'BELOW')  # BELOW = buy the dip, ABOVE = sell the rip
+
+        snip_id = str(uuid.uuid4())[:8]
+        SNIPER_ORDERS[snip_id] = {
+            'pair': pair,
+            'side': side,
+            'trigger_price': trigger_price,
+            'amount': amount,
+            'direction': direction,
+            'status': 'WATCHING',
+            'created': time.time(),
+        }
+
+        return jsonify(success=True, message=f"Sniper set: {side} {pair} when price {'<=' if direction == 'BELOW' else '>='} ${trigger_price:,.2f}", id=snip_id)
+    except Exception as e:
+        return jsonify(success=False, error=str(e))
+
+@trading_bp.route('/api/sniper/cancel', methods=['POST'])
+def cancel_sniper():
+    d = request.json
+    snip_id = d.get('id', '')
+    if snip_id in SNIPER_ORDERS:
+        SNIPER_ORDERS[snip_id]['status'] = 'CANCELLED'
+        return jsonify(success=True, message=f"Sniper {snip_id} cancelled")
+    return jsonify(success=False, error="Sniper order not found.")
+
+# ==========================================
+# SCALED LIMIT ORDERS
+# ==========================================
+@trading_bp.route('/api/scaled', methods=['POST'])
+def create_scaled():
+    """Place a ladder of limit orders across a price range."""
+    d = request.json
+    try:
+        pair = d['pair']
+        side = d.get('side', 'BUY')
+        price_from = float(d['price_from'])
+        price_to = float(d['price_to'])
+        num_orders = int(d.get('num_orders', 5))
+        total_usd = float(d['total_usd'])
+
+        if num_orders < 2: return jsonify(success=False, error="Need at least 2 orders.")
+        if price_from == price_to: return jsonify(success=False, error="Price range must span a range.")
+
+        product = client.get_product(product_id=pair)
+        quote_inc = product.quote_increment
+        base_inc = product.base_increment
+        cur_px = float(product.price)
+
+        step = (price_to - price_from) / (num_orders - 1)
+        slice_usd = total_usd / num_orders
+        placed = 0
+        errors = []
+
+        for i in range(num_orders):
+            px = price_from + step * i
+            str_price = snap_to_increment(px, quote_inc)
+            base_qty = slice_usd / px if px > 0 else 0
+            str_qty = snap_to_increment(base_qty, base_inc)
+
+            if float(str_qty) <= 0:
+                continue
+
+            try:
+                oid = str(uuid.uuid4())
+                if side == 'BUY':
+                    client.limit_order_gtc_buy(client_order_id=oid, product_id=pair, base_size=str_qty, limit_price=str_price)
+                else:
+                    client.limit_order_gtc_sell(client_order_id=oid, product_id=pair, base_size=str_qty, limit_price=str_price)
+                placed += 1
+            except Exception as e:
+                errors.append(f"${str_price}: {e}")
+
+        msg = f"Placed {placed}/{num_orders} orders from ${price_from:,.2f} to ${price_to:,.2f}"
+        if errors:
+            msg += f" ({len(errors)} failed)"
+        return jsonify(success=True, message=msg, placed=placed, errors=errors)
+    except Exception as e:
+        return jsonify(success=False, error=str(e))
+
+# ==========================================
+# ADVANCED ORDERS STATUS
+# ==========================================
+@trading_bp.route('/api/advanced_orders')
+def get_advanced_orders():
+    """Return all active TWAP and sniper orders."""
+    items = []
+    for tid, tw in TWAP_ORDERS.items():
+        if tw['status'] in ('RUNNING',):
+            items.append({
+                'type': 'TWAP', 'id': tid, 'pair': tw['pair'], 'side': tw['side'],
+                'progress': f"{tw['filled_slices']}/{tw['slices']}",
+                'total_usd': tw['total_usd'], 'status': tw['status'],
+            })
+    for sid, sn in SNIPER_ORDERS.items():
+        if sn['status'] == 'WATCHING':
+            items.append({
+                'type': 'SNIPER', 'id': sid, 'pair': sn['pair'], 'side': sn['side'],
+                'trigger': sn['trigger_price'], 'direction': sn['direction'],
+                'amount': sn['amount'], 'status': sn['status'],
+            })
+    return jsonify(items)
 
 # ==========================================
 # INDICATORS

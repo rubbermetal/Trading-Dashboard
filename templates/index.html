@@ -261,6 +261,65 @@
                             </div>
                         </div>
 
+                        <!-- ADVANCED ORDERS -->
+                        <div class="card card-custom p-3 mb-3">
+                            <div class="d-flex justify-content-between align-items-center mb-2" role="button" onclick="document.getElementById('adv-orders-body').classList.toggle('d-none')">
+                                <label class="small fw-bold mb-0" style="font-size:0.7rem; color:#66fcf1;"><i class="bi bi-lightning me-1"></i>ADVANCED ORDERS</label>
+                                <i class="bi bi-chevron-down text-muted" style="font-size:0.7rem;"></i>
+                            </div>
+                            <div id="adv-orders-body" class="d-none">
+                                <!-- TWAP -->
+                                <div class="border-bottom border-secondary pb-2 mb-2">
+                                    <label class="small text-muted fw-bold mb-1" style="font-size:0.6rem;">TWAP (Time-Weighted)</label>
+                                    <div class="row g-1 mb-1">
+                                        <div class="col-4"><input type="number" id="twap-usd" class="form-control form-control-sm bg-dark border-secondary text-white" placeholder="USD" step="any"></div>
+                                        <div class="col-4"><input type="number" id="twap-slices" class="form-control form-control-sm bg-dark border-secondary text-white" placeholder="Slices" value="5"></div>
+                                        <div class="col-4"><input type="number" id="twap-duration" class="form-control form-control-sm bg-dark border-secondary text-white" placeholder="Min" value="30"></div>
+                                    </div>
+                                    <div class="d-flex gap-1">
+                                        <button class="btn btn-success btn-sm flex-grow-1 py-1" style="font-size:0.65rem;" onclick="sendTwap('BUY')">TWAP BUY</button>
+                                        <button class="btn btn-danger btn-sm flex-grow-1 py-1" style="font-size:0.65rem;" onclick="sendTwap('SELL')">TWAP SELL</button>
+                                    </div>
+                                </div>
+                                <!-- Sniper -->
+                                <div class="border-bottom border-secondary pb-2 mb-2">
+                                    <label class="small text-muted fw-bold mb-1" style="font-size:0.6rem;">SNIPER (Price Trigger)</label>
+                                    <div class="row g-1 mb-1">
+                                        <div class="col-4"><input type="number" id="sniper-price" class="form-control form-control-sm bg-dark border-secondary text-white" placeholder="Trigger $" step="any"></div>
+                                        <div class="col-4"><input type="number" id="sniper-amt" class="form-control form-control-sm bg-dark border-secondary text-white" placeholder="USD" step="any"></div>
+                                        <div class="col-4">
+                                            <select id="sniper-dir" class="form-select form-select-sm bg-dark text-white border-secondary" style="font-size:0.7rem;">
+                                                <option value="BELOW">At/Below</option>
+                                                <option value="ABOVE">At/Above</option>
+                                            </select>
+                                        </div>
+                                    </div>
+                                    <div class="d-flex gap-1">
+                                        <button class="btn btn-success btn-sm flex-grow-1 py-1" style="font-size:0.65rem;" onclick="sendSniper('BUY')">SNIPE BUY</button>
+                                        <button class="btn btn-danger btn-sm flex-grow-1 py-1" style="font-size:0.65rem;" onclick="sendSniper('SELL')">SNIPE SELL</button>
+                                    </div>
+                                </div>
+                                <!-- Scaled -->
+                                <div class="mb-1">
+                                    <label class="small text-muted fw-bold mb-1" style="font-size:0.6rem;">SCALED (Limit Ladder)</label>
+                                    <div class="row g-1 mb-1">
+                                        <div class="col-3"><input type="number" id="scaled-from" class="form-control form-control-sm bg-dark border-secondary text-white" placeholder="From $" step="any"></div>
+                                        <div class="col-3"><input type="number" id="scaled-to" class="form-control form-control-sm bg-dark border-secondary text-white" placeholder="To $" step="any"></div>
+                                        <div class="col-3"><input type="number" id="scaled-num" class="form-control form-control-sm bg-dark border-secondary text-white" placeholder="#" value="5"></div>
+                                        <div class="col-3"><input type="number" id="scaled-usd" class="form-control form-control-sm bg-dark border-secondary text-white" placeholder="USD" step="any"></div>
+                                    </div>
+                                    <div class="d-flex gap-1">
+                                        <button class="btn btn-success btn-sm flex-grow-1 py-1" style="font-size:0.65rem;" onclick="sendScaled('BUY')">LADDER BUY</button>
+                                        <button class="btn btn-danger btn-sm flex-grow-1 py-1" style="font-size:0.65rem;" onclick="sendScaled('SELL')">LADDER SELL</button>
+                                    </div>
+                                </div>
+                                <!-- Active advanced orders -->
+                                <div class="border-top border-secondary pt-2 mt-2">
+                                    <div id="adv-orders-list" style="font-size:0.65rem;"></div>
+                                </div>
+                            </div>
+                        </div>
+
                         <!-- ORDER BOOK -->
                         <div class="card card-custom p-3">
                             <h6 class="fw-bold text-primary mb-2" style="font-size:0.8rem;"><i class="bi bi-fire me-2"></i>LIQUIDITY HEATMAP</h6>
@@ -1125,6 +1184,97 @@
         // Poll protections every 15s
         setInterval(loadProtections, 15000);
         loadProtections();
+
+        // ==========================================
+        // ADVANCED ORDERS (TWAP, SNIPER, SCALED)
+        // ==========================================
+        async function sendTwap(side) {
+            const pair = chartPair;
+            if (!pair) return alert('Select a pair first.');
+            const total_usd = document.getElementById('twap-usd').value;
+            const slices = document.getElementById('twap-slices').value;
+            const duration_min = document.getElementById('twap-duration').value;
+            if (!total_usd) return alert('Enter USD amount.');
+            try {
+                const res = await fetch('/api/twap', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pair, side, total_usd, slices, duration_min }) });
+                const d = await res.json();
+                alert(d.message || d.error);
+                document.getElementById('twap-usd').value = '';
+                loadAdvancedOrders();
+            } catch (e) { alert('Network error.'); }
+        }
+
+        async function sendSniper(side) {
+            const pair = chartPair;
+            if (!pair) return alert('Select a pair first.');
+            const trigger_price = document.getElementById('sniper-price').value;
+            const amount = document.getElementById('sniper-amt').value;
+            const direction = document.getElementById('sniper-dir').value;
+            if (!trigger_price || !amount) return alert('Enter trigger price and amount.');
+            try {
+                const res = await fetch('/api/sniper', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pair, side, trigger_price, amount, direction }) });
+                const d = await res.json();
+                alert(d.message || d.error);
+                document.getElementById('sniper-price').value = '';
+                document.getElementById('sniper-amt').value = '';
+                loadAdvancedOrders();
+            } catch (e) { alert('Network error.'); }
+        }
+
+        async function sendScaled(side) {
+            const pair = chartPair;
+            if (!pair) return alert('Select a pair first.');
+            const price_from = document.getElementById('scaled-from').value;
+            const price_to = document.getElementById('scaled-to').value;
+            const num_orders = document.getElementById('scaled-num').value;
+            const total_usd = document.getElementById('scaled-usd').value;
+            if (!price_from || !price_to || !total_usd) return alert('Fill in price range and USD amount.');
+            try {
+                const res = await fetch('/api/scaled', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pair, side, price_from, price_to, num_orders, total_usd }) });
+                const d = await res.json();
+                alert(d.message || d.error);
+                document.getElementById('scaled-from').value = '';
+                document.getElementById('scaled-to').value = '';
+                document.getElementById('scaled-usd').value = '';
+                loadAllOrders();
+            } catch (e) { alert('Network error.'); }
+        }
+
+        async function loadAdvancedOrders() {
+            try {
+                const res = await fetch('/api/advanced_orders');
+                const items = await res.json();
+                const el = document.getElementById('adv-orders-list');
+                if (!items.length) { el.innerHTML = '<span class="text-muted">None active</span>'; return; }
+                el.innerHTML = items.map(o => {
+                    if (o.type === 'TWAP') {
+                        return `<div class="d-flex justify-content-between align-items-center py-1 border-bottom border-secondary">
+                            <div><span class="badge bg-primary me-1" style="font-size:0.55rem;">TWAP</span>
+                            ${o.pair} ${o.side} $${o.total_usd} <span class="text-muted">${o.progress}</span></div>
+                            <button class="btn btn-outline-danger btn-sm py-0 px-1" style="font-size:0.55rem;" onclick="cancelAdvanced('twap','${o.id}')">X</button>
+                        </div>`;
+                    } else {
+                        return `<div class="d-flex justify-content-between align-items-center py-1 border-bottom border-secondary">
+                            <div><span class="badge bg-warning text-dark me-1" style="font-size:0.55rem;">SNIPE</span>
+                            ${o.pair} ${o.side} @ $${Number(o.trigger).toLocaleString()} (${o.direction})</div>
+                            <button class="btn btn-outline-danger btn-sm py-0 px-1" style="font-size:0.55rem;" onclick="cancelAdvanced('sniper','${o.id}')">X</button>
+                        </div>`;
+                    }
+                }).join('');
+            } catch (e) { console.error('Advanced orders error:', e); }
+        }
+
+        async function cancelAdvanced(type, id) {
+            try {
+                const res = await fetch(`/api/${type}/cancel`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id }) });
+                const d = await res.json();
+                if (d.success) loadAdvancedOrders();
+                else alert(d.error);
+            } catch (e) { alert('Network error.'); }
+        }
+
+        setInterval(loadAdvancedOrders, 15000);
+        loadAdvancedOrders();
 
         // ==========================================
         // TP/SL FUNCTIONS
