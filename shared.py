@@ -12,7 +12,8 @@ MANUAL_SPOT_ENTRIES = {
     "ETH": 3000.00    
 }
 
-TRAILING_STOPS = {} 
+TRAILING_STOPS = {}   # {pair: {side, trail_pct, highest_price/lowest_price, size, entry_price}}
+BRACKET_ORDERS = {}   # {pair: {size, side, entry_price, tp_price, sl_price, tp_oid, sl_oid}}
 REBALANCE_TARGETS = {}
 SCREENER_DATA = []
 

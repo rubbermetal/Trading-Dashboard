@@ -240,12 +240,23 @@
                                 <div class="col-6"><button class="btn btn-danger btn-sm w-100 fw-bold py-2" onclick="sendEmbeddedOrder('SELL')">SELL</button></div>
                             </div>
                             <div class="border-top border-secondary pt-2">
-                                <label class="small text-warning-custom fw-bold mb-1" style="font-size:0.65rem;"><i class="bi bi-activity"></i> TRAILING STOP (%)</label>
-                                <div class="input-group input-group-sm">
-                                    <input type="number" id="trade-trail-pct" class="form-control bg-dark border-secondary text-white" placeholder="e.g. 2.0" step="0.1">
-                                    <input type="text" id="trade-trail-size" class="form-control bg-dark border-secondary text-white" placeholder="Size" style="max-width:80px;">
+                                <label class="small text-warning-custom fw-bold mb-1" style="font-size:0.65rem;"><i class="bi bi-activity"></i> TRAILING STOP</label>
+                                <div class="input-group input-group-sm mb-1">
+                                    <select id="trade-trail-side" class="form-select bg-dark text-white border-secondary" style="max-width:70px; font-size:0.7rem;">
+                                        <option value="SELL">Long</option>
+                                        <option value="BUY">Short</option>
+                                    </select>
+                                    <input type="number" id="trade-trail-pct" class="form-control bg-dark border-secondary text-white" placeholder="%" step="0.1">
+                                    <input type="text" id="trade-trail-size" class="form-control bg-dark border-secondary text-white" placeholder="Size" style="max-width:70px;">
                                     <button class="btn btn-warning btn-sm fw-bold text-dark" onclick="sendTrailingStop()">SET</button>
                                 </div>
+                            </div>
+                            <div class="border-top border-secondary pt-2 mt-2">
+                                <div class="d-flex justify-content-between align-items-center mb-1">
+                                    <label class="small fw-bold mb-0" style="font-size:0.65rem; color:#66fcf1;"><i class="bi bi-shield-check me-1"></i>ACTIVE PROTECTIONS</label>
+                                    <span class="badge bg-secondary" id="protections-count" style="font-size:0.55rem;">0</span>
+                                </div>
+                                <div id="protections-list" style="max-height:120px; overflow-y:auto; font-size:0.65rem;"></div>
                             </div>
                         </div>
 
@@ -548,10 +559,38 @@
             <div class="modal-content card-custom p-4 shadow-lg">
                 <div class="text-center">
                     <h4 class="fw-bold mb-0 text-warning-custom">Manage Targets</h4>
-                    <p id="tpsl-pair" class="text-muted small mb-4"></p>
-                    <div class="mb-3 text-start"><label class="small text-success-custom fw-bold mb-1">TAKE PROFIT PRICE</label><input type="number" id="tp-price" class="form-control bg-dark border-secondary text-white" step="any"></div>
-                    <div class="mb-4 text-start"><label class="small text-danger-custom fw-bold mb-1">STOP LOSS PRICE</label><input type="number" id="sl-price" class="form-control bg-dark border-secondary text-white" step="any"></div>
-                    <button class="btn btn-primary w-100 py-3 fw-bold" onclick="submitTPSL()">SET TARGETS</button>
+                    <p id="tpsl-pair" class="text-muted small mb-3"></p>
+                    <div class="mb-2 text-start">
+                        <label class="small text-success-custom fw-bold mb-1">TAKE PROFIT PRICE</label>
+                        <input type="number" id="tp-price" class="form-control bg-dark border-secondary text-white" step="any">
+                        <div class="mt-1">
+                            <span class="badge bg-success bg-opacity-25 text-success-custom me-1" role="button" style="cursor:pointer; font-size:0.6rem;" onclick="setTPByPct(1)">+1%</span>
+                            <span class="badge bg-success bg-opacity-25 text-success-custom me-1" role="button" style="cursor:pointer; font-size:0.6rem;" onclick="setTPByPct(2)">+2%</span>
+                            <span class="badge bg-success bg-opacity-25 text-success-custom me-1" role="button" style="cursor:pointer; font-size:0.6rem;" onclick="setTPByPct(5)">+5%</span>
+                            <span class="badge bg-success bg-opacity-25 text-success-custom me-1" role="button" style="cursor:pointer; font-size:0.6rem;" onclick="setTPByPct(10)">+10%</span>
+                            <span class="badge bg-info bg-opacity-25 text-info me-1" role="button" style="cursor:pointer; font-size:0.6rem;" onclick="setTPByRR(2)">2R</span>
+                            <span class="badge bg-info bg-opacity-25 text-info" role="button" style="cursor:pointer; font-size:0.6rem;" onclick="setTPByRR(3)">3R</span>
+                        </div>
+                    </div>
+                    <div class="mb-2 text-start">
+                        <label class="small text-danger-custom fw-bold mb-1">STOP LOSS PRICE</label>
+                        <input type="number" id="sl-price" class="form-control bg-dark border-secondary text-white" step="any">
+                        <div class="mt-1">
+                            <span class="badge bg-danger bg-opacity-25 text-danger-custom me-1" role="button" style="cursor:pointer; font-size:0.6rem;" onclick="setSLByPct(1)">-1%</span>
+                            <span class="badge bg-danger bg-opacity-25 text-danger-custom me-1" role="button" style="cursor:pointer; font-size:0.6rem;" onclick="setSLByPct(2)">-2%</span>
+                            <span class="badge bg-danger bg-opacity-25 text-danger-custom me-1" role="button" style="cursor:pointer; font-size:0.6rem;" onclick="setSLByPct(5)">-5%</span>
+                            <span class="badge bg-danger bg-opacity-25 text-danger-custom" role="button" style="cursor:pointer; font-size:0.6rem;" onclick="setSLByPct(10)">-10%</span>
+                        </div>
+                    </div>
+                    <div class="mb-3 text-start">
+                        <label class="small text-muted fw-bold mb-1" style="font-size:0.6rem;">MODE</label>
+                        <select id="tpsl-mode" class="form-select form-select-sm bg-dark text-white border-secondary" style="font-size:0.7rem;">
+                            <option value="exchange">Exchange Orders (TP limit + SL stop-limit)</option>
+                            <option value="bracket">Software Bracket (OCO, monitored locally)</option>
+                        </select>
+                    </div>
+                    <button class="btn btn-primary w-100 py-2 fw-bold" onclick="submitTPSL()">SET TARGETS</button>
+                    <button class="btn btn-outline-warning btn-sm w-100 mt-2" onclick="moveToBreakeven()">MOVE SL TO BREAK-EVEN</button>
                 </div>
             </div>
         </div>
@@ -619,7 +658,7 @@
     <script src="https://unpkg.com/lightweight-charts@4.1.1/dist/lightweight-charts.standalone.production.js"></script>
 
     <script>
-        let currentData = { positions: [], history: [], total_value: 0.0, rebalance: [], rebalance_configured: false, trails: [], free_usd: 0.0, bot_locked_usd: 0.0 };
+        let currentData = { positions: [], history: [], total_value: 0.0, rebalance: [], rebalance_configured: false, trails: [], brackets: [], free_usd: 0.0, bot_locked_usd: 0.0 };
         let indicatorState = {};
 
         // Active pair state (tied to chart)
@@ -947,39 +986,149 @@
             const pair = chartPair;
             const pct = document.getElementById('trade-trail-pct').value;
             const size = document.getElementById('trade-trail-size').value;
+            const side = document.getElementById('trade-trail-side').value;
             if (!pct || !size) return alert('Enter trail % and position size.');
             try {
-                const res = await fetch('/api/trail', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pair, pct, size, cur_px: activePairPrice }) });
+                const res = await fetch('/api/trail', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pair, pct, size, side, cur_px: activePairPrice }) });
                 const d = await res.json();
                 alert(d.message || d.error);
                 document.getElementById('trade-trail-pct').value = '';
                 document.getElementById('trade-trail-size').value = '';
-                refresh();
+                refresh(); loadProtections();
             } catch (e) { alert('Network error.'); }
         }
 
         // ==========================================
+        // ACTIVE PROTECTIONS PANEL
+        // ==========================================
+        async function loadProtections() {
+            try {
+                const res = await fetch('/api/protections');
+                const items = await res.json();
+                const el = document.getElementById('protections-list');
+                document.getElementById('protections-count').innerText = items.length;
+                if (!items.length) { el.innerHTML = '<span class="text-muted">None active</span>'; return; }
+                let html = '';
+                items.forEach(p => {
+                    if (p.type === 'TRAIL') {
+                        const dir = p.side === 'SELL' ? 'Long' : 'Short';
+                        html += `<div class="d-flex justify-content-between align-items-center py-1 border-bottom border-secondary">
+                            <div><span class="badge bg-warning text-dark me-1" style="font-size:0.55rem;">TRAIL</span>
+                            <span class="text-white">${p.pair}</span> <span class="text-muted">${dir} ${p.pct}%</span>
+                            <span class="text-muted ms-1">trig $${Number(p.trigger).toLocaleString()}</span></div>
+                            <button class="btn btn-outline-danger btn-sm py-0 px-1" style="font-size:0.55rem;" onclick="cancelProtection('${p.pair}','TRAIL')">X</button>
+                        </div>`;
+                    } else {
+                        const parts = [];
+                        if (p.tp_price) parts.push(`<span class="text-success-custom">TP $${Number(p.tp_price).toLocaleString()}</span>`);
+                        if (p.sl_price) parts.push(`<span class="text-danger-custom">SL $${Number(p.sl_price).toLocaleString()}</span>`);
+                        html += `<div class="d-flex justify-content-between align-items-center py-1 border-bottom border-secondary">
+                            <div><span class="badge bg-info text-dark me-1" style="font-size:0.55rem;">OCO</span>
+                            <span class="text-white">${p.pair}</span> ${parts.join(' / ')}
+                            <span class="text-muted ms-1">entry $${Number(p.entry_price).toLocaleString()}</span></div>
+                            <div>
+                                <button class="btn btn-outline-warning btn-sm py-0 px-1 me-1" style="font-size:0.55rem;" onclick="breakeven('${p.pair}')" title="Move SL to break-even">BE</button>
+                                <button class="btn btn-outline-danger btn-sm py-0 px-1" style="font-size:0.55rem;" onclick="cancelProtection('${p.pair}','BRACKET')">X</button>
+                            </div>
+                        </div>`;
+                    }
+                });
+                el.innerHTML = html;
+            } catch (e) { console.error('Protections load error:', e); }
+        }
+
+        async function cancelProtection(pair, type) {
+            try {
+                const res = await fetch('/api/protections/cancel', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pair, type }) });
+                const d = await res.json();
+                if (d.success) loadProtections();
+                else alert(d.error);
+            } catch (e) { alert('Network error.'); }
+        }
+
+        async function breakeven(pair) {
+            try {
+                const res = await fetch('/api/protections/breakeven', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pair }) });
+                const d = await res.json();
+                alert(d.message || d.error);
+                loadProtections();
+            } catch (e) { alert('Network error.'); }
+        }
+
+        // Poll protections every 15s
+        setInterval(loadProtections, 15000);
+        loadProtections();
+
+        // ==========================================
         // TP/SL FUNCTIONS
         // ==========================================
-        let tpslPair = '', tpslSize = '', tpslSide = '', tpslType = '';
+        let tpslPair = '', tpslSize = '', tpslSide = '', tpslType = '', tpslEntryPrice = 0;
 
-        function openTPSL(pair, size, side, type) {
+        function openTPSL(pair, size, side, type, entryPrice) {
             tpslPair = pair; tpslSize = size; tpslSide = side; tpslType = type;
-            document.getElementById('tpsl-pair').innerText = `${pair} -- ${size} units (${side})`;
+            tpslEntryPrice = parseFloat(entryPrice) || activePairPrice || 0;
+            document.getElementById('tpsl-pair').innerText = `${pair} -- ${size} units (${side}) @ $${Number(tpslEntryPrice).toLocaleString()}`;
             document.getElementById('tp-price').value = '';
             document.getElementById('sl-price').value = '';
             tpslModal.show();
+        }
+
+        function setTPByPct(pct) {
+            if (!tpslEntryPrice) return;
+            const mult = tpslSide === 'BUY' || tpslSide === 'LONG' ? 1 : -1;
+            document.getElementById('tp-price').value = (tpslEntryPrice * (1 + mult * pct / 100)).toFixed(6);
+        }
+
+        function setSLByPct(pct) {
+            if (!tpslEntryPrice) return;
+            const mult = tpslSide === 'BUY' || tpslSide === 'LONG' ? 1 : -1;
+            document.getElementById('sl-price').value = (tpslEntryPrice * (1 - mult * pct / 100)).toFixed(6);
+        }
+
+        function setTPByRR(rr) {
+            const sl = parseFloat(document.getElementById('sl-price').value);
+            if (!sl || !tpslEntryPrice) return alert('Set a stop loss first to use R:R.');
+            const risk = Math.abs(tpslEntryPrice - sl);
+            const mult = tpslSide === 'BUY' || tpslSide === 'LONG' ? 1 : -1;
+            document.getElementById('tp-price').value = (tpslEntryPrice + mult * risk * rr).toFixed(6);
+        }
+
+        async function moveToBreakeven() {
+            if (!tpslPair) return;
+            // If there's already a bracket, use the API
+            try {
+                const res = await fetch('/api/protections/breakeven', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pair: tpslPair }) });
+                const d = await res.json();
+                if (d.success) { alert(d.message); tpslModal.hide(); loadProtections(); }
+                else {
+                    // No bracket yet — just fill the SL field with entry price
+                    document.getElementById('sl-price').value = tpslEntryPrice;
+                }
+            } catch (e) { document.getElementById('sl-price').value = tpslEntryPrice; }
         }
 
         async function submitTPSL() {
             const tp = document.getElementById('tp-price').value;
             const sl = document.getElementById('sl-price').value;
             if (!tp && !sl) return alert('Set at least one target.');
+            const mode = document.getElementById('tpsl-mode').value;
+
             try {
-                const res = await fetch('/api/tpsl', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pair: tpslPair, size: tpslSize, side: tpslSide, type: tpslType, tp_price: tp || null, sl_price: sl || null }) });
-                const d = await res.json();
-                alert(d.message || d.error);
-                tpslModal.hide(); refresh(); loadAllOrders();
+                if (mode === 'bracket') {
+                    // Software-managed OCO bracket
+                    const res = await fetch('/api/bracket', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
+                        pair: tpslPair, size: tpslSize, side: tpslSide, entry_price: tpslEntryPrice,
+                        tp_price: tp || null, sl_price: sl || null
+                    })});
+                    const d = await res.json();
+                    alert(d.message || d.error);
+                } else {
+                    // Exchange-native TP/SL
+                    const res = await fetch('/api/tpsl', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pair: tpslPair, size: tpslSize, side: tpslSide, type: tpslType, tp_price: tp || null, sl_price: sl || null }) });
+                    const d = await res.json();
+                    alert(d.message || d.error);
+                }
+                tpslModal.hide(); refresh(); loadAllOrders(); loadProtections();
             } catch (e) { alert('Network error.'); }
         }
 
@@ -1610,11 +1759,12 @@
                 let liqHtml = i.liquidation !== 'N/A' ? `<div class="text-center"><small class="text-warning-custom d-block small" style="font-size:0.7rem; text-transform:uppercase;">Liq Price</small><span class="fw-bold text-warning-custom">${i.liquidation}</span></div>` : '<div></div>';
                 let pnlHtml = i.pnl ? `<div class="text-end"><small class="text-muted d-block small" style="font-size:0.7rem; text-transform:uppercase;">P&L</small><span class="${i.pnl.includes('-') ? 'text-danger-custom' : 'text-success-custom'} fw-bold">${i.pnl}</span></div>` : '<div class="text-end"></div>';
                 let trailBadge = currentData.trails.includes(tradePair) ? `<span class="badge bg-warning text-dark border border-warning position-absolute top-0 end-0 m-2" style="font-size:0.5rem;"><i class="bi bi-activity"></i> TRAILING</span>` : '';
+                let bracketBadge = (currentData.brackets || []).includes(tradePair) ? `<span class="badge bg-info text-dark border border-info position-absolute top-0 ${trailBadge ? 'end-0 me-5' : 'end-0'} m-2" style="font-size:0.5rem;"><i class="bi bi-shield-check"></i> OCO</span>` : '';
 
                 return `
                     <div class="col-12 col-md-12 col-lg-6">
                         <div class="card card-custom p-3 shadow-sm h-100 d-flex flex-column position-relative">
-                            ${trailBadge}
+                            ${trailBadge}${bracketBadge}
                             <div class="d-flex justify-content-between align-items-start mb-3 border-bottom border-secondary pb-2">
                                 <div><h5 class="mb-0 fw-bold" style="color:#66fcf1;">${i.asset}</h5><span class="badge bg-dark border border-secondary mt-1" style="font-size:0.6rem">${i.type}</span></div>
                                 <div class="text-end"><h5 class="mb-0 fw-bold">$${i.usd_value.toLocaleString(undefined, { minimumFractionDigits: 2 })}</h5><span class="badge ${i.side === 'LONG' ? 'bg-success text-dark' : i.side === 'SHORT' ? 'bg-danger text-white' : 'bg-secondary'} mt-1" style="font-size:0.6rem">${i.side || 'N/A'}</span></div>
@@ -1629,7 +1779,7 @@
                                 ${liqHtml}${pnlHtml}
                             </div>
                             <div class="d-flex justify-content-between gap-2 mt-auto">
-                                <button class="btn btn-sm btn-outline-warning rounded-pill flex-grow-1" style="font-size:0.75rem;" onclick="openTPSL('${tradePair}','${i.size}','${i.side}','${i.type}')">TP/SL</button>
+                                <button class="btn btn-sm btn-outline-warning rounded-pill flex-grow-1" style="font-size:0.75rem;" onclick="openTPSL('${tradePair}','${i.size}','${i.side}','${i.type}','${i.entry_price}')">TP/SL</button>
                                 <button class="btn btn-sm btn-outline-primary rounded-pill flex-grow-1" style="font-size:0.75rem;" onclick="loadPairOnChart('${tradePair}',${i.price},'${i.type}')">TRADE</button>
                                 <button class="btn btn-sm btn-danger rounded-pill flex-grow-1" style="font-size:0.75rem;" onclick="closePos('${tradePair}','${i.size}','${i.side}','${i.type}')">CLOSE</button>
                             </div>

@@ -1,6 +1,6 @@
 import uuid, time
 from flask import Blueprint, jsonify, request
-from shared import client, MANUAL_SPOT_ENTRIES, REBALANCE_TARGETS, TRAILING_STOPS, ACTIVE_BOTS
+from shared import client, MANUAL_SPOT_ENTRIES, REBALANCE_TARGETS, TRAILING_STOPS, BRACKET_ORDERS, ACTIVE_BOTS
 
 portfolio_bp = Blueprint('portfolio', __name__)
 
@@ -191,6 +191,7 @@ def api_data():
         rebalance_configured=bool(REBALANCE_TARGETS),
         current_targets={k: v*100 for k,v in REBALANCE_TARGETS.items()},
         trails=list(TRAILING_STOPS.keys()),
+        brackets=list(BRACKET_ORDERS.keys()),
         free_usd=free_usd,
         bot_locked_usd=bot_locked_usd
     )

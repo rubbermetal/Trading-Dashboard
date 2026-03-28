@@ -3,30 +3,89 @@ from decimal import Decimal, ROUND_DOWN
 import pandas as pd
 import pandas_ta as ta
 from flask import Blueprint, jsonify, request
-from shared import client, TRAILING_STOPS
+from shared import client, TRAILING_STOPS, BRACKET_ORDERS
 from bot_utils import snap_to_increment
 
 trading_bp = Blueprint('trading', __name__)
 
+# ==========================================
+# BACKGROUND WATCHERS
+# ==========================================
 def background_watcher():
-    """Checks active trailing stops every 10 seconds."""
+    """Monitors trailing stops and bracket orders every 10 seconds."""
     while True:
         try:
+            # --- Trailing Stops ---
             for pair, data in list(TRAILING_STOPS.items()):
-                p = client.get_product(product_id=pair)
-                cur_px = float(p.price)
-                if cur_px > data['highest_price']:
-                    TRAILING_STOPS[pair]['highest_price'] = cur_px
-                
-                trigger_px = data['highest_price'] * (1 - data['trail_pct'])
-                if cur_px <= trigger_px:
-                    client.market_order_sell(client_order_id=str(uuid.uuid4()), product_id=pair, base_size=data['size'])
-                    del TRAILING_STOPS[pair]
-        except Exception as e: pass
+                try:
+                    p = client.get_product(product_id=pair)
+                    cur_px = float(p.price)
+                    side = data.get('side', 'SELL')
+
+                    if side == 'SELL':
+                        # Long trailing stop — tracks highest price, triggers on drop
+                        if cur_px > data['highest_price']:
+                            TRAILING_STOPS[pair]['highest_price'] = cur_px
+                        trigger_px = data['highest_price'] * (1 - data['trail_pct'])
+                        if cur_px <= trigger_px:
+                            client.market_order_sell(client_order_id=str(uuid.uuid4()), product_id=pair, base_size=data['size'])
+                            del TRAILING_STOPS[pair]
+                            print(f"[TRAIL] {pair} SELL triggered @ {cur_px:.2f} (peak {data['highest_price']:.2f})")
+                    else:
+                        # Short trailing stop — tracks lowest price, triggers on rise
+                        if cur_px < data.get('lowest_price', cur_px):
+                            TRAILING_STOPS[pair]['lowest_price'] = cur_px
+                        trigger_px = data.get('lowest_price', cur_px) * (1 + data['trail_pct'])
+                        if cur_px >= trigger_px:
+                            client.market_order_buy(client_order_id=str(uuid.uuid4()), product_id=pair, quote_size=str(float(data['size']) * cur_px))
+                            del TRAILING_STOPS[pair]
+                            print(f"[TRAIL] {pair} BUY triggered @ {cur_px:.2f} (trough {data.get('lowest_price', 0):.2f})")
+                except Exception as e:
+                    print(f"[TRAIL] Error checking {pair}: {e}")
+
+            # --- Bracket Orders (software OCO) ---
+            for pair, bkt in list(BRACKET_ORDERS.items()):
+                try:
+                    p = client.get_product(product_id=pair)
+                    cur_px = float(p.price)
+                    side = bkt.get('side', 'BUY')  # side of the original entry
+                    hit = None
+
+                    if side == 'BUY':
+                        # Long bracket: TP above, SL below
+                        if bkt.get('tp_price') and cur_px >= bkt['tp_price']:
+                            hit = 'TP'
+                        elif bkt.get('sl_price') and cur_px <= bkt['sl_price']:
+                            hit = 'SL'
+                    else:
+                        # Short bracket: TP below, SL above
+                        if bkt.get('tp_price') and cur_px <= bkt['tp_price']:
+                            hit = 'TP'
+                        elif bkt.get('sl_price') and cur_px >= bkt['sl_price']:
+                            hit = 'SL'
+
+                    if hit:
+                        exit_side = 'SELL' if side == 'BUY' else 'BUY'
+                        oid = str(uuid.uuid4())
+                        if exit_side == 'SELL':
+                            client.market_order_sell(client_order_id=oid, product_id=pair, base_size=bkt['size'])
+                        else:
+                            client.market_order_buy(client_order_id=oid, product_id=pair, quote_size=str(float(bkt['size']) * cur_px))
+                        pnl = (cur_px - bkt['entry_price']) * float(bkt['size']) if side == 'BUY' else (bkt['entry_price'] - cur_px) * float(bkt['size'])
+                        print(f"[BRACKET] {pair} {hit} hit @ {cur_px:.2f} | entry {bkt['entry_price']:.2f} | PnL ${pnl:.2f}")
+                        del BRACKET_ORDERS[pair]
+                except Exception as e:
+                    print(f"[BRACKET] Error checking {pair}: {e}")
+
+        except Exception as e:
+            print(f"[WATCHER] Top-level error: {e}")
         time.sleep(10)
 
 threading.Thread(target=background_watcher, daemon=True).start()
 
+# ==========================================
+# SEARCH
+# ==========================================
 @trading_bp.route('/api/search/<symbol>')
 def search(symbol):
     s = symbol.upper()
@@ -37,6 +96,9 @@ def search(symbol):
         except: continue
     return jsonify({"success": False, "error": "Not Found"})
 
+# ==========================================
+# TRADE EXECUTION
+# ==========================================
 @trading_bp.route('/api/trade', methods=['POST'])
 def trade():
     d = request.json
@@ -52,7 +114,6 @@ def trade():
             if side == 'BUY': client.market_order_buy(client_order_id=oid, product_id=pair, quote_size=amt)
             else: client.market_order_sell(client_order_id=oid, product_id=pair, base_size=amt)
         elif o_type == 'MAKER_LIMIT':
-            # Place a limit order 1 tick inside the spread to guarantee maker fees
             product = client.get_product(product_id=pair)
             quote_inc = product.quote_increment
             base_inc = product.base_increment
@@ -61,15 +122,12 @@ def trade():
             best_ask = float(book.pricebook.asks[0].price)
 
             if side == 'BUY':
-                # Post at best_bid — sits on the bid, maker
                 limit_px = best_bid
                 str_price = snap_to_increment(limit_px, quote_inc)
-                # Convert USD amount to base units
                 base_qty = float(amt) / limit_px
                 str_qty = snap_to_increment(base_qty, base_inc)
                 client.limit_order_buy(client_order_id=oid, product_id=pair, base_size=str_qty, limit_price=str_price)
             else:
-                # Post at best_ask — sits on the ask, maker
                 limit_px = best_ask
                 str_price = snap_to_increment(limit_px, quote_inc)
                 str_qty = snap_to_increment(float(amt), base_inc)
@@ -82,6 +140,9 @@ def trade():
         return jsonify({"success": True, "message": "Order Submitted"})
     except Exception as e: return jsonify({"success": False, "error": str(e)})
 
+# ==========================================
+# TP / SL
+# ==========================================
 @trading_bp.route('/api/tpsl', methods=['POST'])
 def handle_tpsl():
     d = request.json
@@ -89,56 +150,175 @@ def handle_tpsl():
         pair, size, tp_price, sl_price = d['pair'], str(d['size']), d.get('tp_price'), d.get('sl_price')
         side = 'SELL' if d.get('side') == 'BUY' or d.get('type') == 'SPOT' else 'BUY'
         msgs = []
-        
+
         if tp_price:
             tp_oid = str(uuid.uuid4())
             if side == 'SELL': client.limit_order_sell(client_order_id=tp_oid, product_id=pair, base_size=size, limit_price=str(tp_price))
             else: client.limit_order_buy(client_order_id=tp_oid, product_id=pair, base_size=size, limit_price=str(tp_price))
             msgs.append("TP Set")
-            
+
         if sl_price:
             sl_oid = str(uuid.uuid4())
             direction = 'STOP_DIRECTION_STOP_DOWN' if side == 'SELL' else 'STOP_DIRECTION_STOP_UP'
             if side == 'SELL': client.stop_limit_order_sell(client_order_id=sl_oid, product_id=pair, base_size=size, limit_price=str(sl_price), stop_price=str(sl_price), stop_direction=direction)
             else: client.stop_limit_order_buy(client_order_id=sl_oid, product_id=pair, base_size=size, limit_price=str(sl_price), stop_price=str(sl_price), stop_direction=direction)
             msgs.append("SL Set")
-            
+
         if not msgs: return jsonify({"success": False, "error": "No prices provided."})
         return jsonify({"success": True, "message": " & ".join(msgs) + " Successfully!"})
     except Exception as e: return jsonify({"success": False, "error": str(e)})
 
+# ==========================================
+# BRACKET ORDER (software OCO: TP + SL on entry)
+# ==========================================
+@trading_bp.route('/api/bracket', methods=['POST'])
+def set_bracket():
+    """Attach a TP and/or SL to a position. Monitored software-side as OCO."""
+    d = request.json
+    try:
+        pair = d['pair']
+        size = str(d['size'])
+        side = d.get('side', 'BUY')
+        entry_price = float(d['entry_price'])
+        tp_price = float(d['tp_price']) if d.get('tp_price') else None
+        sl_price = float(d['sl_price']) if d.get('sl_price') else None
+
+        if not tp_price and not sl_price:
+            return jsonify(success=False, error="Set at least TP or SL.")
+
+        BRACKET_ORDERS[pair] = {
+            'size': size,
+            'side': side,
+            'entry_price': entry_price,
+            'tp_price': tp_price,
+            'sl_price': sl_price,
+            'created': time.time()
+        }
+
+        parts = []
+        if tp_price: parts.append(f"TP @ ${tp_price:,.2f}")
+        if sl_price: parts.append(f"SL @ ${sl_price:,.2f}")
+        return jsonify(success=True, message=f"Bracket set: {' / '.join(parts)}")
+    except Exception as e:
+        return jsonify(success=False, error=str(e))
+
+# ==========================================
+# TRAILING STOP
+# ==========================================
 @trading_bp.route('/api/trail', methods=['POST'])
 def set_trail():
     d = request.json
     try:
-        TRAILING_STOPS[d['pair']] = {"side": "SELL", "trail_pct": float(d['pct'])/100, "highest_price": float(d['cur_px']), "size": d['size']}
-        return jsonify(success=True, message="Trailing Stop Activated")
-    except Exception as e: return jsonify(success=False, error=str(e))
+        pair = d['pair']
+        side = d.get('side', 'SELL')
+        cur_px = float(d['cur_px'])
+        entry = {
+            'side': side,
+            'trail_pct': float(d['pct']) / 100,
+            'size': d['size'],
+            'entry_price': cur_px
+        }
+        if side == 'SELL':
+            entry['highest_price'] = cur_px
+        else:
+            entry['lowest_price'] = cur_px
 
+        TRAILING_STOPS[pair] = entry
+        return jsonify(success=True, message=f"Trailing stop ({d['pct']}%) activated for {pair}")
+    except Exception as e:
+        return jsonify(success=False, error=str(e))
+
+# ==========================================
+# ACTIVE PROTECTIONS STATUS & CANCEL
+# ==========================================
+@trading_bp.route('/api/protections')
+def get_protections():
+    """Return all active trailing stops and bracket orders for the UI."""
+    items = []
+
+    for pair, data in TRAILING_STOPS.items():
+        side = data.get('side', 'SELL')
+        if side == 'SELL':
+            peak = data.get('highest_price', 0)
+            trigger = peak * (1 - data['trail_pct'])
+        else:
+            trough = data.get('lowest_price', 0)
+            trigger = trough * (1 + data['trail_pct'])
+        items.append({
+            'type': 'TRAIL',
+            'pair': pair,
+            'side': side,
+            'size': data['size'],
+            'pct': round(data['trail_pct'] * 100, 2),
+            'peak': data.get('highest_price', data.get('lowest_price', 0)),
+            'trigger': round(trigger, 2),
+            'entry_price': data.get('entry_price', 0)
+        })
+
+    for pair, data in BRACKET_ORDERS.items():
+        items.append({
+            'type': 'BRACKET',
+            'pair': pair,
+            'side': data['side'],
+            'size': data['size'],
+            'entry_price': data['entry_price'],
+            'tp_price': data.get('tp_price'),
+            'sl_price': data.get('sl_price')
+        })
+
+    return jsonify(items)
+
+@trading_bp.route('/api/protections/cancel', methods=['POST'])
+def cancel_protection():
+    d = request.json
+    pair = d.get('pair', '')
+    ptype = d.get('type', '')
+
+    if ptype == 'TRAIL' and pair in TRAILING_STOPS:
+        del TRAILING_STOPS[pair]
+        return jsonify(success=True, message=f"Trailing stop cancelled for {pair}")
+    elif ptype == 'BRACKET' and pair in BRACKET_ORDERS:
+        del BRACKET_ORDERS[pair]
+        return jsonify(success=True, message=f"Bracket order cancelled for {pair}")
+    return jsonify(success=False, error="Protection not found.")
+
+@trading_bp.route('/api/protections/breakeven', methods=['POST'])
+def move_to_breakeven():
+    """Move a bracket order's SL to entry price (break-even)."""
+    d = request.json
+    pair = d.get('pair', '')
+    if pair in BRACKET_ORDERS:
+        BRACKET_ORDERS[pair]['sl_price'] = BRACKET_ORDERS[pair]['entry_price']
+        return jsonify(success=True, message=f"SL moved to break-even @ ${BRACKET_ORDERS[pair]['entry_price']:,.2f}")
+    return jsonify(success=False, error="No bracket order found for this pair.")
+
+# ==========================================
+# INDICATORS
+# ==========================================
 @trading_bp.route('/api/indicators/<pair>')
 def get_indicators(pair):
     try:
         end_ts = int(time.time())
-        start_ts = end_ts - (150 * 3600) 
+        start_ts = end_ts - (150 * 3600)
         try:
             res = client.get(f"/api/v3/brokerage/products/{pair}/candles", params={"start": str(start_ts), "end": str(end_ts), "granularity": "ONE_HOUR"})
             candle_data = res.get('candles', [])
         except: return jsonify({"rsi": "API Err", "trend": "API Err", "macd": "API Err", "debug": "Fetch failed"})
-            
+
         if not candle_data or len(candle_data) < 15: return jsonify({"rsi": "No Data", "trend": "No Data", "macd": "No Data", "debug": "Not enough candles."})
-            
+
         parsed = [{'start': c.get('start'), 'close': float(c.get('close', 0))} for c in candle_data]
         df = pd.DataFrame(parsed).sort_values('start').reset_index(drop=True)
-        
+
         rsi_val = ta.rsi(df['close'], length=14).dropna().iloc[-1]
         sma_val = ta.sma(df['close'], length=50).dropna().iloc[-1]
         macd_df = ta.macd(df['close'])
-        
+
         last_px = df['close'].iloc[-1]
-        
+
         rsi_status = "Bullish" if rsi_val < 30 else "Bearish" if rsi_val > 70 else "Neutral"
         trend_status = "Bullish" if last_px > sma_val else "Bearish"
         macd_status = "Bullish" if macd_df is not None and macd_df.iloc[:, 0].dropna().iloc[-1] > macd_df.iloc[:, 2].dropna().iloc[-1] else "Bearish"
-            
+
         return jsonify({"rsi": rsi_status, "trend": trend_status, "macd": macd_status, "debug": ""})
     except Exception as e: return jsonify({"rsi": "Err", "trend": "Err", "macd": "Err", "debug": str(e)})
