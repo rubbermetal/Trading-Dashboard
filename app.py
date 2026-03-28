@@ -18,8 +18,12 @@ app.register_blueprint(bot_manager_bp)
 app.register_blueprint(scanner_bp)
 app.register_blueprint(equity_bp)
 
+@app.route('/mobile')
+def mobile():
+    return render_template('mobile.html')
+
 @app.route('/')
-def home(): 
+def home():
     response = app.make_response(render_template('index.html'))
     response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
     response.headers['Pragma'] = 'no-cache'

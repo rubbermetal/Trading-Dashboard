@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="en" data-bs-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Trading Dashboard - Mobile</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet">
+    <style>
+        body { background: #0b0c10; color: #c5c6c7; font-size: 0.85rem; padding-bottom: 60px; }
+        .card-m { background: #1a1c23; border: 1px solid #2a2d35; border-radius: 8px; }
+        .text-cyan { color: #66fcf1; }
+        .text-green { color: #00d578; }
+        .text-red { color: #ff4b5c; }
+        .nav-bottom { position: fixed; bottom: 0; left: 0; right: 0; background: #1a1c23; border-top: 1px solid #333; z-index: 100; }
+        .nav-bottom .btn { font-size: 0.65rem; color: #c5c6c7; }
+        .nav-bottom .btn.active { color: #66fcf1; }
+    </style>
+</head>
+<body>
+    <div class="container-fluid px-3 pt-2">
+        <!-- Header -->
+        <div class="d-flex justify-content-between align-items-center mb-3">
+            <h6 class="fw-bold text-cyan mb-0"><i class="bi bi-speedometer2 me-1"></i> Dashboard</h6>
+            <span class="text-muted" style="font-size:0.65rem;" id="last-update"></span>
+        </div>
+
+        <!-- Portfolio Summary -->
+        <div class="card-m p-3 mb-3">
+            <small class="text-muted">TOTAL VALUE</small>
+            <h3 class="fw-bold mb-1" id="total-value">--</h3>
+            <div class="d-flex gap-3">
+                <div><small class="text-muted">Free</small> <span class="fw-bold" id="free-usd">--</span></div>
+                <div><small class="text-muted">Bot Locked</small> <span class="fw-bold" id="bot-locked">--</span></div>
+            </div>
+        </div>
+
+        <!-- Positions -->
+        <div id="section-positions">
+            <h6 class="text-muted fw-bold mb-2" style="font-size:0.75rem;">POSITIONS</h6>
+            <div id="pos-list"></div>
+        </div>
+
+        <!-- Bots -->
+        <div id="section-bots" style="display:none;">
+            <h6 class="text-muted fw-bold mb-2" style="font-size:0.75rem;">BOTS</h6>
+            <div id="bot-list"></div>
+        </div>
+
+        <!-- Protections -->
+        <div id="section-protections" style="display:none;">
+            <h6 class="text-muted fw-bold mb-2" style="font-size:0.75rem;">ACTIVE PROTECTIONS</h6>
+            <div id="prot-list"></div>
+        </div>
+    </div>
+
+    <!-- Bottom nav -->
+    <div class="nav-bottom d-flex justify-content-around py-2">
+        <button class="btn btn-sm active" onclick="showSection('positions', this)"><i class="bi bi-wallet2 d-block"></i>Positions</button>
+        <button class="btn btn-sm" onclick="showSection('bots', this)"><i class="bi bi-robot d-block"></i>Bots</button>
+        <button class="btn btn-sm" onclick="showSection('protections', this)"><i class="bi bi-shield-check d-block"></i>Protect</button>
+        <button class="btn btn-sm" onclick="refreshAll()"><i class="bi bi-arrow-clockwise d-block"></i>Refresh</button>
+    </div>
+
+    <script>
+        function showSection(name, btn) {
+            document.querySelectorAll('[id^="section-"]').forEach(s => s.style.display = 'none');
+            document.getElementById(`section-${name}`).style.display = 'block';
+            document.querySelectorAll('.nav-bottom .btn').forEach(b => b.classList.remove('active'));
+            if (btn) btn.classList.add('active');
+        }
+
+        async function loadPortfolio() {
+            try {
+                const res = await fetch('/api/data');
+                const d = await res.json();
+                document.getElementById('total-value').innerText = `$${d.total_value.toLocaleString(undefined, {minimumFractionDigits: 2})}`;
+                document.getElementById('free-usd').innerText = `$${d.free_usd.toFixed(2)}`;
+                document.getElementById('bot-locked').innerText = `$${d.bot_locked_usd.toFixed(2)}`;
+                document.getElementById('last-update').innerText = new Date().toLocaleTimeString();
+
+                const posEl = document.getElementById('pos-list');
+                if (!d.positions.length) { posEl.innerHTML = '<div class="text-muted text-center py-3">No positions</div>'; return; }
+                posEl.innerHTML = d.positions.map(p => {
+                    const pnlClass = p.pnl && p.pnl.includes('-') ? 'text-red' : 'text-green';
+                    return `<div class="card-m p-2 mb-2 d-flex justify-content-between align-items-center">
+                        <div>
+                            <span class="fw-bold text-cyan">${p.asset}</span>
+                            <span class="badge bg-dark border border-secondary ms-1" style="font-size:0.55rem;">${p.type}</span>
+                            ${p.side && p.side !== 'N/A' ? `<span class="badge ${p.side === 'LONG' ? 'bg-success' : 'bg-danger'} ms-1" style="font-size:0.55rem;">${p.side}</span>` : ''}
+                            <br><small class="text-muted">${p.size} @ $${Number(p.price).toLocaleString()}</small>
+                        </div>
+                        <div class="text-end">
+                            <span class="fw-bold">$${Number(p.usd_value).toLocaleString(undefined, {minimumFractionDigits: 2})}</span>
+                            ${p.pnl ? `<br><span class="${pnlClass} fw-bold" style="font-size:0.75rem;">${p.pnl}</span>` : ''}
+                        </div>
+                    </div>`;
+                }).join('');
+            } catch (e) { console.error(e); }
+        }
+
+        async function loadBots() {
+            try {
+                const res = await fetch('/api/bots');
+                const bots = await res.json();
+                const el = document.getElementById('bot-list');
+                if (!Object.keys(bots).length) { el.innerHTML = '<div class="text-muted text-center py-3">No bots</div>'; return; }
+                el.innerHTML = Object.entries(bots).map(([id, b]) => {
+                    const statusClass = b.status === 'RUNNING' ? 'bg-success text-dark' : 'bg-danger';
+                    const pnlClass = (b.live_pnl || 0) >= 0 ? 'text-green' : 'text-red';
+                    const dca = b.dca || {};
+                    const dcaInfo = b.strategy === 'DCA' && dca.state ? `<span class="badge bg-dark border border-secondary" style="font-size:0.5rem;">${dca.state}</span> ` : '';
+                    const paperBadge = b.paper ? '<span class="badge bg-info text-dark" style="font-size:0.5rem;">PAPER</span> ' : '';
+                    return `<div class="card-m p-2 mb-2">
+                        <div class="d-flex justify-content-between align-items-center">
+                            <div>
+                                <span class="fw-bold text-cyan">${b.pair}</span>
+                                <span class="badge bg-dark border border-secondary ms-1" style="font-size:0.55rem;">${b.strategy}</span>
+                                <span class="badge ${statusClass} ms-1" style="font-size:0.55rem;">${b.status}</span>
+                                ${paperBadge}
+                                <br>${dcaInfo}<small class="text-muted">$${(b.current_usd || 0).toFixed(2)} idle | ${b.asset_held ? Number(b.asset_held).toFixed(6) : '0'} held</small>
+                            </div>
+                            <div class="text-end">
+                                <span class="fw-bold">$${(b.net_value || 0).toFixed(2)}</span>
+                                <br><span class="${pnlClass}" style="font-size:0.75rem;">${(b.live_pnl || 0) >= 0 ? '+' : ''}$${(b.live_pnl || 0).toFixed(2)}</span>
+                            </div>
+                        </div>
+                    </div>`;
+                }).join('');
+            } catch (e) { console.error(e); }
+        }
+
+        async function loadProtections() {
+            try {
+                const res = await fetch('/api/protections');
+                const items = await res.json();
+                const el = document.getElementById('prot-list');
+                if (!items.length) { el.innerHTML = '<div class="text-muted text-center py-3">None active</div>'; return; }
+                el.innerHTML = items.map(p => {
+                    if (p.type === 'TRAIL') {
+                        return `<div class="card-m p-2 mb-2 d-flex justify-content-between">
+                            <div><span class="badge bg-warning text-dark" style="font-size:0.55rem;">TRAIL</span> ${p.pair} ${p.pct}%</div>
+                            <span class="text-muted">trig $${Number(p.trigger).toLocaleString()}</span>
+                        </div>`;
+                    } else {
+                        return `<div class="card-m p-2 mb-2 d-flex justify-content-between">
+                            <div><span class="badge bg-info text-dark" style="font-size:0.55rem;">OCO</span> ${p.pair}</div>
+                            <div>${p.tp_price ? `<span class="text-green">TP $${Number(p.tp_price).toLocaleString()}</span>` : ''} ${p.sl_price ? `<span class="text-red">SL $${Number(p.sl_price).toLocaleString()}</span>` : ''}</div>
+                        </div>`;
+                    }
+                }).join('');
+            } catch (e) { console.error(e); }
+        }
+
+        function refreshAll() {
+            loadPortfolio(); loadBots(); loadProtections();
+            // Heartbeat
+            fetch('/api/heartbeat', { method: 'POST' });
+        }
+
+        refreshAll();
+        setInterval(refreshAll, 15000);
+    </script>
+</body>
+</html>
