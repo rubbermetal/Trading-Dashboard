@@ -347,6 +347,11 @@
                                 <hr class="my-2 border-secondary">
                                 <div class="text-success" id="bids-list"></div>
                             </div>
+                            <!-- Whale Activity Feed -->
+                            <div class="mt-2 p-2 rounded" style="background: #16171d;">
+                                <small class="text-muted d-block mb-1" style="font-size:0.65rem;"><i class="bi bi-broadcast me-1"></i>WHALE ACTIVITY</small>
+                                <div id="whale-feed" style="max-height:100px; overflow-y:auto; font-size:0.6rem;"></div>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -2014,7 +2019,61 @@
                     document.getElementById('asks-list').innerHTML = bookD.asks.map(a => `<div class="book-row"><span>$${parseFloat(a.price).toLocaleString(undefined, { minimumFractionDigits: 2 })}</span><span class="text-muted">${parseFloat(a.size).toFixed(4)}</span></div>`).reverse().join('');
                     document.getElementById('bids-list').innerHTML = bookD.bids.map(b => `<div class="book-row"><span>$${parseFloat(b.price).toLocaleString(undefined, { minimumFractionDigits: 2 })}</span><span class="text-muted">${parseFloat(b.size).toFixed(4)}</span></div>`).join('');
                 }
+                    // Whale activity tracking
+                    trackWhaleActivity(bookD);
+                }
             } catch (e) { }
+        }
+
+        // Whale activity tracker
+        let prevWalls = { buy: null, sell: null };
+        let whaleLog = [];
+
+        function trackWhaleActivity(bookD) {
+            if (!bookD.walls) return;
+            const now = new Date().toLocaleTimeString();
+            const buyPx = parseFloat(bookD.walls.buy_wall_px);
+            const buySize = parseFloat(bookD.walls.buy_wall_size);
+            const sellPx = parseFloat(bookD.walls.sell_wall_px);
+            const sellSize = parseFloat(bookD.walls.sell_wall_size);
+
+            if (prevWalls.buy !== null) {
+                // Detect wall changes > 20%
+                if (prevWalls.buy.size > 0) {
+                    const buyChange = (buySize - prevWalls.buy.size) / prevWalls.buy.size;
+                    if (Math.abs(buyChange) > 0.20 || buyPx !== prevWalls.buy.px) {
+                        if (buyPx !== prevWalls.buy.px) {
+                            whaleLog.unshift({ time: now, msg: `Buy wall moved $${prevWalls.buy.px.toLocaleString()} → $${buyPx.toLocaleString()} (${buySize.toFixed(2)})`, type: 'move' });
+                        } else if (buyChange > 0.20) {
+                            whaleLog.unshift({ time: now, msg: `Buy wall grew +${(buyChange*100).toFixed(0)}% at $${buyPx.toLocaleString()} (${buySize.toFixed(2)})`, type: 'grow' });
+                        } else if (buyChange < -0.20) {
+                            whaleLog.unshift({ time: now, msg: `Buy wall shrunk ${(buyChange*100).toFixed(0)}% at $${buyPx.toLocaleString()} (${buySize.toFixed(2)})`, type: 'shrink' });
+                        }
+                    }
+                }
+                if (prevWalls.sell.size > 0) {
+                    const sellChange = (sellSize - prevWalls.sell.size) / prevWalls.sell.size;
+                    if (Math.abs(sellChange) > 0.20 || sellPx !== prevWalls.sell.px) {
+                        if (sellPx !== prevWalls.sell.px) {
+                            whaleLog.unshift({ time: now, msg: `Sell wall moved $${prevWalls.sell.px.toLocaleString()} → $${sellPx.toLocaleString()} (${sellSize.toFixed(2)})`, type: 'move' });
+                        } else if (sellChange > 0.20) {
+                            whaleLog.unshift({ time: now, msg: `Sell wall grew +${(sellChange*100).toFixed(0)}% at $${sellPx.toLocaleString()} (${sellSize.toFixed(2)})`, type: 'grow' });
+                        } else if (sellChange < -0.20) {
+                            whaleLog.unshift({ time: now, msg: `Sell wall shrunk ${(sellChange*100).toFixed(0)}% at $${sellPx.toLocaleString()} (${sellSize.toFixed(2)})`, type: 'shrink' });
+                        }
+                    }
+                }
+            }
+
+            prevWalls = { buy: { px: buyPx, size: buySize }, sell: { px: sellPx, size: sellSize } };
+            whaleLog = whaleLog.slice(0, 20); // keep last 20
+
+            const el = document.getElementById('whale-feed');
+            if (!whaleLog.length) { el.innerHTML = '<span class="text-muted">Monitoring...</span>'; return; }
+            const colors = { move: '#FFA500', grow: '#00d578', shrink: '#ff4b5c' };
+            el.innerHTML = whaleLog.map(w =>
+                `<div><span class="text-muted">${w.time}</span> <span style="color:${colors[w.type]}">${w.msg}</span></div>`
+            ).join('');
         }
 
         async function loadIndicator(asset, type) {
