@@ -903,7 +903,90 @@ def check_trailing_stops(bot, cur_px, pair):
         return True
     return False
 
+def _paper_grid_execute(bot_id, bot, pair):
+    """Paper trading GRID: simulate fills when price crosses grid levels, no real orders."""
+    settings = bot.get('settings', {})
+    try:
+        p_info = client.get_product(product_id=pair)
+        cur_px = float(p_info.price)
+    except Exception as e:
+        print(f"[PAPER GRID | {pair}] Price fetch error: {e}")
+        return
+
+    # Initialize paper grids on first run
+    if 'paper_grids' not in settings:
+        lower = settings.get('lower_price', cur_px * 0.95)
+        upper = settings.get('upper_price', cur_px * 1.05)
+        step_pct = settings.get('step_pct', 0.6) / 100.0
+        step = cur_px * step_pct
+        mode = settings.get('mode', 'LONG').upper()
+
+        levels = []
+        lvl = lower
+        while lvl <= upper:
+            if lvl < cur_px * 0.999:
+                levels.append({'price': round(lvl, 6), 'side': 'BUY', 'filled': False})
+            elif lvl > cur_px * 1.001 and mode != 'LONG':
+                levels.append({'price': round(lvl, 6), 'side': 'SELL', 'filled': False})
+            lvl += step
+
+        total_orders = len(levels)
+        if total_orders == 0:
+            return
+        settings['paper_grids'] = levels
+        settings['paper_chunk_usd'] = bot['current_usd'] / total_orders
+        settings['paper_step'] = step
+        save_bots()
+        print(f"[PAPER GRID | {pair}] Initialized {len(levels)} virtual levels, ${settings['paper_chunk_usd']:.2f}/level")
+        return
+
+    grids = settings['paper_grids']
+    chunk_usd = settings.get('paper_chunk_usd', 5)
+    step = settings.get('paper_step', cur_px * 0.006)
+    changes = False
+    sim_fee_rate = 0.004
+
+    for g in grids:
+        if g['filled']:
+            continue
+        if g['side'] == 'BUY' and cur_px <= g['price']:
+            # Simulate buy fill
+            qty = chunk_usd / g['price']
+            fee = chunk_usd * sim_fee_rate
+            bot['asset_held'] = bot.get('asset_held', 0) + qty
+            bot['current_usd'] -= (chunk_usd + fee)
+            g['filled'] = True
+            # Place virtual sell one step above
+            sell_px = round(g['price'] + step, 6)
+            grids.append({'price': sell_px, 'side': 'SELL', 'filled': False, 'qty': qty})
+            changes = True
+            print(f"[PAPER GRID | {pair}] BUY filled @ ${g['price']:.4f} -> SELL @ ${sell_px:.4f}")
+        elif g['side'] == 'SELL' and cur_px >= g['price']:
+            # Simulate sell fill
+            qty = g.get('qty', chunk_usd / g['price'])
+            proceeds = qty * g['price']
+            fee = proceeds * sim_fee_rate
+            bot['asset_held'] = max(0, bot.get('asset_held', 0) - qty)
+            bot['current_usd'] += (proceeds - fee)
+            g['filled'] = True
+            # Place virtual buy one step below
+            buy_px = round(g['price'] - step, 6)
+            grids.append({'price': buy_px, 'side': 'BUY', 'filled': False})
+            changes = True
+            pnl = (g['price'] - (g['price'] - step)) * qty - (fee * 2)
+            print(f"[PAPER GRID | {pair}] SELL filled @ ${g['price']:.4f} -> BUY @ ${buy_px:.4f} (flip PnL ~${pnl:.4f})")
+
+    if changes:
+        # Clean up filled entries to prevent unbounded growth
+        settings['paper_grids'] = [g for g in grids if not g['filled']]
+        save_bots()
+
+
 def execute_grid_bot(bot_id, bot, pair):
+    if bot.get('paper'):
+        _paper_grid_execute(bot_id, bot, pair)
+        return
+
     settings = bot.get('settings', {})
     risk = settings.setdefault('risk', {})
 

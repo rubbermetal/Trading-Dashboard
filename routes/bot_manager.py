@@ -367,6 +367,9 @@ def grid_preview():
 def start_bot():
     d = request.json
     strategy = d['strategy'].upper()
+    paper = bool(d.get('paper', False))
+    if paper and strategy not in ('DCA', 'GRID'):
+        return jsonify(success=False, error=f"Paper trading is only supported for DCA and GRID strategies.")
     tf = d.get('timeframe', STRATEGY_DEFAULT_TF.get(strategy, '15m'))
     if tf not in TF_MAP:
         tf = STRATEGY_DEFAULT_TF.get(strategy, '15m')
