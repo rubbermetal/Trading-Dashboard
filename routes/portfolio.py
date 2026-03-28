@@ -215,12 +215,12 @@ def fetch_data():
 def api_data():
     pos, total, hist, spot_map, total_usd_balance = fetch_data()
     
-    # Calculate Bot liquidity isolation
-    # bot_locked_usd: idle cash earmarked for bots (subtracted from USD balance for free_usd)
-    # bot_locked_total: full bot value including held positions (for display)
-    bot_locked_cash = sum(bot.get('current_usd', 0.0) for bot in ACTIVE_BOTS.values())
+    # Calculate Bot liquidity isolation (exclude paper bots — they don't use real capital)
+    bot_locked_cash = sum(bot.get('current_usd', 0.0) for bot in ACTIVE_BOTS.values() if not bot.get('paper'))
     bot_locked_positions = 0.0
     for bot in ACTIVE_BOTS.values():
+        if bot.get('paper'):
+            continue
         held = bot.get('asset_held', 0.0)
         if held > 0:
             pair = bot.get('pair', '')
