@@ -1506,7 +1506,8 @@
                     const avgBadge = d.avg_entry > 0 ? `<span class="badge bg-dark border border-info">Avg $${Number(d.avg_entry).toLocaleString()}</span>` : '';
                     const profitBadge = d.avg_entry > 0 ? `<span class="badge bg-dark border border-${d.profit_pct >= 0 ? 'success' : 'danger'}">${d.profit_pct >= 0 ? '+' : ''}${d.profit_pct.toFixed(2)}%</span>` : '';
                     const tierBadge = d.next_tier ? `<span class="badge bg-dark border border-warning">Next: ${d.next_tier}%</span>` : '';
-                    statusBadges = `<div class="d-flex gap-1 flex-wrap mb-1">${stateBadge}${buysBadge}${avgBadge}${profitBadge}${tierBadge}</div>`;
+                    const corrBadge = d.corr_count >= 2 ? `<span class="badge bg-danger border border-danger" title="${d.corr_count} other bots entering simultaneously">CORR ${d.corr_count}</span>` : '';
+                    statusBadges = `<div class="d-flex gap-1 flex-wrap mb-1">${stateBadge}${buysBadge}${avgBadge}${profitBadge}${tierBadge}${corrBadge}</div>`;
                 }
 
                 infoEl.innerHTML = `${statusBadges}<div class="d-flex flex-wrap gap-3">

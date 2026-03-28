@@ -250,6 +250,13 @@ def get_bots():
                 if t_pct > highest_sold:
                     next_tier = t_pct
                     break
+            # Correlation guard status
+            concurrent = sum(
+                1 for b in ACTIVE_BOTS.values()
+                if b.get('strategy') == 'DCA'
+                and b.get('pair') != bot.get('pair')
+                and b.get('dca_state') in ('ARMED', 'BUYING')
+            )
             b_copy['dca'] = {
                 'state': bot.get('dca_state', 'SCANNING'),
                 'avg_entry': round(avg_e, 6),
@@ -261,6 +268,7 @@ def get_bots():
                 'buy_pct': bot.get('buy_pct', 2.0),
                 'pending_sells': len(bot.get('pending_sells', [])),
                 'paused': bot.get('dca_state') == 'PAUSED',
+                'corr_count': concurrent,
             }
         
         if bot.get('strategy') == 'NPR':

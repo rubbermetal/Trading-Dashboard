@@ -1199,9 +1199,25 @@ def execute_dca(bot_id, bot, pair):
                 print(f"[DCA | {pair}] Signal BUY but insufficient capital (${bot['current_usd']:.2f})")
                 return
 
+            # Correlation guard: if multiple bots are entering simultaneously,
+            # reduce size to avoid overexposure to the same broad market move
+            concurrent_entries = sum(
+                1 for b in ACTIVE_BOTS.values()
+                if b.get('strategy') == 'DCA'
+                and b.get('pair') != pair
+                and b.get('dca_state') in ('ARMED', 'BUYING')
+            )
+            corr_mult = 1.0
+            if concurrent_entries >= 3:
+                corr_mult = 0.33
+                print(f"[DCA | {pair}] CORRELATION GUARD: {concurrent_entries} other bots entering, sizing to 33%")
+            elif concurrent_entries >= 2:
+                corr_mult = 0.50
+                print(f"[DCA | {pair}] CORRELATION GUARD: {concurrent_entries} other bots entering, sizing to 50%")
+
             depth_mult = data.get('depth_multiplier', 1.0)
             buy_pct = bot.get('buy_pct', 2.0)
-            buy_usd = bot['current_usd'] * (buy_pct / 100.0) * depth_mult * drawdown_mult
+            buy_usd = bot['current_usd'] * (buy_pct / 100.0) * depth_mult * drawdown_mult * corr_mult
             min_qty = max(base_min, 0.25 / cur_px) if cur_px > 0 else base_min
             buy_qty = buy_usd / (cur_px * mult) if cur_px > 0 else min_qty
             if buy_qty < min_qty:
