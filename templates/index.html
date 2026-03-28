@@ -141,6 +141,7 @@
             <li class="nav-item" role="presentation"><button class="nav-link fw-bold" id="orders-tab" data-bs-toggle="tab" data-bs-target="#orders-panel" type="button" role="tab">ORDERS</button></li>
             <li class="nav-item" role="presentation"><button class="nav-link fw-bold" id="bot-tab" data-bs-toggle="tab" data-bs-target="#bot-panel" type="button" role="tab">BOT MANAGER</button></li>
             <li class="nav-item" role="presentation"><button class="nav-link fw-bold" id="screen-tab" data-bs-toggle="tab" data-bs-target="#screen-panel" type="button" role="tab">MARKET SCREENER</button></li>
+            <li class="nav-item" role="presentation"><button class="nav-link fw-bold" id="analytics-tab" data-bs-toggle="tab" data-bs-target="#analytics-panel" type="button" role="tab">ANALYTICS</button></li>
         </ul>
 
         <div class="tab-content" id="terminalTabsContent">
@@ -535,6 +536,56 @@
                             <div id="detail-content" class="row g-2"></div>
                         </div>
                     </div>
+                </div>
+            </div>
+
+            <!-- ANALYTICS TAB -->
+            <div class="tab-pane fade" id="analytics-panel" role="tabpanel">
+                <div class="card card-custom p-4">
+                    <div class="d-flex justify-content-between align-items-center mb-3">
+                        <h4 class="fw-bold mb-0" style="color:#66fcf1;"><i class="bi bi-graph-up me-2"></i>Portfolio Analytics</h4>
+                        <div class="d-flex align-items-center gap-2">
+                            <div class="btn-group btn-group-sm">
+                                <button class="btn btn-outline-secondary active" onclick="loadEquity('24h', this)">24H</button>
+                                <button class="btn btn-outline-secondary" onclick="loadEquity('7d', this)">7D</button>
+                                <button class="btn btn-outline-secondary" onclick="loadEquity('30d', this)">30D</button>
+                                <button class="btn btn-outline-secondary" onclick="loadEquity('90d', this)">90D</button>
+                                <button class="btn btn-outline-secondary" onclick="loadEquity('all', this)">ALL</button>
+                            </div>
+                        </div>
+                    </div>
+                    <!-- Stats row -->
+                    <div class="row g-3 mb-3">
+                        <div class="col-6 col-md-3">
+                            <div class="card card-custom p-2 text-center" style="border:1px solid #333;">
+                                <small class="text-muted" style="font-size:0.6rem;">PERIOD CHANGE</small>
+                                <span id="eq-change" class="fw-bold">--</span>
+                            </div>
+                        </div>
+                        <div class="col-6 col-md-3">
+                            <div class="card card-custom p-2 text-center" style="border:1px solid #333;">
+                                <small class="text-muted" style="font-size:0.6rem;">CHANGE %</small>
+                                <span id="eq-change-pct" class="fw-bold">--</span>
+                            </div>
+                        </div>
+                        <div class="col-6 col-md-3">
+                            <div class="card card-custom p-2 text-center" style="border:1px solid #333;">
+                                <small class="text-muted" style="font-size:0.6rem;">PERIOD HIGH</small>
+                                <span id="eq-high" class="fw-bold text-success-custom">--</span>
+                            </div>
+                        </div>
+                        <div class="col-6 col-md-3">
+                            <div class="card card-custom p-2 text-center" style="border:1px solid #333;">
+                                <small class="text-muted" style="font-size:0.6rem;">PERIOD LOW</small>
+                                <span id="eq-low" class="fw-bold text-danger-custom">--</span>
+                            </div>
+                        </div>
+                    </div>
+                    <!-- Equity chart -->
+                    <div id="equity-chart" style="height:350px; width:100%;"></div>
+                    <!-- Bot breakdown -->
+                    <h6 class="fw-bold mt-4 mb-2" style="color:#66fcf1; font-size:0.8rem;"><i class="bi bi-pie-chart me-1"></i>BOT CAPITAL ALLOCATION</h6>
+                    <div id="bot-waterfall" class="row g-2"></div>
                 </div>
             </div>
         </div>
@@ -2620,6 +2671,119 @@
         loadScreener();
         loadAllOrders();
         loadPairStats();
+
+        // ==========================================
+        // EQUITY CURVE & ANALYTICS
+        // ==========================================
+        let equityChart = null;
+        let equityRange = '24h';
+
+        async function loadEquity(range, btn) {
+            if (range) equityRange = range;
+            if (btn) {
+                btn.closest('.btn-group').querySelectorAll('.btn').forEach(b => b.classList.remove('active'));
+                btn.classList.add('active');
+            }
+            try {
+                const res = await fetch(`/api/equity?range=${equityRange}`);
+                const data = await res.json();
+                if (data.error) { console.error('Equity error:', data.error); return; }
+
+                // Stats
+                const s = data.stats;
+                const changeEl = document.getElementById('eq-change');
+                changeEl.innerText = `${s.change >= 0 ? '+' : ''}$${s.change.toFixed(2)}`;
+                changeEl.className = `fw-bold ${s.change >= 0 ? 'text-success-custom' : 'text-danger-custom'}`;
+                const pctEl = document.getElementById('eq-change-pct');
+                pctEl.innerText = `${s.change_pct >= 0 ? '+' : ''}${s.change_pct.toFixed(2)}%`;
+                pctEl.className = `fw-bold ${s.change_pct >= 0 ? 'text-success-custom' : 'text-danger-custom'}`;
+                document.getElementById('eq-high').innerText = `$${s.high.toFixed(2)}`;
+                document.getElementById('eq-low').innerText = `$${s.low.toFixed(2)}`;
+
+                // Chart
+                renderEquityChart(data.equity);
+
+                // Bot waterfall
+                renderBotWaterfall(data.bots);
+
+            } catch (e) { console.error('Equity load error:', e); }
+        }
+
+        function renderEquityChart(equity) {
+            const container = document.getElementById('equity-chart');
+            if (equityChart) { equityChart.remove(); equityChart = null; }
+            if (!equity.length) {
+                container.innerHTML = '<div class="text-center text-muted py-5">No data yet. Equity is logged every 15 minutes.</div>';
+                return;
+            }
+            container.innerHTML = '';
+
+            const chart = LightweightCharts.createChart(container, {
+                layout: { background: { color: '#0b0c10' }, textColor: '#c5c6c7' },
+                grid: { vertLines: { color: '#1a1c23' }, horzLines: { color: '#1a1c23' } },
+                crosshair: { mode: LightweightCharts.CrosshairMode.Magnet },
+                rightPriceScale: { borderColor: '#333' },
+                timeScale: { borderColor: '#333', timeVisible: true },
+                width: container.clientWidth,
+                height: 350,
+            });
+
+            const areaSeries = chart.addAreaSeries({
+                topColor: 'rgba(102, 252, 241, 0.4)',
+                bottomColor: 'rgba(102, 252, 241, 0.0)',
+                lineColor: '#66fcf1',
+                lineWidth: 2,
+            });
+
+            const points = equity.map(e => ({ time: e.ts, value: e.total_value }));
+            areaSeries.setData(points);
+
+            // Bot locked as a second line
+            if (equity[0].bot_locked !== undefined) {
+                const botSeries = chart.addLineSeries({
+                    color: '#FFA500',
+                    lineWidth: 1,
+                    lineStyle: 2,
+                    title: 'Bot Locked',
+                });
+                botSeries.setData(equity.map(e => ({ time: e.ts, value: e.bot_locked })));
+            }
+
+            chart.timeScale().fitContent();
+            equityChart = chart;
+
+            new ResizeObserver(() => {
+                chart.applyOptions({ width: container.clientWidth });
+            }).observe(container);
+        }
+
+        function renderBotWaterfall(bots) {
+            const el = document.getElementById('bot-waterfall');
+            if (!bots.length) { el.innerHTML = '<span class="text-muted">No bot data yet.</span>'; return; }
+            const total = bots.reduce((sum, b) => sum + b.value, 0);
+            const colors = { DCA: '#66fcf1', GRID: '#FFA500', MOMENTUM: '#ff6bcb', QUAD: '#4ecdc4', TRAP: '#ffe66d', ORB: '#95e1d3', NPR: '#c3aed6', QUAD_SUPER: '#4ecdc4' };
+            el.innerHTML = bots.map(b => {
+                const pct = total > 0 ? (b.value / total * 100).toFixed(1) : 0;
+                const color = colors[b.strategy] || '#888';
+                return `<div class="col-6 col-md-3">
+                    <div class="card card-custom p-2" style="border-left:3px solid ${color};">
+                        <div class="d-flex justify-content-between align-items-center">
+                            <div>
+                                <span class="badge" style="background:${color}; color:#000; font-size:0.55rem;">${b.strategy}</span>
+                                <small class="text-white d-block fw-bold">${b.pair}</small>
+                            </div>
+                            <div class="text-end">
+                                <span class="fw-bold text-white">$${b.value.toFixed(2)}</span>
+                                <small class="text-muted d-block" style="font-size:0.6rem;">${pct}%</small>
+                            </div>
+                        </div>
+                    </div>
+                </div>`;
+            }).join('');
+        }
+
+        // Load equity when analytics tab is shown
+        document.getElementById('analytics-tab').addEventListener('shown.bs.tab', () => loadEquity());
     </script>
 </body>
 </html>
