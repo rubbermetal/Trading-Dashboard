@@ -661,6 +661,35 @@
                             <tbody id="pnl-stats-body"></tbody>
                         </table>
                     </div>
+
+                    <!-- Notification Settings -->
+                    <h6 class="fw-bold mt-4 mb-2" style="color:#66fcf1; font-size:0.8rem;"><i class="bi bi-bell me-1"></i>PUSH NOTIFICATIONS</h6>
+                    <div class="row g-2">
+                        <div class="col-md-6">
+                            <div class="card card-custom p-3" style="border:1px solid #333;">
+                                <div class="form-check form-switch mb-2">
+                                    <input class="form-check-input" type="checkbox" id="notify-enabled" onchange="saveNotifyConfig()">
+                                    <label class="form-check-label small fw-bold" for="notify-enabled">Enable Notifications</label>
+                                </div>
+                                <div class="mb-2">
+                                    <label class="small text-muted" style="font-size:0.6rem;">NTFY TOPIC (subscribe in ntfy app)</label>
+                                    <input type="text" id="notify-topic" class="form-control form-control-sm bg-dark border-secondary text-white" placeholder="my-trading-alerts-xyz" onchange="saveNotifyConfig()">
+                                </div>
+                                <button class="btn btn-sm btn-outline-info w-100" onclick="testNotify()">Send Test Notification</button>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="card card-custom p-3" style="border:1px solid #333;">
+                                <label class="small text-muted fw-bold mb-2" style="font-size:0.6rem;">NOTIFY ON:</label>
+                                <div class="form-check form-switch mb-1"><input class="form-check-input" type="checkbox" id="notify-entry" onchange="saveNotifyConfig()"><label class="form-check-label small" for="notify-entry">Bot Entry</label></div>
+                                <div class="form-check form-switch mb-1"><input class="form-check-input" type="checkbox" id="notify-exit" onchange="saveNotifyConfig()"><label class="form-check-label small" for="notify-exit">Bot Exit</label></div>
+                                <div class="form-check form-switch mb-1"><input class="form-check-input" type="checkbox" id="notify-bracket" onchange="saveNotifyConfig()"><label class="form-check-label small" for="notify-bracket">Bracket TP/SL Hit</label></div>
+                                <div class="form-check form-switch mb-1"><input class="form-check-input" type="checkbox" id="notify-sniper" onchange="saveNotifyConfig()"><label class="form-check-label small" for="notify-sniper">Sniper Trigger</label></div>
+                                <div class="form-check form-switch mb-1"><input class="form-check-input" type="checkbox" id="notify-twap" onchange="saveNotifyConfig()"><label class="form-check-label small" for="notify-twap">TWAP Complete</label></div>
+                                <div class="form-check form-switch"><input class="form-check-input" type="checkbox" id="notify-drawdown" onchange="saveNotifyConfig()"><label class="form-check-label small" for="notify-drawdown">Drawdown Warning</label></div>
+                            </div>
+                        </div>
+                    </div>
                 </div>
             </div>
         </div>
@@ -2994,8 +3023,47 @@
             } catch (e) { console.error('P&L waterfall error:', e); }
         }
 
-        // Load equity + P&L when analytics tab is shown
-        document.getElementById('analytics-tab').addEventListener('shown.bs.tab', () => { loadEquity(); loadPnlWaterfall(); });
+        // Notification config
+        async function loadNotifyConfig() {
+            try {
+                const res = await fetch('/api/notify/config');
+                const c = await res.json();
+                document.getElementById('notify-enabled').checked = c.enabled;
+                document.getElementById('notify-topic').value = c.ntfy_topic || '';
+                document.getElementById('notify-entry').checked = c.on_bot_entry;
+                document.getElementById('notify-exit').checked = c.on_bot_exit;
+                document.getElementById('notify-bracket').checked = c.on_bracket_hit;
+                document.getElementById('notify-sniper').checked = c.on_sniper_trigger;
+                document.getElementById('notify-twap').checked = c.on_twap_complete;
+                document.getElementById('notify-drawdown').checked = c.on_drawdown_warn;
+            } catch (e) { console.error('Notify config load error:', e); }
+        }
+
+        async function saveNotifyConfig() {
+            try {
+                await fetch('/api/notify/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
+                    enabled: document.getElementById('notify-enabled').checked,
+                    ntfy_topic: document.getElementById('notify-topic').value,
+                    on_bot_entry: document.getElementById('notify-entry').checked,
+                    on_bot_exit: document.getElementById('notify-exit').checked,
+                    on_bracket_hit: document.getElementById('notify-bracket').checked,
+                    on_sniper_trigger: document.getElementById('notify-sniper').checked,
+                    on_twap_complete: document.getElementById('notify-twap').checked,
+                    on_drawdown_warn: document.getElementById('notify-drawdown').checked,
+                })});
+            } catch (e) { console.error('Notify config save error:', e); }
+        }
+
+        async function testNotify() {
+            try {
+                const res = await fetch('/api/notify/test', { method: 'POST' });
+                const d = await res.json();
+                alert(d.message || d.error);
+            } catch (e) { alert('Network error.'); }
+        }
+
+        // Load equity + P&L + notify config when analytics tab is shown
+        document.getElementById('analytics-tab').addEventListener('shown.bs.tab', () => { loadEquity(); loadPnlWaterfall(); loadNotifyConfig(); });
     </script>
 </body>
 </html>

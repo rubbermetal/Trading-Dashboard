@@ -5,6 +5,7 @@ import pandas_ta as ta
 from flask import Blueprint, jsonify, request
 from shared import client, TRAILING_STOPS, BRACKET_ORDERS, TWAP_ORDERS, SNIPER_ORDERS
 from bot_utils import snap_to_increment
+from notifier import notify_bracket_hit, notify_sniper, notify_twap_complete
 
 trading_bp = Blueprint('trading', __name__)
 
@@ -63,6 +64,7 @@ def background_watcher():
                     if remaining_slices <= 0:
                         tw['status'] = 'COMPLETED'
                         print(f"[TWAP] {twap_id} completed: {tw['filled_slices']} slices filled")
+                        notify_twap_complete(pair, tw['side'], tw['total_usd'], tw['filled_slices'])
                         continue
 
                     # Place maker limit at best bid/ask
@@ -126,6 +128,7 @@ def background_watcher():
                         sn['status'] = 'TRIGGERED'
                         sn['triggered_at'] = cur_px
                         print(f"[SNIPER] {pair} triggered @ ${cur_px:.2f} (target ${trigger:.2f}), {sn['side']} placed @ ${str_price}")
+                        notify_sniper(pair, sn['side'], cur_px)
                 except Exception as e:
                     print(f"[SNIPER] Error on {snip_id}: {e}")
 
@@ -159,6 +162,7 @@ def background_watcher():
                             client.market_order_buy(client_order_id=oid, product_id=pair, quote_size=str(float(bkt['size']) * cur_px))
                         pnl = (cur_px - bkt['entry_price']) * float(bkt['size']) if side == 'BUY' else (bkt['entry_price'] - cur_px) * float(bkt['size'])
                         print(f"[BRACKET] {pair} {hit} hit @ {cur_px:.2f} | entry {bkt['entry_price']:.2f} | PnL ${pnl:.2f}")
+                        notify_bracket_hit(pair, hit, cur_px, pnl)
                         del BRACKET_ORDERS[pair]
                 except Exception as e:
                     print(f"[BRACKET] Error checking {pair}: {e}")
@@ -538,6 +542,27 @@ def get_advanced_orders():
                 'amount': sn['amount'], 'status': sn['status'],
             })
     return jsonify(items)
+
+# ==========================================
+# NOTIFICATION CONFIG
+# ==========================================
+@trading_bp.route('/api/notify/config', methods=['GET'])
+def get_notify_config():
+    from notifier import get_config
+    return jsonify(get_config())
+
+@trading_bp.route('/api/notify/config', methods=['POST'])
+def set_notify_config():
+    from notifier import update_config
+    d = request.json
+    config = update_config(d)
+    return jsonify(success=True, config=config)
+
+@trading_bp.route('/api/notify/test', methods=['POST'])
+def test_notify():
+    from notifier import notify
+    notify("Test Notification", "If you see this, notifications are working!", priority="default", tags=["white_check_mark"])
+    return jsonify(success=True, message="Test notification sent")
 
 # ==========================================
 # INDICATORS

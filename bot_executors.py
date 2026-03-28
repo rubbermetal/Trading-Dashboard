@@ -1,7 +1,8 @@
 import time
 import uuid
 import pandas as pd
-from shared import client
+from shared import client, ACTIVE_BOTS
+from notifier import notify_bot_entry, notify_bot_exit, notify_drawdown
 from strategies import calculate_quad_rotation, calculate_quad_super, calculate_orb, calculate_trap, calculate_momentum, calculate_dca, calculate_npr, NPR_CONFIG, _compute_zone
 from bot_utils import (
     get_bot_tf, is_derivative, get_contract_multiplier, 
@@ -813,7 +814,9 @@ def _dca_check_sell_fills(bot, pair):
                 tier_pct = sell.get('tier', 0)
                 bot['highest_tier_sold'] = max(bot.get('highest_tier_sold', 0), tier_pct)
                 changes = True
+                pnl_val = (avg_px - bot.get('avg_entry', avg_px)) * filled_size * mult
                 print(f"[DCA | {pair}] Tier {tier_pct}% sell FILLED: {filled_size:.8f} at ${avg_px:.2f} (fee=${real_fee:.4f})")
+                notify_bot_exit(pair, 'DCA', avg_px, pnl_val, f'Tier {tier_pct}%')
 
                 # Record trade AFTER state is fully updated and sell is NOT in new_pending
                 try:
@@ -956,6 +959,7 @@ def execute_dca(bot_id, bot, pair):
             bot['dca_state'] = 'PAUSED'
             bot['paused_at'] = time.time()
             print(f"[DCA | {pair}] PAUSED: {drawdown_pct:.1f}% drawdown — catastrophic threshold")
+            notify_drawdown(pair, 'DCA', drawdown_pct)
             save_bots()
         elif dca_state == 'PAUSED' and drawdown_pct < 22:  # 3% hysteresis
             bot['dca_state'] = 'ACCUMULATING'
@@ -1025,6 +1029,7 @@ def execute_dca(bot_id, bot, pair):
 
             save_bots()
             print(f"[DCA | {pair}] BUY FILLED: {filled_size:.8f} at ${avg_fill_px:.2f}. Avg entry now ${new_avg:.2f}. Total buys: {bot['total_buys']}")
+            notify_bot_entry(pair, 'DCA', avg_fill_px, filled_size)
             return
 
         if elapsed >= 90:

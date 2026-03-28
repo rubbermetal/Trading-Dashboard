@@ -4,6 +4,7 @@ bots.json
 stats.json
 equity.db
 screener_config.json
+notify_config.json
 
 # Development utilities (not part of the application)
 check_adx.py
