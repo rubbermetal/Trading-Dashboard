@@ -1236,10 +1236,12 @@
                 const d = botData.dca;
                 if (d.avg_entry > 0) {
                     series.candles.createPriceLine({ price: d.avg_entry, color: '#FFD700', lineWidth: 2, lineStyle: 0, axisLabelVisible: true, title: 'AVG' });
-                    [1.5, 2.5, 4.0, 6.0, 8.0, 10.0].forEach(pct => {
+                    [3.0, 5.0, 7.5, 10.0, 15.0, 20.0].forEach(pct => {
                         series.candles.createPriceLine({ price: d.avg_entry * (1 + pct / 100), color: 'rgba(0,213,120,0.5)', lineWidth: 1, lineStyle: 2, axisLabelVisible: false, title: '' });
                     });
-                    series.candles.createPriceLine({ price: d.avg_entry * 0.85, color: '#ff4b5c', lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: 'PAUSE' });
+                    series.candles.createPriceLine({ price: d.avg_entry * 0.90, color: '#FFA500', lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: 'HALF' });
+                    series.candles.createPriceLine({ price: d.avg_entry * 0.80, color: '#ff7b4c', lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: 'QTR' });
+                    series.candles.createPriceLine({ price: d.avg_entry * 0.75, color: '#ff4b5c', lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: 'PAUSE' });
                 }
             }
 

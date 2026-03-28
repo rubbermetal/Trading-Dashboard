@@ -246,7 +246,7 @@ def get_bots():
             # Determine next tier
             highest_sold = bot.get('highest_tier_sold', 0)
             next_tier = None
-            for t_pct, _ in [(1.5, 0.25), (2.5, 0.33), (4.0, 0.45), (6.0, 0.50), (8.0, 0.50), (10.0, 0.75)]:
+            for t_pct, _ in [(3.0, 0.20), (5.0, 0.25), (7.5, 0.30), (10.0, 0.35), (15.0, 0.50), (20.0, 0.75)]:
                 if t_pct > highest_sold:
                     next_tier = t_pct
                     break
