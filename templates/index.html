@@ -702,31 +702,6 @@
                         </div>
                     </div>
 
-                    <!-- Dead-Man Switch -->
-                    <h6 class="fw-bold mt-4 mb-2" style="color:#ff4b5c; font-size:0.8rem;"><i class="bi bi-shield-exclamation me-1"></i>DEAD-MAN SWITCH</h6>
-                    <div class="card card-custom p-3" style="border:1px solid #333;">
-                        <div class="row g-2 align-items-center">
-                            <div class="col-auto">
-                                <div class="form-check form-switch">
-                                    <input class="form-check-input" type="checkbox" id="dms-enabled" onchange="saveDeadman()">
-                                    <label class="form-check-label small fw-bold" for="dms-enabled">Enabled</label>
-                                </div>
-                            </div>
-                            <div class="col-auto">
-                                <select id="dms-timeout" class="form-select form-select-sm bg-dark text-white border-secondary" style="max-width:100px; font-size:0.7rem;" onchange="saveDeadman()">
-                                    <option value="6">6h</option><option value="12" selected>12h</option><option value="24">24h</option><option value="48">48h</option>
-                                </select>
-                            </div>
-                            <div class="col-auto">
-                                <label class="small text-muted" style="font-size:0.6rem;">Drawdown %</label>
-                                <input type="number" id="dms-threshold" class="form-control form-control-sm bg-dark border-secondary text-white" style="max-width:60px;" value="15" onchange="saveDeadman()">
-                            </div>
-                            <div class="col">
-                                <span id="dms-status" class="small text-muted" style="font-size:0.6rem;"></span>
-                            </div>
-                        </div>
-                        <small class="text-muted d-block mt-1" style="font-size:0.6rem;">If the dashboard isn't accessed for the timeout period and a bot exceeds the drawdown threshold, the bot is auto-stopped and you're notified.</small>
-                    </div>
                 </div>
             </div>
         </div>
@@ -3256,34 +3231,8 @@
             } catch (e) { alert('Network error.'); }
         }
 
-        async function loadDeadman() {
-            try {
-                const res = await fetch('/api/deadman');
-                const c = await res.json();
-                document.getElementById('dms-enabled').checked = c.enabled;
-                document.getElementById('dms-timeout').value = c.timeout_hours || 12;
-                document.getElementById('dms-threshold').value = c.drawdown_threshold || 15;
-                const mins = Math.floor(c.seconds_since_heartbeat / 60);
-                document.getElementById('dms-status').innerText = c.triggered ? 'TRIGGERED' : `Last heartbeat: ${mins}m ago`;
-            } catch (e) {}
-        }
-
-        async function saveDeadman() {
-            try {
-                await fetch('/api/deadman', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
-                    enabled: document.getElementById('dms-enabled').checked,
-                    timeout_hours: parseInt(document.getElementById('dms-timeout').value),
-                    drawdown_threshold: parseFloat(document.getElementById('dms-threshold').value),
-                })});
-            } catch (e) {}
-        }
-
-        // Dead-man switch heartbeat — ping every 5 minutes while page is open
-        setInterval(() => fetch('/api/heartbeat', { method: 'POST' }), 300000);
-        fetch('/api/heartbeat', { method: 'POST' });  // initial ping
-
         // Load equity + P&L + notify config when analytics tab is shown
-        document.getElementById('analytics-tab').addEventListener('shown.bs.tab', () => { loadEquity(); loadPnlWaterfall(); loadNotifyConfig(); loadDeadman(); });
+        document.getElementById('analytics-tab').addEventListener('shown.bs.tab', () => { loadEquity(); loadPnlWaterfall(); loadNotifyConfig(); });
     </script>
 </body>
 </html>

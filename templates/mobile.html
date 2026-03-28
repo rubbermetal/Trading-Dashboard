@@ -154,8 +154,6 @@
 
         function refreshAll() {
             loadPortfolio(); loadBots(); loadProtections();
-            // Heartbeat
-            fetch('/api/heartbeat', { method: 'POST' });
         }
 
         refreshAll();
