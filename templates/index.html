@@ -455,6 +455,11 @@
                                 <small class="text-warning mt-1 d-block" style="font-size: 0.65rem;">This amount will be locked in the bot's virtual sandbox.</small>
                             </div>
 
+                            <div class="form-check form-switch mb-3">
+                                <input class="form-check-input" type="checkbox" id="bot-paper">
+                                <label class="form-check-label small" for="bot-paper">Paper Trading (simulated fills, no real orders)</label>
+                            </div>
+
                             <div id="grid-settings" class="d-none border-top border-secondary pt-3 mb-4">
                                 <h6 class="text-muted small fw-bold mb-3">GRID PARAMETERS</h6>
                                 <div class="row g-2">
@@ -2309,7 +2314,8 @@
             if (!pair || !amount || amount <= 0) return alert("Please enter a valid asset pair and allocation amount.");
             if (!pair.includes('-')) document.getElementById('bot-pair').value = pair + '-USD';
 
-            const payload = { pair: document.getElementById('bot-pair').value, strategy: strategy, amount: amount, timeframe: timeframe, settings: {} };
+            const paper = document.getElementById('bot-paper') ? document.getElementById('bot-paper').checked : false;
+            const payload = { pair: document.getElementById('bot-pair').value, strategy: strategy, amount: amount, timeframe: timeframe, paper: paper, settings: {} };
 
             if (strategy === 'GRID') {
                 const lower = parseFloat(document.getElementById('grid-lower').value);
@@ -2475,6 +2481,7 @@
 
                 grid.innerHTML = Object.entries(bots).map(([id, b]) => {
                     const statusClass = b.status === 'RUNNING' ? 'bg-success text-dark' : 'bg-danger';
+                    const paperBadge = b.paper ? '<span class="badge bg-info text-dark ms-1" style="font-size:0.55rem;">PAPER</span>' : '';
                     const pnl = b.live_pnl || 0;
                     const pnlClass = pnl >= 0 ? 'text-success-custom' : 'text-danger-custom';
                     const s = b.stats || {};
@@ -2510,7 +2517,7 @@
                                         <span class="badge bg-dark border border-secondary" style="font-size:0.6rem">${b.strategy} BOT</span>
                                         <select class="d-inline-block ms-1 bg-dark text-white border-secondary rounded" style="font-size:0.55rem; padding:1px 4px; border:1px solid #45a29e; cursor:pointer;" onchange="changeBotTF('${id}', this.value)">${tfOpts}</select>
                                     </div>
-                                    <div class="text-end"><span class="badge ${statusClass} mb-1">${b.status}</span><br><small class="text-muted" style="font-size: 0.6rem;">ID: ${id}</small></div>
+                                    <div class="text-end"><span class="badge ${statusClass} mb-1">${b.status}</span>${paperBadge}<br><small class="text-muted" style="font-size: 0.6rem;">ID: ${id}</small></div>
                                 </div>
 
                                 <!-- ACCOUNT BALANCES -->

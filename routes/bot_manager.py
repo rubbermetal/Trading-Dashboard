@@ -376,6 +376,7 @@ def start_bot():
         "timeframe": tf,
         "settings": d.get('settings', {}),
         "stats": new_bot_stats(),
+        "paper": bool(d.get('paper', False)),
         "created_at": datetime.now(timezone.utc).isoformat()
     }
     ACTIVE_BOTS[bot_id]['stats']['deposits'] = float(d['amount'])

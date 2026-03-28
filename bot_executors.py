@@ -10,6 +10,59 @@ from bot_utils import (
     extract_fee, poll_market_fill
 )
 
+
+def paper_fill_buy(bot, pair, qty, price, mult):
+    """Simulate a buy fill for paper trading bots."""
+    filled_size = float(qty)
+    fill_px = float(price)
+    old_held = bot.get('asset_held', 0)
+    old_cost = bot.get('total_cost', 0)
+    new_cost = fill_px * filled_size * mult
+    total_held = old_held + filled_size
+    new_avg = (old_cost + new_cost) / (total_held * mult) if total_held > 0 else fill_px
+
+    sim_fee = new_cost * 0.004  # simulate maker fee
+    bot['asset_held'] = total_held
+    bot['total_cost'] = old_cost + new_cost
+    bot['avg_entry'] = new_avg
+    bot['entry_price'] = new_avg
+    bot['current_usd'] -= (new_cost + sim_fee)
+    bot['position_side'] = 'LONG'
+    bot['total_buys'] = bot.get('total_buys', 0) + 1
+    bot['buy_count_this_cycle'] = bot.get('buy_count_this_cycle', 0) + 1
+    bot['dca_state'] = 'ACCUMULATING'
+    bot['last_cross_direction'] = 'BELOW'
+    bot.pop('pending_buy_oid', None)
+    bot.pop('pending_buy_time', None)
+    bot.pop('buy_retries', None)
+    save_bots()
+    print(f"[PAPER DCA | {pair}] BUY: {filled_size:.8f} at ${fill_px:.2f}. Avg entry ${new_avg:.2f}")
+    notify_bot_entry(pair, 'DCA (PAPER)', fill_px, filled_size)
+
+
+def paper_fill_sell(bot, pair, tier_pct, qty, price, mult):
+    """Simulate a sell fill for paper trading bots."""
+    filled_size = float(qty)
+    fill_px = float(price)
+    sim_fee = filled_size * fill_px * mult * 0.004
+
+    bot['asset_held'] = max(0, bot.get('asset_held', 0) - filled_size)
+    old_held = bot.get('asset_held', 0) + filled_size
+    if old_held > 0:
+        sold_fraction = filled_size / old_held
+        bot['total_cost'] = max(0, bot.get('total_cost', 0) * (1 - sold_fraction))
+    gross = filled_size * fill_px * mult
+    bot['current_usd'] += gross - sim_fee
+    bot['highest_tier_sold'] = max(bot.get('highest_tier_sold', 0), tier_pct)
+    save_bots()
+    pnl = (fill_px - bot.get('avg_entry', fill_px)) * filled_size * mult
+    print(f"[PAPER DCA | {pair}] SELL tier {tier_pct}%: {filled_size:.8f} at ${fill_px:.2f} PnL ${pnl:.4f}")
+    notify_bot_exit(pair, 'DCA (PAPER)', fill_px, pnl, f'Tier {tier_pct}%')
+    try:
+        record_trade(bot, bot.get('avg_entry', fill_px), fill_px, filled_size, 'LONG', 'DCA_TIER', pair, mult, actual_fee=sim_fee)
+    except: pass
+
+
 # ==========================================
 # STRATEGY EXECUTORS (NON-GRID)
 # ==========================================
@@ -1152,6 +1205,12 @@ def execute_dca(bot_id, bot, pair):
                     if float(str_qty) <= 0:
                         continue
 
+                    if bot.get('paper'):
+                        # Paper mode: simulate immediate sell fill
+                        paper_fill_sell(bot, pair, tier_pct, str_qty, str_price, mult)
+                        available_held -= float(str_qty)
+                        continue
+
                     try:
                         oid = str(uuid.uuid4())
                         api_res = client.limit_order_gtc_sell(
@@ -1237,6 +1296,11 @@ def execute_dca(bot_id, bot, pair):
             buy_usd = float(str_qty) * limit_px * mult
             if buy_usd > bot['current_usd'] * 0.99 or float(str_qty) <= 0:
                 print(f"[DCA | {pair}] Buy size ${buy_usd:.2f} exceeds available ${bot['current_usd']:.2f}")
+                return
+
+            if bot.get('paper'):
+                # Paper mode: simulate immediate fill
+                paper_fill_buy(bot, pair, str_qty, str_price, mult)
                 return
 
             try:
