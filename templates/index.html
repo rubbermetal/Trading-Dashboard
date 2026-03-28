@@ -224,6 +224,7 @@
                                     <select id="trade-order-type" class="form-select form-select-sm bg-dark text-white border-secondary" onchange="toggleEmbeddedOrderUI()">
                                         <option value="MARKET">Market</option>
                                         <option value="LIMIT">Limit</option>
+                                        <option value="MAKER_LIMIT">Maker Limit</option>
                                     </select>
                                 </div>
                                 <div class="col-6 d-none" id="trade-limit-box">
@@ -918,9 +919,10 @@
         }
 
         function toggleEmbeddedOrderUI() {
-            const isLimit = document.getElementById('trade-order-type').value === 'LIMIT';
+            const val = document.getElementById('trade-order-type').value;
+            const isLimit = val === 'LIMIT';
             document.getElementById('trade-limit-box').classList.toggle('d-none', !isLimit);
-            document.getElementById('trade-amt-label').innerText = isLimit ? 'SIZE (UNITS)' : 'AMOUNT (USD)';
+            document.getElementById('trade-amt-label').innerText = isLimit ? 'SIZE (UNITS)' : val === 'MAKER_LIMIT' ? 'AMOUNT (USD / UNITS)' : 'AMOUNT (USD)';
         }
 
         async function sendEmbeddedOrder(side) {

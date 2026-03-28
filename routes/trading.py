@@ -1,8 +1,10 @@
 import uuid, time, threading
+from decimal import Decimal, ROUND_DOWN
 import pandas as pd
 import pandas_ta as ta
 from flask import Blueprint, jsonify, request
 from shared import client, TRAILING_STOPS
+from bot_utils import snap_to_increment
 
 trading_bp = Blueprint('trading', __name__)
 
@@ -49,6 +51,30 @@ def trade():
         if o_type == 'MARKET':
             if side == 'BUY': client.market_order_buy(client_order_id=oid, product_id=pair, quote_size=amt)
             else: client.market_order_sell(client_order_id=oid, product_id=pair, base_size=amt)
+        elif o_type == 'MAKER_LIMIT':
+            # Place a limit order 1 tick inside the spread to guarantee maker fees
+            product = client.get_product(product_id=pair)
+            quote_inc = product.quote_increment
+            base_inc = product.base_increment
+            book = client.get_product_book(product_id=pair, limit=1)
+            best_bid = float(book.pricebook.bids[0].price)
+            best_ask = float(book.pricebook.asks[0].price)
+
+            if side == 'BUY':
+                # Post at best_bid — sits on the bid, maker
+                limit_px = best_bid
+                str_price = snap_to_increment(limit_px, quote_inc)
+                # Convert USD amount to base units
+                base_qty = float(amt) / limit_px
+                str_qty = snap_to_increment(base_qty, base_inc)
+                client.limit_order_buy(client_order_id=oid, product_id=pair, base_size=str_qty, limit_price=str_price)
+            else:
+                # Post at best_ask — sits on the ask, maker
+                limit_px = best_ask
+                str_price = snap_to_increment(limit_px, quote_inc)
+                str_qty = snap_to_increment(float(amt), base_inc)
+                client.limit_order_sell(client_order_id=oid, product_id=pair, base_size=str_qty, limit_price=str_price)
+            return jsonify({"success": True, "message": f"Maker limit {side} @ {str_price}"})
         else:
             px = str(d['limit_price'])
             if side == 'BUY': client.limit_order_buy(client_order_id=oid, product_id=pair, base_size=amt, limit_price=px)
