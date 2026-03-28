@@ -43,10 +43,12 @@ def _log_equity():
             pos, total, hist, spot_map, total_usd_balance = fetch_data()
             ts = int(time.time())
 
-            # Per-bot values
+            # Per-bot values (exclude paper bots from analytics)
             bot_locked = 0.0
             bot_rows = []
             for bid, bot in ACTIVE_BOTS.items():
+                if bot.get('paper'):
+                    continue
                 idle = bot.get('current_usd', 0.0)
                 held = bot.get('asset_held', 0.0)
                 pair = bot.get('pair', '')
@@ -60,7 +62,7 @@ def _log_equity():
                 bot_locked += bot_val
                 bot_rows.append((ts, bid, bot.get('strategy', ''), pair, round(bot_val, 2)))
 
-            free_usd = max(0.0, total_usd_balance - sum(b.get('current_usd', 0.0) for b in ACTIVE_BOTS.values()))
+            free_usd = max(0.0, total_usd_balance - sum(b.get('current_usd', 0.0) for b in ACTIVE_BOTS.values() if not b.get('paper')))
 
             conn = sqlite3.connect(DB_PATH)
             conn.execute(

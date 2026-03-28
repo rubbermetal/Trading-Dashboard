@@ -58,9 +58,7 @@ def paper_fill_sell(bot, pair, tier_pct, qty, price, mult):
     pnl = (fill_px - bot.get('avg_entry', fill_px)) * filled_size * mult
     print(f"[PAPER DCA | {pair}] SELL tier {tier_pct}%: {filled_size:.8f} at ${fill_px:.2f} PnL ${pnl:.4f}")
     notify_bot_exit(pair, 'DCA (PAPER)', fill_px, pnl, f'Tier {tier_pct}%')
-    try:
-        record_trade(bot, bot.get('avg_entry', fill_px), fill_px, filled_size, 'LONG', 'DCA_TIER', pair, mult, actual_fee=sim_fee)
-    except: pass
+    # Don't call record_trade — paper trades must not pollute permanent stats
 
 
 # ==========================================
