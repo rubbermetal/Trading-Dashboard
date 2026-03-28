@@ -76,11 +76,18 @@ Placing maker limit sell orders at tier prices. Sub-state of ACCUMULATING.
   drops back below the tier (price moved away)
 
 ### State: PAUSED
-Drawdown circuit breaker active. Protects against capital drain.
-- Triggered when: current_price < avg_entry × 0.85 (15% drawdown)
+Catastrophic drawdown circuit breaker.
+- Triggered when: drawdown >= 25% from avg entry
 - While paused: NO new buys, but existing sells remain active
-- Resume when: current_price > avg_entry × 0.87 (small hysteresis buffer)
+- Resume when: drawdown recovers to < 22% (3% hysteresis)
 - All other logic (profit tiers, sell management) continues normally
+
+### Graduated Drawdown Response (before PAUSE)
+Instead of a hard stop, buying continues at reduced size through moderate drawdowns:
+- 0% to -10%: normal buy size (1.0x)
+- -10% to -20%: half-size buys (0.5x) — still accumulating, reducing exposure rate
+- -20% to -25%: quarter-size buys (0.25x) — minimal, still pulling avg entry down
+- Beyond -25%: PAUSED — full stop, something is fundamentally broken
 
 ---
 
@@ -95,14 +102,26 @@ Convert to USD: `min_buy_usd = base_min_size × current_price`
 
 Take the more negative ROC value: `depth = min(fast_roc, slow_roc)`
 
-> **Note:** Tiers reworked 2026-03-22. Entry depth threshold lowered from -0.50 to -0.30.
-> New tier scale to be documented — values pending confirmation.
+| Depth Range        | Depth Multiplier  | Rationale                           |
+|--------------------|-------------------|-------------------------------------|
+| -0.30 to -0.50     | 1.0x              | Scout buy at threshold              |
+| -0.50 to -1.0      | 1.5x              | Moderate dip, lean in               |
+| -1.0 to -2.0       | 2.5x              | Solid dip, meaningful position      |
+| -2.0 to -3.0       | 4.0x              | Heavy dip, aggressive accumulation  |
+| Below -3.0         | 6.0x              | Capitulation, max aggression        |
 
-| Depth Range        | Buy Size          | Rationale                    |
-|--------------------|-------------------|------------------------------|
-| -0.30 to -0.75     | min_size × 1.0    | Normal dip, minimum exposure |
-| -0.75 to -2.0      | min_size × 1.10   | Deeper dip, slightly larger  |
-| Below -2.0         | min_size × 1.25   | Capitulation, max single buy |
+Buy USD = `current_usd × (buy_pct/100) × depth_mult × drawdown_mult`
+
+### Drawdown Multiplier (graduated risk reduction)
+
+| Drawdown from Avg Entry | drawdown_mult | Rationale                          |
+|--------------------------|---------------|------------------------------------|
+| 0% to -10%               | 1.0           | Normal operation                   |
+| -10% to -20%             | 0.5           | Half-size buys, still accumulating |
+| -20% to -25%             | 0.25          | Quarter-size, minimal exposure     |
+| Beyond -25%              | 0 (PAUSED)    | Catastrophic, full stop            |
+
+Resume from PAUSED when drawdown recovers to -22% (3% hysteresis).
 
 ### Capital Guard
 - If bot's idle USD < min_buy_usd: skip buy, log "insufficient capital"
@@ -125,15 +144,19 @@ profit_pct = (current_price - avg_entry) / avg_entry × 100
 
 | Profit %  | Sell % of Remaining | Cumulative Sold (from original) |
 |-----------|--------------------|---------------------------------|
-| 1.5%      | 25%                | 25.0%                           |
-| 2.5%      | 33%                | 49.8%                           |
-| 4.0%      | 45%                | 72.4%                           |
-| 6.0%      | 50%                | 86.2%                           |
-| 8.0%      | 50%                | 93.1%                           |
-| 10.0%+    | 75%                | 98.3%                           |
+| 3.0%      | 20%                | 20.0%                           |
+| 5.0%      | 25%                | 40.0%                           |
+| 7.5%      | 30%                | 58.0%                           |
+| 10.0%     | 35%                | 72.7%                           |
+| 15.0%     | 50%                | 86.4%                           |
+| 20.0%+    | 75%                | 96.6%                           |
 
-The remaining ~1.7% rides as a "moonbag" until the next accumulation
+The remaining ~3.4% rides as a "moonbag" until the next accumulation
 cycle absorbs it into the new avg entry.
+
+Rationale: First tier at 3% ensures net profit of ~2.2% after maker
+fees on both sides (~0.4% × 2). Wider spacing gives trades room to
+run and captures larger moves instead of scalping thin margins.
 
 ### Sell Execution
 - All sells are maker limit orders (post_only=True)
@@ -364,3 +387,22 @@ Entry depth threshold updated to -0.30 to match new dip threshold. Full new tier
 
 **bots.json — one-time state reset**
 All DCA bots reset to SCANNING with `last_cross_direction = ABOVE` after the zero-line logic change, ensuring clean pickup of the new ARM triggers.
+
+### 2026-03-28
+
+**1. Profit tiers widened for meaningful net profit**
+Old first tier was 1.5% — after ~0.8% round-trip maker fees, net was ~0.7%. Marginal.
+New tiers: 3%, 5%, 7.5%, 10%, 15%, 20%. First tier nets ~2.2% after fees. Wider spacing
+lets trades run instead of scalping. Bigger moonbag (~3.4%) rides extended moves.
+
+**2. Depth multiplier made more aggressive**
+Old: topped at 2.0x at -1.0 ROC. New: continuous scale up to 6.0x at -3.0+ ROC.
+DCA's mathematical edge is buying heavily at deeper dips — the old curve was too flat.
+
+**3. Graduated drawdown response replaces hard pause**
+Old: hard pause at -15%, resume at -13%. Stopped buying exactly when prices were cheapest.
+New: graduated — half-size at -10%, quarter-size at -20%, full pause only at -25%.
+Keeps averaging down through normal drawdowns while still protecting against catastrophe.
+
+**4. Tier reset threshold bumped from -2.5% to -3.0%**
+Matches new first profit tier at 3%.

@@ -726,12 +726,12 @@ def execute_momentum(bot_id, bot, pair):
 # ==========================================
 
 DCA_PROFIT_TIERS = [
-    (1.5,  0.25),  # 1.5% profit → sell 25% of remaining
-    (2.5,  0.33),  # 2.5% → 33%
-    (4.0,  0.45),  # 4.0% → 45%
-    (6.0,  0.50),  # 6.0% → 50%
-    (8.0,  0.50),  # 8.0% → 50%
-    (10.0, 0.75),  # 10.0%+ → 75%
+    (3.0,  0.20),  # 3.0% profit → sell 20% of remaining (net ~2.2% after fees)
+    (5.0,  0.25),  # 5.0% → 25%
+    (7.5,  0.30),  # 7.5% → 30%
+    (10.0, 0.35),  # 10.0% → 35%
+    (15.0, 0.50),  # 15.0% → 50%
+    (20.0, 0.75),  # 20.0%+ → 75%, remainder rides as moonbag
 ]
 
 def _dca_cancel_all_sells(bot, pair):
@@ -943,20 +943,29 @@ def execute_dca(bot_id, bot, pair):
     deriv_flag = is_derivative(pair)
 
     # ==========================================
-    # STEP 1: PAUSE CHECK (15% drawdown)
+    # STEP 1: DRAWDOWN MANAGEMENT (graduated response)
     # ==========================================
+    # -10% to -20%: half-size buys (keep accumulating, reduce exposure)
+    # -20% to -25%: quarter-size buys (minimal, still averaging down)
+    # Beyond -25%: full pause (catastrophic, something is fundamentally broken)
+    drawdown_pct = 0
+    drawdown_mult = 1.0
     if held >= base_min and avg_entry > 0:
         drawdown_pct = ((avg_entry - cur_px) / avg_entry) * 100
-        if dca_state != 'PAUSED' and drawdown_pct >= 15:
+        if dca_state != 'PAUSED' and drawdown_pct >= 25:
             bot['dca_state'] = 'PAUSED'
             bot['paused_at'] = time.time()
-            print(f"[DCA | {pair}] PAUSED: {drawdown_pct:.1f}% drawdown from avg entry ${avg_entry:.2f}")
+            print(f"[DCA | {pair}] PAUSED: {drawdown_pct:.1f}% drawdown — catastrophic threshold")
             save_bots()
-        elif dca_state == 'PAUSED' and drawdown_pct < 13:  # 2% hysteresis
+        elif dca_state == 'PAUSED' and drawdown_pct < 22:  # 3% hysteresis
             bot['dca_state'] = 'ACCUMULATING'
             bot['paused_at'] = 0
             print(f"[DCA | {pair}] UN-PAUSED: drawdown recovered to {drawdown_pct:.1f}%")
             save_bots()
+        elif drawdown_pct >= 20:
+            drawdown_mult = 0.25  # quarter-size buys
+        elif drawdown_pct >= 10:
+            drawdown_mult = 0.50  # half-size buys
         dca_state = bot.get('dca_state', 'SCANNING')
 
     # ==========================================
@@ -1039,7 +1048,7 @@ def execute_dca(bot_id, bot, pair):
                 limit_px = cur_px - float(quote_inc)
                 str_price = snap_to_increment(limit_px, quote_inc)
                 depth_mult = data.get('depth_multiplier', 1.0)
-                buy_qty = base_min * depth_mult
+                buy_qty = base_min * depth_mult * drawdown_mult
                 if deriv_flag:
                     buy_qty = max(1, int(buy_qty))
                 str_qty = snap_to_increment(buy_qty, base_inc)
@@ -1082,7 +1091,7 @@ def execute_dca(bot_id, bot, pair):
     _dca_manage_stale_sells(bot, pair, cur_px)
 
     # ==========================================
-    # STEP 4.5: TIER RESET AT -2.5% DRAWDOWN
+    # STEP 4.5: TIER RESET AT -3% DRAWDOWN
     # ==========================================
     held = bot.get('asset_held', 0)
     avg_entry = bot.get('avg_entry', 0)
@@ -1090,8 +1099,8 @@ def execute_dca(bot_id, bot, pair):
     if held >= min_tradeable and avg_entry > 0:
         profit_pct = ((cur_px - avg_entry) / avg_entry) * 100
         highest_sold = bot.get('highest_tier_sold', 0)
-        if profit_pct <= -2.5 and highest_sold > 0:
-            print(f"[DCA | {pair}] TIER RESET: profit {profit_pct:.2f}% hit -2.5% with tier {highest_sold}% sold. Resetting tiers.")
+        if profit_pct <= -3.0 and highest_sold > 0:
+            print(f"[DCA | {pair}] TIER RESET: profit {profit_pct:.2f}% hit -3.0% with tier {highest_sold}% sold. Resetting tiers.")
             _dca_cancel_all_sells(bot, pair)
             bot['highest_tier_sold'] = 0
             bot['tier_reset_at'] = time.time()
@@ -1192,7 +1201,7 @@ def execute_dca(bot_id, bot, pair):
 
             depth_mult = data.get('depth_multiplier', 1.0)
             buy_pct = bot.get('buy_pct', 2.0)
-            buy_usd = bot['current_usd'] * (buy_pct / 100.0) * depth_mult
+            buy_usd = bot['current_usd'] * (buy_pct / 100.0) * depth_mult * drawdown_mult
             min_qty = max(base_min, 0.25 / cur_px) if cur_px > 0 else base_min
             buy_qty = buy_usd / (cur_px * mult) if cur_px > 0 else min_qty
             if buy_qty < min_qty:

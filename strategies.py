@@ -530,16 +530,18 @@ def calculate_dca(df, dca_state="SCANNING", last_cross_direction="ABOVE"):
     slow_prev = float(slow_prev)
     slow_prev2 = float(slow_prev2)
 
-    # Depth for sizing tier — scales from -0.30 threshold
+    # Depth for sizing tier — heavier buys at deeper dips (where DCA edge lives)
     depth = min(fast_cur, slow_cur)
-    if depth <= -1.0:
-        # 2.0x at -1.0, then +0.5x per -0.5 step below
-        steps_below = int((abs(depth) - 1.0) / 0.5)
-        depth_mult = 2.0 + (steps_below * 0.5)
+    if depth <= -3.0:
+        depth_mult = 6.0    # capitulation — max aggression
+    elif depth <= -2.0:
+        depth_mult = 4.0    # heavy dip
+    elif depth <= -1.0:
+        depth_mult = 2.5    # solid dip
     elif depth <= -0.50:
-        depth_mult = 1.20
+        depth_mult = 1.5    # moderate dip
     else:
-        depth_mult = 1.0
+        depth_mult = 1.0    # scout buy at threshold
 
     data = {
         'fast_roc': round(fast_cur, 4),
