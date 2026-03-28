@@ -15,11 +15,101 @@ from bot_utils import (
 
 # --- Engine & Strategy Imports ---
 from bot_executors import execute_orb, execute_quad, execute_trap, execute_momentum, execute_dca, execute_npr
-from grid_engine import execute_grid_bot, calculate_max_loss, calculate_grid_pnl
+from grid_engine import execute_grid_bot, calculate_max_loss, calculate_grid_pnl, cancel_all_pair_orders, cancel_order_safe
 from bot_ws import start_ws_engine
 
 bot_manager_bp = Blueprint('bot_manager', __name__)
 BOTS_FILE = "bots.json"
+
+# ==========================================
+# ORDER CLEANUP HELPERS
+# ==========================================
+def _cancel_by_client_oid(pair, client_oid):
+    """Cancel a single open order by its client_order_id. Returns True if cancelled."""
+    try:
+        open_res = client.get("/api/v3/brokerage/orders/historical/batch", params={
+            "order_status": "OPEN", "product_id": pair, "limit": 50
+        })
+        for o in open_res.get('orders', []):
+            if o.get('client_order_id') == client_oid:
+                real_id = o.get('order_id')
+                if real_id:
+                    client.cancel_orders(order_ids=[real_id])
+                    return True
+                break
+    except Exception as e:
+        print(f"[CLEANUP] Cancel by client_oid error: {e}")
+    return False
+
+def _cleanup_bot_orders(bot_id, bot):
+    """Cancel all open exchange orders belonging to a bot. Returns {cancelled, errors}."""
+    strategy = bot.get('strategy', '')
+    pair = bot.get('pair', '')
+    cancelled = 0
+    errors = []
+
+    try:
+        if strategy == 'GRID':
+            # GRID can have many orders — cancel each tracked grid individually
+            # to avoid nuking orders from other bots on the same pair
+            for g in bot.get('settings', {}).get('active_grids', []):
+                try:
+                    if cancel_order_safe(g):
+                        cancelled += 1
+                except Exception as e:
+                    errors.append(str(e))
+            bot.get('settings', {})['active_grids'] = []
+            risk = bot.get('settings', {}).get('risk', {})
+            risk['per_fill_trails'] = []
+            risk['cancelled_buy_levels'] = []
+            risk['depth_score'] = 0
+            print(f"[CLEANUP] GRID {pair}: cancelled {cancelled} grid orders")
+
+        elif strategy == 'MOMENTUM':
+            oid = bot.get('pending_order_oid')
+            if oid and _cancel_by_client_oid(pair, oid):
+                cancelled += 1
+                print(f"[CLEANUP] MOMENTUM {pair}: cancelled pending entry")
+            bot.pop('pending_order_oid', None)
+            bot.pop('pending_order_time', None)
+            bot.pop('signal_retries', None)
+
+        elif strategy == 'DCA':
+            buy_oid = bot.get('pending_buy_oid')
+            if buy_oid and _cancel_by_client_oid(pair, buy_oid):
+                cancelled += 1
+                print(f"[CLEANUP] DCA {pair}: cancelled pending buy")
+            bot.pop('pending_buy_oid', None)
+            bot.pop('pending_buy_time', None)
+            # Cancel all pending sell tiers
+            for sell in bot.get('pending_sells', []):
+                sell_oid = sell.get('oid', '')
+                if sell_oid:
+                    try:
+                        if _cancel_by_client_oid(pair, sell_oid):
+                            cancelled += 1
+                    except Exception as e:
+                        errors.append(str(e))
+            if bot.get('pending_sells'):
+                print(f"[CLEANUP] DCA {pair}: cancelled {cancelled - (1 if buy_oid else 0)} pending sells")
+            bot['pending_sells'] = []
+
+        elif strategy == 'NPR':
+            oid = bot.get('pending_order_oid')
+            if oid and _cancel_by_client_oid(pair, oid):
+                cancelled += 1
+                print(f"[CLEANUP] NPR {pair}: cancelled pending entry")
+            bot.pop('pending_order_oid', None)
+            bot.pop('pending_order_time', None)
+            bot.pop('entry_retries', None)
+
+        # ORB, QUAD, QUAD_SUPER, TRAP use market orders only — no cleanup needed
+
+    except Exception as e:
+        errors.append(str(e))
+        print(f"[CLEANUP] Error cleaning up bot {bot_id}: {e}")
+
+    return {'cancelled': cancelled, 'errors': errors}
 
 # ==========================================
 # STATE RECOVERY & ENGINE LOOP
@@ -318,9 +408,21 @@ def update_bot_follow(bot_id):
 @bot_manager_bp.route('/api/bots/stop/<bot_id>', methods=['POST'])
 def stop_bot(bot_id):
     if bot_id in ACTIVE_BOTS:
-        ACTIVE_BOTS[bot_id]['status'] = "STOPPED"
+        bot = ACTIVE_BOTS[bot_id]
+        # Set STOPPED first so the run_bot thread and WS engine stop placing new orders
+        bot['status'] = "STOPPED"
         save_bots()
-        return jsonify(success=True, message="Bot gracefully stopped.")
+
+        # Cancel all open exchange orders belonging to this bot
+        result = _cleanup_bot_orders(bot_id, bot)
+        save_bots()
+
+        cancelled = result['cancelled']
+        errors = result['errors']
+        msg = f"Bot stopped. {cancelled} open order(s) cancelled."
+        if errors:
+            msg += f" {len(errors)} error(s) during cleanup."
+        return jsonify(success=True, message=msg)
     return jsonify(success=False, error="Bot not found.")
 
 @bot_manager_bp.route('/api/bots/restart/<bot_id>', methods=['POST'])
@@ -337,11 +439,45 @@ def restart_bot(bot_id):
 @bot_manager_bp.route('/api/bots/delete/<bot_id>', methods=['DELETE'])
 def delete_bot(bot_id):
     if bot_id in ACTIVE_BOTS:
-        if ACTIVE_BOTS[bot_id]['status'] == 'RUNNING':
+        bot = ACTIVE_BOTS[bot_id]
+        if bot['status'] == 'RUNNING':
             return jsonify(success=False, error="Stop the bot before deleting it.")
+
+        # Verify no orphaned orders remain on the exchange
+        pair = bot.get('pair', '')
+        orphan_count = 0
+        try:
+            bot_oids = set()
+            for g in bot.get('settings', {}).get('active_grids', []):
+                if g.get('oid'): bot_oids.add(g['oid'])
+            if bot.get('pending_order_oid'): bot_oids.add(bot['pending_order_oid'])
+            if bot.get('pending_buy_oid'): bot_oids.add(bot['pending_buy_oid'])
+            for s in bot.get('pending_sells', []):
+                if s.get('oid'): bot_oids.add(s['oid'])
+
+            if bot_oids:
+                open_res = client.get("/api/v3/brokerage/orders/historical/batch", params={
+                    "order_status": "OPEN", "product_id": pair, "limit": 100
+                })
+                orphan_ids = []
+                for o in open_res.get('orders', []):
+                    if o.get('client_order_id') in bot_oids:
+                        orphan_count += 1
+                        if o.get('order_id'):
+                            orphan_ids.append(o['order_id'])
+
+                # Cancel only this bot's orphaned orders (not all pair orders)
+                for i in range(0, len(orphan_ids), 10):
+                    client.cancel_orders(order_ids=orphan_ids[i:i+10])
+        except Exception as e:
+            print(f"[DELETE] Orphan check error for {bot_id}: {e}")
+
         del ACTIVE_BOTS[bot_id]
         save_bots()
-        return jsonify(success=True, message="Bot permanently deleted.")
+        msg = "Bot permanently deleted."
+        if orphan_count > 0:
+            msg += f" {orphan_count} orphaned order(s) were cleaned up."
+        return jsonify(success=True, message=msg)
     return jsonify(success=False, error="Bot not found.")
 
 @bot_manager_bp.route('/api/bots/deposit/<bot_id>', methods=['POST'])
