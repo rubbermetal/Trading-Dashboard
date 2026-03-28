@@ -1998,7 +1998,6 @@
                     document.getElementById('sell-wall').innerText = `Sell: $${parseFloat(bookD.walls.sell_wall_px).toLocaleString()} (${parseFloat(bookD.walls.sell_wall_size).toFixed(2)})`;
                     document.getElementById('asks-list').innerHTML = bookD.asks.map(a => `<div class="book-row"><span>$${parseFloat(a.price).toLocaleString(undefined, { minimumFractionDigits: 2 })}</span><span class="text-muted">${parseFloat(a.size).toFixed(4)}</span></div>`).reverse().join('');
                     document.getElementById('bids-list').innerHTML = bookD.bids.map(b => `<div class="book-row"><span>$${parseFloat(b.price).toLocaleString(undefined, { minimumFractionDigits: 2 })}</span><span class="text-muted">${parseFloat(b.size).toFixed(4)}</span></div>`).join('');
-                }
                     // Whale activity tracking
                     trackWhaleActivity(bookD);
                 }
