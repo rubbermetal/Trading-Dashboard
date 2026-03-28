@@ -159,10 +159,12 @@ def fetch_data():
 def api_data():
     pos, total, hist, spot_map, total_usd_balance = fetch_data()
     
-    # Calculate Bot liquidity isolation (idle cash + value of held positions)
-    bot_locked_usd = 0.0
+    # Calculate Bot liquidity isolation
+    # bot_locked_usd: idle cash earmarked for bots (subtracted from USD balance for free_usd)
+    # bot_locked_total: full bot value including held positions (for display)
+    bot_locked_cash = sum(bot.get('current_usd', 0.0) for bot in ACTIVE_BOTS.values())
+    bot_locked_positions = 0.0
     for bot in ACTIVE_BOTS.values():
-        bot_locked_usd += bot.get('current_usd', 0.0)
         held = bot.get('asset_held', 0.0)
         if held > 0:
             pair = bot.get('pair', '')
@@ -172,8 +174,9 @@ def api_data():
                     p = client.get_product(product_id=pair)
                     px = float(p.price)
                 except: pass
-            bot_locked_usd += held * px
-    free_usd = max(0.0, total_usd_balance - bot_locked_usd)
+            bot_locked_positions += held * px
+    bot_locked_usd = bot_locked_cash + bot_locked_positions
+    free_usd = max(0.0, total_usd_balance - bot_locked_cash)
 
     reb = []
     if REBALANCE_TARGETS:
