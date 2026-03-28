@@ -1,5 +1,8 @@
 import sqlite3
 import time
+import json
+import os
+import uuid
 import threading
 from flask import Blueprint, jsonify, request
 
@@ -7,6 +10,32 @@ equity_bp = Blueprint('equity', __name__)
 
 DB_PATH = "equity.db"
 LOG_INTERVAL = 900  # 15 minutes
+
+# ==========================================
+# DEAD-MAN SWITCH
+# ==========================================
+_dms_config = {
+    "enabled": False,
+    "timeout_hours": 12,
+    "drawdown_threshold": 15,  # only flatten if a bot exceeds this drawdown %
+    "last_heartbeat": time.time(),
+    "triggered": False,
+}
+_DMS_CONFIG_FILE = "deadman_config.json"
+
+def _load_dms():
+    if os.path.exists(_DMS_CONFIG_FILE):
+        try:
+            with open(_DMS_CONFIG_FILE, 'r') as f:
+                _dms_config.update(json.load(f))
+        except: pass
+    _dms_config['last_heartbeat'] = time.time()  # reset on startup
+
+def _save_dms():
+    with open(_DMS_CONFIG_FILE, 'w') as f:
+        json.dump(_dms_config, f)
+
+_load_dms()
 
 def _init_db():
     conn = sqlite3.connect(DB_PATH)
@@ -74,6 +103,37 @@ def _log_equity():
                 )
             conn.commit()
             conn.close()
+            # --- Dead-man switch check ---
+            if _dms_config.get('enabled') and not _dms_config.get('triggered'):
+                timeout_sec = _dms_config.get('timeout_hours', 12) * 3600
+                since_heartbeat = time.time() - _dms_config.get('last_heartbeat', time.time())
+                if since_heartbeat >= timeout_sec:
+                    # Check if any bot is in significant drawdown
+                    threshold = _dms_config.get('drawdown_threshold', 15)
+                    for bid, bot in ACTIVE_BOTS.items():
+                        if bot.get('status') != 'RUNNING': continue
+                        avg_entry = bot.get('avg_entry', 0) or bot.get('entry_price', 0)
+                        held = bot.get('asset_held', 0)
+                        if avg_entry <= 0 or held <= 0: continue
+                        pair = bot.get('pair', '')
+                        px = spot_map.get(pair.split('-')[0], {}).get('px', 0)
+                        if px <= 0: continue
+                        drawdown = ((avg_entry - px) / avg_entry) * 100
+                        if drawdown >= threshold:
+                            # Flatten this bot
+                            try:
+                                from bot_utils import save_bots
+                                bot['status'] = 'STOPPED'
+                                bot['dca_state'] = 'SCANNING'
+                                save_bots()
+                                print(f"[DEAD-MAN] Stopped bot {bid} ({pair}) at -{drawdown:.1f}% drawdown")
+                                from notifier import notify
+                                notify("DEAD-MAN SWITCH", f"Stopped {bot.get('strategy','')} {pair} at -{drawdown:.1f}% drawdown. No heartbeat for {since_heartbeat/3600:.1f}h.", priority="urgent", tags=["rotating_light"])
+                            except Exception as e:
+                                print(f"[DEAD-MAN] Error stopping {bid}: {e}")
+                    _dms_config['triggered'] = True
+                    _save_dms()
+
         except Exception as e:
             print(f"[EQUITY] Log error: {e}")
 
@@ -84,6 +144,28 @@ threading.Thread(target=_log_equity, daemon=True).start()
 # ==========================================
 # API ENDPOINTS
 # ==========================================
+@equity_bp.route('/api/heartbeat', methods=['POST'])
+def heartbeat():
+    """Called by the UI periodically to reset the dead-man timer."""
+    _dms_config['last_heartbeat'] = time.time()
+    _dms_config['triggered'] = False
+    _save_dms()
+    return jsonify(success=True)
+
+@equity_bp.route('/api/deadman', methods=['GET'])
+def get_deadman():
+    return jsonify({
+        **_dms_config,
+        'seconds_since_heartbeat': int(time.time() - _dms_config.get('last_heartbeat', time.time())),
+    })
+
+@equity_bp.route('/api/deadman', methods=['POST'])
+def set_deadman():
+    d = request.json
+    _dms_config.update(d)
+    _save_dms()
+    return jsonify(success=True, config=_dms_config)
+
 @equity_bp.route('/api/equity')
 def get_equity():
     """Return equity history. Query params: range=24h|7d|30d|all (default 7d)"""

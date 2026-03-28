@@ -6,6 +6,7 @@ equity.db
 screener_config.json
 notify_config.json
 rebalance_schedule.json
+deadman_config.json
 
 # Development utilities (not part of the application)
 check_adx.py
