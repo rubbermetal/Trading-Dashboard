@@ -182,6 +182,7 @@
                                         <button class="btn btn-outline-secondary btn-sm" onclick="switchTF('1d')">1D</button>
                                     </div>
                                     <button class="btn btn-sm btn-outline-info fw-bold" id="scanner-toggle-btn" onclick="toggleScanner()"><i class="bi bi-broadcast me-1"></i>SCANNER</button>
+                                    <button class="btn btn-sm btn-outline-secondary" id="vpvr-toggle" onclick="toggleVolumeProfile()" title="Volume Profile"><i class="bi bi-bar-chart-steps"></i></button>
                                     <button class="btn btn-sm btn-outline-secondary" id="main-chart-fs-btn" onclick="toggleMainChartFullscreen()" title="Fullscreen"><i class="bi bi-arrows-fullscreen"></i></button>
                                 </div>
                             </div>
@@ -1000,6 +1001,59 @@
             document.querySelectorAll('#tf-buttons .btn').forEach(b => b.classList.remove('active'));
             event.target.classList.add('active');
             renderChart(chartPair);
+        }
+
+        // ==========================================
+        // VOLUME PROFILE OVERLAY
+        // ==========================================
+        let vpvrActive = false;
+        let vpvrLines = [];
+
+        async function toggleVolumeProfile() {
+            vpvrActive = !vpvrActive;
+            document.getElementById('vpvr-toggle').classList.toggle('active', vpvrActive);
+            if (vpvrActive) {
+                await renderVolumeProfile();
+            } else {
+                clearVolumeProfile();
+            }
+        }
+
+        function clearVolumeProfile() {
+            if (mainCandleSeries) {
+                vpvrLines.forEach(line => {
+                    try { mainCandleSeries.removePriceLine(line); } catch (e) {}
+                });
+            }
+            vpvrLines = [];
+        }
+
+        async function renderVolumeProfile() {
+            clearVolumeProfile();
+            if (!mainCandleSeries || !chartPair) return;
+            try {
+                const res = await fetch(`/api/volume_profile/${chartPair}/${chartTF}`);
+                const bins = await res.json();
+                if (!bins.length || bins.error) return;
+
+                bins.forEach(b => {
+                    const green = b.buy_pct > 50;
+                    const alpha = 0.15 + b.strength * 0.6;  // 0.15 to 0.75
+                    const color = green
+                        ? `rgba(0, 213, 120, ${alpha})`
+                        : `rgba(255, 75, 92, ${alpha})`;
+                    const width = Math.max(1, Math.round(b.strength * 3));
+                    const line = mainCandleSeries.createPriceLine({
+                        price: b.price,
+                        color: color,
+                        lineWidth: width,
+                        lineStyle: 0,  // solid
+                        axisLabelVisible: false,
+                        title: '',
+                    });
+                    vpvrLines.push(line);
+                });
+            } catch (e) { console.error('Volume profile error:', e); }
         }
 
         // ==========================================

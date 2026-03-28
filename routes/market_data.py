@@ -143,6 +143,60 @@ def get_candles(pair, granularity):
     except Exception as e:
         return jsonify(error=str(e))
 
+@market_data_bp.route('/api/volume_profile/<pair>/<granularity>')
+def get_volume_profile(pair, granularity):
+    """Returns volume binned by price level for a volume profile overlay."""
+    g = GRANULARITY_MAP.get(granularity)
+    if not g:
+        return jsonify(error="Invalid granularity")
+    try:
+        end_ts = int(time.time())
+        start_ts = end_ts - (300 * g['seconds'])
+        res = client.get(f"/api/v3/brokerage/products/{pair}/candles", params={
+            "start": str(start_ts), "end": str(end_ts), "granularity": g['cb']
+        })
+        candles = res.get('candles', [])
+        if not candles:
+            return jsonify([])
+
+        # Determine price range and bin count
+        prices = [float(c['high']) for c in candles] + [float(c['low']) for c in candles]
+        price_min, price_max = min(prices), max(prices)
+        price_range = price_max - price_min
+        if price_range <= 0:
+            return jsonify([])
+
+        num_bins = 30
+        bin_size = price_range / num_bins
+
+        # Accumulate volume into bins, split by buy/sell
+        bins = [{'price': price_min + (i + 0.5) * bin_size, 'buy_vol': 0, 'sell_vol': 0} for i in range(num_bins)]
+        for c in candles:
+            vol = float(c.get('volume', 0))
+            mid = (float(c['high']) + float(c['low'])) / 2
+            idx = min(int((mid - price_min) / bin_size), num_bins - 1)
+            if float(c['close']) >= float(c['open']):
+                bins[idx]['buy_vol'] += vol
+            else:
+                bins[idx]['sell_vol'] += vol
+
+        # Find max volume for normalization
+        max_vol = max(b['buy_vol'] + b['sell_vol'] for b in bins) or 1
+
+        result = []
+        for b in bins:
+            total = b['buy_vol'] + b['sell_vol']
+            if total > 0:
+                result.append({
+                    'price': round(b['price'], 6),
+                    'total': round(total, 2),
+                    'buy_pct': round(b['buy_vol'] / total * 100, 1),
+                    'strength': round(total / max_vol, 3),  # 0-1 normalized
+                })
+        return jsonify(result)
+    except Exception as e:
+        return jsonify(error=str(e))
+
 # ==========================================
 # BOT INDICATOR SERIES FOR CHART OVERLAYS
 # ==========================================
