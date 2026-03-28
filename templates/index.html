@@ -460,15 +460,68 @@
 
             <div class="tab-pane fade" id="screen-panel" role="tabpanel">
                 <div class="card card-custom p-4">
-                    <div class="d-flex justify-content-between align-items-center mb-4">
-                        <h4 class="fw-bold text-success-custom mb-0"><i class="bi bi-radar me-2"></i>Market Screener</h4>
-                        <button class="btn btn-sm btn-outline-primary" onclick="loadScreener()"><i class="bi bi-arrow-clockwise"></i> Refresh</button>
+                    <div class="d-flex justify-content-between align-items-center mb-3">
+                        <h4 class="fw-bold text-success-custom mb-0"><i class="bi bi-radar me-2"></i>Strategy Screener</h4>
+                        <div class="d-flex align-items-center gap-2">
+                            <span id="screener-status" class="text-muted" style="font-size:0.75rem;"></span>
+                            <button class="btn btn-sm btn-outline-secondary" onclick="toggleScreenerConfig()" title="Configure"><i class="bi bi-gear"></i></button>
+                            <button class="btn btn-sm btn-outline-primary" onclick="loadScreener()"><i class="bi bi-arrow-clockwise"></i> Refresh</button>
+                        </div>
                     </div>
+
+                    <!-- Config Panel (toggled) -->
+                    <div id="screener-config-panel" style="display:none;" class="mb-3">
+                        <div class="row g-3">
+                            <!-- Watchlist Management -->
+                            <div class="col-md-6">
+                                <div class="card card-custom p-3" style="border:1px solid #333;">
+                                    <h6 class="fw-bold text-info mb-2"><i class="bi bi-list-ul me-1"></i>Watchlist</h6>
+                                    <div id="watchlist-tags" class="d-flex flex-wrap gap-1 mb-2"></div>
+                                    <div class="input-group input-group-sm">
+                                        <input type="text" id="add-pair-input" class="form-control bg-dark border-secondary text-white" placeholder="e.g. XRP or XRP-USD" style="text-transform:uppercase;">
+                                        <button class="btn btn-outline-success" onclick="addWatchlistPair()"><i class="bi bi-plus-lg"></i> Add</button>
+                                    </div>
+                                    <div class="text-muted mt-1" style="font-size:0.7rem;">Click <i class="bi bi-x"></i> on a tag to remove. Pairs auto-append -USD.</div>
+                                </div>
+                            </div>
+                            <!-- Strategy Management -->
+                            <div class="col-md-6">
+                                <div class="card card-custom p-3" style="border:1px solid #333;">
+                                    <h6 class="fw-bold text-info mb-2"><i class="bi bi-lightning me-1"></i>Strategies</h6>
+                                    <div id="strategy-toggles"></div>
+                                    <div class="text-muted mt-1" style="font-size:0.7rem;">Toggle strategies on/off. Changes take effect on next scan cycle.</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Legend -->
+                    <div class="d-flex gap-3 mb-3 flex-wrap" style="font-size:0.75rem;">
+                        <span><span class="badge bg-success">SIGNAL</span> Entry conditions met</span>
+                        <span><span class="badge bg-warning text-dark">SETUP</span> Conditions forming</span>
+                        <span><span class="badge" style="background:#333;color:#888;">NEUTRAL</span> No setup</span>
+                        <span><span class="badge bg-danger">AVOID</span> Adverse conditions</span>
+                    </div>
+
+                    <!-- Strategy Matrix Table -->
                     <div class="table-responsive">
-                        <table class="table table-dark table-hover" style="font-size: 0.9rem;">
-                            <thead><tr><th>Asset</th><th>Price</th><th>RSI (14D)</th><th>MACD Trend</th></tr></thead>
-                            <tbody id="screener-grid"><tr><td colspan="4" class="text-center text-muted py-4">Scanning markets...</td></tr></tbody>
+                        <table class="table table-dark table-hover align-middle mb-0" style="font-size: 0.78rem;" id="screener-table">
+                            <thead id="screener-thead"><tr><td class="text-muted">Loading config...</td></tr></thead>
+                            <tbody id="screener-grid">
+                                <tr><td colspan="15" class="text-center text-muted py-4"><i class="bi bi-hourglass-split me-2"></i>Scanning all strategies across watchlist...</td></tr>
+                            </tbody>
                         </table>
+                    </div>
+
+                    <!-- Expanded detail panel (shown when a row is clicked) -->
+                    <div id="screener-detail" class="mt-3" style="display:none;">
+                        <div class="card card-custom p-3">
+                            <div class="d-flex justify-content-between align-items-center mb-2">
+                                <h6 class="fw-bold text-info mb-0" id="detail-pair-title">—</h6>
+                                <button class="btn btn-sm btn-outline-secondary" onclick="document.getElementById('screener-detail').style.display='none'"><i class="bi bi-x-lg"></i></button>
+                            </div>
+                            <div id="detail-content" class="row g-2"></div>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -2008,16 +2061,258 @@
         // ==========================================
         // SCREENER & REBALANCE LOGIC
         // ==========================================
+        // ==========================================
+        // STRATEGY SCREENER
+        // ==========================================
+        let screenerCache = [];
+        let screenerConfig = { watchlist: [], strategies: [], all_strategies: {} };
+        const STRAT_LABELS = {'QUAD':'QUAD','SUPER':'SUPER','GRID':'GRID','ORB':'ORB','TRAP':'TRAP','MOMENTUM':'MOM','DCA':'DCA','NPR':'NPR'};
+
+        function stratBadge(s, compact) {
+            if (!s) return '<span class="badge" style="background:#222;color:#555;">\u2014</span>';
+            const st = s.status;
+            let cls = '', style = '', icon = '';
+            if (st === 'SIGNAL')  { cls = 'bg-success'; icon = '\u25CF'; }
+            else if (st === 'SETUP')   { cls = 'bg-warning text-dark'; icon = '\u25D0'; }
+            else if (st === 'AVOID')   { cls = 'bg-danger'; icon = '\u2715'; }
+            else { style = 'background:#2a2a2a;color:#666;'; icon = '\u00B7'; }
+            const label = compact ? icon : st;
+            const title = s.reason || '';
+            return `<span class="badge ${cls}" style="${style};cursor:pointer;font-size:0.7rem;" title="${title}">${label}</span>`;
+        }
+
+        function rsiColor(v) {
+            if (v === null || v === undefined) return 'text-muted';
+            if (v <= 30) return 'color:#5dca5d';
+            if (v >= 70) return 'color:#e06666';
+            if (v <= 40) return 'color:#7ecf7e';
+            if (v >= 60) return 'color:#d48a8a';
+            return 'text-muted';
+        }
+
+        function adxLabel(v) {
+            if (v === null || v === undefined) return '<span class="text-muted">\u2014</span>';
+            let c = '#888';
+            if (v >= 35) c = '#ff6b6b';
+            else if (v >= 25) c = '#ffa94d';
+            else if (v < 20) c = '#69db7c';
+            return `<span style="color:${c}">${v.toFixed(0)}</span>`;
+        }
+
+        function toggleScreenerConfig() {
+            const p = document.getElementById('screener-config-panel');
+            p.style.display = p.style.display === 'none' ? 'block' : 'none';
+            if (p.style.display === 'block') loadScreenerConfig();
+        }
+
+        async function loadScreenerConfig() {
+            try {
+                const r = await fetch('/api/screener/config');
+                screenerConfig = await r.json();
+                renderWatchlistTags();
+                renderStrategyToggles();
+                renderScreenerHeader();
+            } catch(e) { console.error('[ScreenerConfig]', e); }
+        }
+
+        function renderWatchlistTags() {
+            const container = document.getElementById('watchlist-tags');
+            container.innerHTML = screenerConfig.watchlist.map(p =>
+                `<span class="badge bg-dark border border-secondary d-flex align-items-center gap-1" style="font-size:0.78rem;">
+                    ${p.replace('-USD','')}
+                    <i class="bi bi-x" style="cursor:pointer;font-size:0.85rem;" onclick="removeWatchlistPair('${p}')"></i>
+                </span>`
+            ).join('');
+        }
+
+        function renderStrategyToggles() {
+            const container = document.getElementById('strategy-toggles');
+            const all = screenerConfig.all_strategies || {};
+            const enabled = screenerConfig.strategies || [];
+            container.innerHTML = Object.keys(all).map(k => {
+                const s = all[k];
+                const on = enabled.includes(k);
+                return `<div class="form-check form-switch d-inline-flex align-items-center me-3 mb-1">
+                    <input class="form-check-input" type="checkbox" id="strat-toggle-${k}" ${on ? 'checked' : ''} onchange="toggleStrategy('${k}', this.checked)">
+                    <label class="form-check-label ms-1" for="strat-toggle-${k}" style="font-size:0.78rem;cursor:pointer;" title="${s.desc}">
+                        <b>${s.label}</b> <span class="text-muted">${s.desc}</span>
+                    </label>
+                </div>`;
+            }).join('');
+        }
+
+        function renderScreenerHeader() {
+            const enabled = screenerConfig.strategies || [];
+            const all = screenerConfig.all_strategies || {};
+            let ths = `<th style="min-width:80px;">Pair</th><th style="min-width:70px;">Price</th><th>24h</th><th>RSI</th><th>ADX</th><th>Trend</th>`;
+            for (const k of enabled) {
+                const label = (all[k] && all[k].label) || STRAT_LABELS[k] || k;
+                ths += `<th class="text-center">${label}</th>`;
+            }
+            ths += `<th>Best Fit</th>`;
+            document.getElementById('screener-thead').innerHTML = `<tr>${ths}</tr>`;
+        }
+
+        async function addWatchlistPair() {
+            const input = document.getElementById('add-pair-input');
+            const pair = input.value.trim().toUpperCase();
+            if (!pair) return;
+            input.disabled = true;
+            try {
+                const r = await fetch('/api/screener/watchlist', {
+                    method: 'POST', headers: {'Content-Type':'application/json'},
+                    body: JSON.stringify({action:'ADD', pair: pair})
+                });
+                const d = await r.json();
+                if (!d.success) { alert(d.error); return; }
+                input.value = '';
+                screenerConfig.watchlist = d.watchlist;
+                renderWatchlistTags();
+            } catch(e) { alert('Failed to add pair'); }
+            finally { input.disabled = false; }
+        }
+
+        async function removeWatchlistPair(pair) {
+            if (!confirm(`Remove ${pair} from watchlist?`)) return;
+            try {
+                const r = await fetch('/api/screener/watchlist', {
+                    method: 'POST', headers: {'Content-Type':'application/json'},
+                    body: JSON.stringify({action:'REMOVE', pair: pair})
+                });
+                const d = await r.json();
+                if (!d.success) { alert(d.error); return; }
+                screenerConfig.watchlist = d.watchlist;
+                renderWatchlistTags();
+            } catch(e) { alert('Failed to remove pair'); }
+        }
+
+        async function toggleStrategy(name, enabled) {
+            try {
+                const r = await fetch('/api/screener/strategies', {
+                    method: 'POST', headers: {'Content-Type':'application/json'},
+                    body: JSON.stringify({action: enabled ? 'ADD' : 'REMOVE', strategy: name})
+                });
+                const d = await r.json();
+                if (!d.success) { alert(d.error); document.getElementById(`strat-toggle-${name}`).checked = !enabled; return; }
+                screenerConfig.strategies = d.strategies;
+                renderScreenerHeader();
+            } catch(e) { alert('Failed to toggle strategy'); document.getElementById(`strat-toggle-${name}`).checked = !enabled; }
+        }
+
+        // Add pair on Enter key
+        document.addEventListener('DOMContentLoaded', () => {
+            const inp = document.getElementById('add-pair-input');
+            if (inp) inp.addEventListener('keydown', e => { if (e.key === 'Enter') addWatchlistPair(); });
+        });
+
         async function loadScreener() {
             try {
-                const r = await fetch('/api/screener'); const data = await r.json();
-                if (data.length === 0) return;
-                document.getElementById('screener-grid').innerHTML = data.map(i => {
-                    let rClass = i.rsi.includes('Buy') ? 'text-success-custom' : i.rsi.includes('Sell') ? 'text-danger-custom' : 'text-muted';
-                    let mClass = i.macd === 'Bullish' ? 'text-success-custom' : i.macd === 'Bearish' ? 'text-danger-custom' : 'text-muted';
-                    return `<tr><td class="fw-bold">${i.asset}</td><td>${i.price}</td><td class="${rClass} fw-bold">${i.rsi}</td><td class="${mClass} fw-bold">${i.macd}</td></tr>`;
+                // Load config first if we haven't yet (to build dynamic headers)
+                if (screenerConfig.strategies.length === 0) await loadScreenerConfig();
+
+                const r = await fetch('/api/screener');
+                const data = await r.json();
+                if (!Array.isArray(data) || data.length === 0) return;
+                screenerCache = data;
+
+                const enabled = screenerConfig.strategies || [];
+                const all = screenerConfig.all_strategies || {};
+                const now = new Date().toLocaleTimeString();
+                document.getElementById('screener-status').textContent = `Updated ${now}`;
+                const colCount = 7 + enabled.length;
+
+                document.getElementById('screener-grid').innerHTML = data.map((row, idx) => {
+                    const m = row.metrics || {};
+                    const s = row.strategies || {};
+                    const px = m.price;
+                    const pxStr = px ? (px >= 1 ? `$${px.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}` : `$${px.toFixed(6)}`) : '\u2014';
+                    const chg = m.chg_24h || 0;
+                    const chgCls = chg > 0 ? 'text-success-custom' : chg < 0 ? 'text-danger-custom' : 'text-muted';
+                    const chgStr = `${chg >= 0 ? '+' : ''}${chg.toFixed(2)}%`;
+
+                    const rsiV = m.rsi;
+                    const rsiStr = rsiV !== null && rsiV !== undefined ? rsiV.toFixed(1) : '\u2014';
+                    const rsiStyle = rsiColor(rsiV);
+
+                    const trendIcon = m.trend === 'BULL' ? '\u25B2' : m.trend === 'BEAR' ? '\u25BC' : '\u2014';
+                    const trendCls = m.trend === 'BULL' ? 'text-success-custom' : m.trend === 'BEAR' ? 'text-danger-custom' : 'text-muted';
+
+                    // Dynamic strategy columns
+                    let stratCells = '';
+                    for (const k of enabled) {
+                        stratCells += `<td class="text-center">${stratBadge(s[k], false)}</td>`;
+                    }
+
+                    const best = row.best;
+                    const bestLabel = best ? ((all[best] && all[best].label) || STRAT_LABELS[best] || best) : null;
+                    const bestStr = bestLabel ? `<span class="badge bg-info text-dark fw-bold" style="font-size:0.72rem;">${bestLabel}</span>` : '<span class="text-muted">\u2014</span>';
+
+                    const hasSignal = enabled.some(k => s[k] && s[k].status === 'SIGNAL');
+                    const rowStyle = hasSignal ? 'border-left:3px solid #00c853;' : '';
+
+                    return `<tr style="${rowStyle}cursor:pointer;" onclick="showScreenerDetail(${idx})">
+                        <td class="fw-bold">${row.pair.replace('-USD','')}</td>
+                        <td>${pxStr}</td>
+                        <td class="${chgCls} fw-bold">${chgStr}</td>
+                        <td style="${rsiStyle}"><b>${rsiStr}</b></td>
+                        <td>${adxLabel(m.adx)}</td>
+                        <td class="${trendCls} fw-bold">${trendIcon}</td>
+                        ${stratCells}
+                        <td>${bestStr}</td>
+                    </tr>`;
                 }).join('');
-            } catch (e) { }
+            } catch (e) {
+                console.error('[Screener]', e);
+            }
+        }
+
+        function showScreenerDetail(idx) {
+            const row = screenerCache[idx];
+            if (!row) return;
+            const panel = document.getElementById('screener-detail');
+            const title = document.getElementById('detail-pair-title');
+            const content = document.getElementById('detail-content');
+            const all = screenerConfig.all_strategies || {};
+
+            title.textContent = `${row.pair} \u2014 Strategy Breakdown`;
+            panel.style.display = 'block';
+
+            // Show ALL strategies in detail (even disabled ones, for visibility)
+            const allKeys = Object.keys(row.strategies || {});
+            let html = '';
+            for (const k of allKeys) {
+                const s = row.strategies[k];
+                if (!s) continue;
+                const st = s.status;
+                let borderColor = '#333';
+                if (st === 'SIGNAL') borderColor = '#00c853';
+                else if (st === 'SETUP') borderColor = '#ffc107';
+                else if (st === 'AVOID') borderColor = '#dc3545';
+
+                const label = (all[k] && all[k].label) || STRAT_LABELS[k] || k;
+
+                let metricsHtml = '';
+                if (s.metrics && Object.keys(s.metrics).length > 0) {
+                    metricsHtml = '<div class="mt-1" style="font-size:0.72rem;color:#999;">';
+                    for (const [mk, mv] of Object.entries(s.metrics)) {
+                        const val = typeof mv === 'number' ? (Number.isInteger(mv) ? mv : mv.toFixed(1)) : mv;
+                        metricsHtml += `<span class="me-2"><b>${mk}:</b> ${val}</span>`;
+                    }
+                    metricsHtml += '</div>';
+                }
+
+                html += `<div class="col-6 col-md-3">
+                    <div class="p-2 rounded" style="border-left:3px solid ${borderColor};background:#1a1a2e;">
+                        <div class="d-flex justify-content-between align-items-center">
+                            <span class="fw-bold" style="font-size:0.8rem;">${label}</span>
+                            ${stratBadge(s, false)}
+                        </div>
+                        <div class="text-muted mt-1" style="font-size:0.72rem;">${s.reason || ''}</div>
+                        ${metricsHtml}
+                    </div>
+                </div>`;
+            }
+            content.innerHTML = html;
         }
 
         function openRebalanceConfig() {

@@ -1,0 +1,22 @@
+{
+  "watchlist": [
+    "BTC-USD",
+    "ETH-USD",
+    "SOL-USD",
+    "DOGE-USD",
+    "AVAX-USD",
+    "LINK-USD",
+    "ADA-USD",
+    "SHIB-USD"
+  ],
+  "strategies": [
+    "QUAD",
+    "SUPER",
+    "NPR",
+    "MOMENTUM",
+    "GRID",
+    "DCA",
+    "ORB",
+    "TRAP"
+  ]
+}
