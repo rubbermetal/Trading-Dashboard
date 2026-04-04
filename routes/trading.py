@@ -3,8 +3,12 @@ from decimal import Decimal, ROUND_DOWN
 import pandas as pd
 import pandas_ta as ta
 from flask import Blueprint, jsonify, request
-from shared import client, TRAILING_STOPS, BRACKET_ORDERS, TWAP_ORDERS, SNIPER_ORDERS
-from bot_utils import snap_to_increment
+from shared import client, TRAILING_STOPS, BRACKET_ORDERS, TWAP_ORDERS, SNIPER_ORDERS, MANUAL_POSITIONS
+from bot_utils import snap_to_increment, get_bot_tf, TF_MAP, get_contract_multiplier, is_derivative, record_trade, save_bots, poll_market_fill, extract_fee
+from validators import validate_trade, validate_bracket, validate_trail, rate_limit
+from logger import get_logger
+
+log = get_logger('trading')
 from notifier import notify_bracket_hit, notify_sniper, notify_twap_complete
 
 trading_bp = Blueprint('trading', __name__)
@@ -31,7 +35,7 @@ def background_watcher():
                         if cur_px <= trigger_px:
                             client.market_order_sell(client_order_id=str(uuid.uuid4()), product_id=pair, base_size=data['size'])
                             del TRAILING_STOPS[pair]
-                            print(f"[TRAIL] {pair} SELL triggered @ {cur_px:.2f} (peak {data['highest_price']:.2f})")
+                            log.info(f"[{pair}] TRAIL SELL triggered @ {cur_px:.2f} (peak {data['highest_price']:.2f})")
                     else:
                         # Short trailing stop — tracks lowest price, triggers on rise
                         if cur_px < data.get('lowest_price', cur_px):
@@ -40,9 +44,9 @@ def background_watcher():
                         if cur_px >= trigger_px:
                             client.market_order_buy(client_order_id=str(uuid.uuid4()), product_id=pair, quote_size=str(float(data['size']) * cur_px))
                             del TRAILING_STOPS[pair]
-                            print(f"[TRAIL] {pair} BUY triggered @ {cur_px:.2f} (trough {data.get('lowest_price', 0):.2f})")
+                            log.info(f"[{pair}] TRAIL BUY triggered @ {cur_px:.2f} (trough {data.get('lowest_price', 0):.2f})")
                 except Exception as e:
-                    print(f"[TRAIL] Error checking {pair}: {e}")
+                    log.error(f"[{pair}] Trail check error: {e}")
 
             # --- TWAP Orders ---
             for twap_id, tw in list(TWAP_ORDERS.items()):
@@ -63,7 +67,7 @@ def background_watcher():
 
                     if remaining_slices <= 0:
                         tw['status'] = 'COMPLETED'
-                        print(f"[TWAP] {twap_id} completed: {tw['filled_slices']} slices filled")
+                        log.info(f"TWAP {twap_id} completed: {tw['filled_slices']} slices filled")
                         notify_twap_complete(pair, tw['side'], tw['total_usd'], tw['filled_slices'])
                         continue
 
@@ -88,9 +92,9 @@ def background_watcher():
                     tw['filled_slices'] = tw.get('filled_slices', 0) + 1
                     tw['next_slice_at'] = now + tw['interval_sec']
                     tw['last_price'] = cur_px
-                    print(f"[TWAP] {pair} slice {tw['filled_slices']}/{tw['slices']} @ ${str_price} ({str_qty})")
+                    log.info(f"[{pair}] TWAP slice {tw['filled_slices']}/{tw['slices']} @ ${str_price} ({str_qty})")
                 except Exception as e:
-                    print(f"[TWAP] Error on {twap_id}: {e}")
+                    log.error(f"TWAP {twap_id} error: {e}")
 
             # --- Sniper Orders ---
             for snip_id, sn in list(SNIPER_ORDERS.items()):
@@ -127,10 +131,10 @@ def background_watcher():
 
                         sn['status'] = 'TRIGGERED'
                         sn['triggered_at'] = cur_px
-                        print(f"[SNIPER] {pair} triggered @ ${cur_px:.2f} (target ${trigger:.2f}), {sn['side']} placed @ ${str_price}")
+                        log.info(f"[{pair}] Sniper triggered @ ${cur_px:.2f} (target ${trigger:.2f}), {sn['side']} placed @ ${str_price}")
                         notify_sniper(pair, sn['side'], cur_px)
                 except Exception as e:
-                    print(f"[SNIPER] Error on {snip_id}: {e}")
+                    log.error(f"Sniper {snip_id} error: {e}")
 
             # --- Bracket Orders (software OCO) ---
             for pair, bkt in list(BRACKET_ORDERS.items()):
@@ -161,14 +165,14 @@ def background_watcher():
                         else:
                             client.market_order_buy(client_order_id=oid, product_id=pair, quote_size=str(float(bkt['size']) * cur_px))
                         pnl = (cur_px - bkt['entry_price']) * float(bkt['size']) if side == 'BUY' else (bkt['entry_price'] - cur_px) * float(bkt['size'])
-                        print(f"[BRACKET] {pair} {hit} hit @ {cur_px:.2f} | entry {bkt['entry_price']:.2f} | PnL ${pnl:.2f}")
+                        log.info(f"[{pair}] Bracket {hit} hit @ {cur_px:.2f} | entry {bkt['entry_price']:.2f} | PnL ${pnl:.2f}")
                         notify_bracket_hit(pair, hit, cur_px, pnl)
                         del BRACKET_ORDERS[pair]
                 except Exception as e:
-                    print(f"[BRACKET] Error checking {pair}: {e}")
+                    log.error(f"[{pair}] Bracket check error: {e}")
 
         except Exception as e:
-            print(f"[WATCHER] Top-level error: {e}")
+            log.error(f"Watcher top-level error: {e}")
         time.sleep(10)
 
 threading.Thread(target=background_watcher, daemon=True).start()
@@ -190,8 +194,11 @@ def search(symbol):
 # TRADE EXECUTION
 # ==========================================
 @trading_bp.route('/api/trade', methods=['POST'])
+@rate_limit
 def trade():
     d = request.json
+    if not d:
+        return jsonify(success=False, error="Request body required"), 400
     try:
         oid = str(uuid.uuid4())
         if d.get('action') == 'CLOSE':
@@ -262,9 +269,13 @@ def handle_tpsl():
 # BRACKET ORDER (software OCO: TP + SL on entry)
 # ==========================================
 @trading_bp.route('/api/bracket', methods=['POST'])
+@rate_limit
 def set_bracket():
     """Attach a TP and/or SL to a position. Monitored software-side as OCO."""
     d = request.json
+    valid, err = validate_bracket(d)
+    if not valid:
+        return jsonify(success=False, error=err), 400
     try:
         pair = d['pair']
         size = str(d['size'])
@@ -296,8 +307,12 @@ def set_bracket():
 # TRAILING STOP
 # ==========================================
 @trading_bp.route('/api/trail', methods=['POST'])
+@rate_limit
 def set_trail():
     d = request.json
+    valid, err = validate_trail(d)
+    if not valid:
+        return jsonify(success=False, error=err), 400
     try:
         pair = d['pair']
         side = d.get('side', 'SELL')
@@ -594,3 +609,395 @@ def get_indicators(pair):
 
         return jsonify({"rsi": rsi_status, "trend": trend_status, "macd": macd_status, "debug": ""})
     except Exception as e: return jsonify({"rsi": "Err", "trend": "Err", "macd": "Err", "debug": str(e)})
+
+
+# ==========================================
+# STRATEGY-MANAGED MANUAL POSITIONS
+# ==========================================
+from strategies import (
+    calculate_quad_rotation, calculate_quad_super, calculate_orb,
+    calculate_trap, calculate_momentum, calculate_npr
+)
+from bot_executors import momentum_get_stop_price, npr_get_stop_and_trail
+
+SUPPORTED_EXIT_STRATEGIES = {
+    'QUAD':       'Stoch(9) crosses above 80',
+    'QUAD_SUPER': 'Stoch(9) crosses above 80',
+    'ORB':        'Price crosses below midpoint',
+    'TRAP':       '+2.5% TP or ATR-based stop',
+    'MOMENTUM':   '3-phase trailing stop (ATR-based)',
+    'NPR':        'Event stop + trailing stop',
+    'VWAP_MR':    'VWAP touch or 1.5x ATR trail',
+    'SQUEEZE':    'Momentum reversal or 2x ATR trail',
+}
+
+_manual_pos_file = 'manual_positions.json'
+_manual_lock = threading.Lock()
+
+
+def _save_manual_positions():
+    import json
+    with _manual_lock:
+        with open(_manual_pos_file, 'w') as f:
+            json.dump(MANUAL_POSITIONS, f)
+
+
+def _load_manual_positions():
+    import json, os
+    if os.path.exists(_manual_pos_file):
+        try:
+            with open(_manual_pos_file, 'r') as f:
+                MANUAL_POSITIONS.update(json.load(f))
+        except Exception:
+            pass
+
+
+@trading_bp.route('/api/manual/strategies', methods=['GET'])
+def get_exit_strategies():
+    return jsonify(SUPPORTED_EXIT_STRATEGIES)
+
+
+@trading_bp.route('/api/manual/enter', methods=['POST'])
+@rate_limit
+def manual_enter():
+    """Enter a manual position with a strategy managing the exit."""
+    d = request.json
+    if not d:
+        return jsonify(success=False, error="Request body required"), 400
+
+    pair = d.get('pair', '').upper()
+    amount = float(d.get('amount', 0))
+    order_type = d.get('order_type', 'MARKET').upper()
+    strategy = d.get('strategy', '').upper()
+
+    if not pair or amount <= 0:
+        return jsonify(success=False, error="pair and positive amount required"), 400
+    if strategy not in SUPPORTED_EXIT_STRATEGIES:
+        return jsonify(success=False, error=f"Invalid strategy. Use: {', '.join(SUPPORTED_EXIT_STRATEGIES)}"), 400
+
+    try:
+        oid = str(uuid.uuid4())
+        p_info = client.get_product(product_id=pair)
+        cur_px = float(p_info.price)
+        base_inc = str(getattr(p_info, 'base_increment', '0.00000001'))
+        quote_inc = str(getattr(p_info, 'quote_increment', '0.01'))
+        mult = get_contract_multiplier(pair)
+
+        if order_type == 'MARKET':
+            client.market_order_buy(client_order_id=oid, product_id=pair, quote_size=str(amount))
+        elif order_type == 'MAKER':
+            book = client.get_product_book(product_id=pair, limit=1)
+            best_bid = float(book.pricebook.bids[0].price)
+            str_price = snap_to_increment(best_bid, quote_inc)
+            base_qty = amount / best_bid
+            str_qty = snap_to_increment(base_qty, base_inc)
+            client.limit_order_buy(client_order_id=oid, product_id=pair, base_size=str_qty, limit_price=str_price)
+        else:
+            return jsonify(success=False, error="order_type must be MARKET or MAKER"), 400
+
+        # Poll for fill
+        fill_px, fill_sz, fill_fee = poll_market_fill(oid, pair, retries=3, delay=1.0)
+        entry_px = fill_px if fill_px else cur_px
+        size = fill_sz if fill_sz else amount / cur_px
+
+        pos_id = str(uuid.uuid4())[:8]
+
+        # Build strategy-specific state
+        bot_state = {}
+        if strategy == 'MOMENTUM':
+            # Fetch ATR for trailing stop
+            end_ts = int(time.time())
+            start_ts = end_ts - (300 * 300)
+            try:
+                res = client.get(f"/api/v3/brokerage/products/{pair}/candles",
+                                 params={"start": str(start_ts), "end": str(end_ts), "granularity": "FIVE_MINUTE"})
+                candles = res.get('candles', [])
+                if len(candles) >= 50:
+                    parsed = [{'high': float(c['high']), 'low': float(c['low']), 'close': float(c['close'])} for c in candles]
+                    cdf = pd.DataFrame(parsed)
+                    atr_val = float(ta.atr(cdf['high'], cdf['low'], cdf['close'], 14).iloc[-1])
+                    bot_state['entry_atr'] = atr_val
+                    bot_state['fee_estimate'] = entry_px * size * mult * 0.005
+            except Exception:
+                bot_state['entry_atr'] = entry_px * 0.015  # fallback 1.5%
+                bot_state['fee_estimate'] = entry_px * size * mult * 0.005
+            bot_state['high_water_mark'] = entry_px
+            bot_state['stop_phase'] = 1
+        elif strategy == 'TRAP':
+            bot_state['avg_entry'] = entry_px
+            bot_state['entry_stage'] = 2  # treat as fully entered
+            # Fetch ATR
+            try:
+                end_ts = int(time.time())
+                start_ts = end_ts - (300 * 300)
+                res = client.get(f"/api/v3/brokerage/products/{pair}/candles",
+                                 params={"start": str(start_ts), "end": str(end_ts), "granularity": "FIFTEEN_MINUTE"})
+                candles = res.get('candles', [])
+                if len(candles) >= 20:
+                    parsed = [{'high': float(c['high']), 'low': float(c['low']), 'close': float(c['close'])} for c in candles]
+                    cdf = pd.DataFrame(parsed)
+                    bot_state['breakout_atr'] = float(ta.atr(cdf['high'], cdf['low'], cdf['close'], 14).iloc[-1])
+            except Exception:
+                bot_state['breakout_atr'] = entry_px * 0.015
+        elif strategy == 'NPR':
+            bot_state['npr_state'] = 'IN_POSITION'
+            bot_state['event_stop'] = entry_px * 0.97  # default 3% stop
+            bot_state['high_water_mark'] = entry_px
+            bot_state['trail_distance'] = entry_px * 0.02  # 2% trail
+
+        MANUAL_POSITIONS[pos_id] = {
+            'pair': pair,
+            'side': 'LONG',
+            'entry_price': entry_px,
+            'size': size,
+            'strategy': strategy,
+            'status': 'ACTIVE',
+            'base_inc': base_inc,
+            'quote_inc': quote_inc,
+            'bot_state': bot_state,
+            'created_at': time.time(),
+            'entry_oid': oid,
+        }
+        _save_manual_positions()
+        log.info(f"[{pair}] Manual position opened: {strategy} exit, {size:.8f} @ ${entry_px:.2f}")
+        return jsonify(success=True, pos_id=pos_id, entry_price=entry_px, size=size)
+
+    except Exception as e:
+        log.error(f"Manual enter failed: {e}")
+        return jsonify(success=False, error=str(e))
+
+
+@trading_bp.route('/api/manual/close/<pos_id>', methods=['POST'])
+@rate_limit
+def manual_close(pos_id):
+    """Close a manual position immediately."""
+    pos = MANUAL_POSITIONS.get(pos_id)
+    if not pos or pos['status'] != 'ACTIVE':
+        return jsonify(success=False, error="Position not found or already closed"), 404
+
+    try:
+        oid = str(uuid.uuid4())
+        pair = pos['pair']
+        str_qty = snap_to_increment(pos['size'], pos['base_inc'])
+        client.market_order_sell(client_order_id=oid, product_id=pair, base_size=str_qty)
+
+        fill_px, fill_sz, fill_fee = poll_market_fill(oid, pair, retries=2, delay=0.5)
+        exit_px = fill_px if fill_px else float(client.get_product(product_id=pair).price)
+        mult = get_contract_multiplier(pair)
+        pnl = (exit_px - pos['entry_price']) * pos['size'] * mult
+
+        pos['status'] = 'CLOSED'
+        pos['exit_price'] = exit_px
+        pos['pnl'] = round(pnl, 4)
+        pos['closed_at'] = time.time()
+        pos['exit_reason'] = 'MANUAL_CLOSE'
+        _save_manual_positions()
+        log.info(f"[{pair}] Manual position closed: PnL ${pnl:.2f}")
+        return jsonify(success=True, exit_price=exit_px, pnl=round(pnl, 4))
+    except Exception as e:
+        log.error(f"Manual close failed: {e}")
+        return jsonify(success=False, error=str(e))
+
+
+@trading_bp.route('/api/manual/strategy/<pos_id>', methods=['POST'])
+def manual_switch_strategy(pos_id):
+    """Switch the exit strategy on an active position."""
+    pos = MANUAL_POSITIONS.get(pos_id)
+    if not pos or pos['status'] != 'ACTIVE':
+        return jsonify(success=False, error="Position not found or not active"), 404
+
+    d = request.json or {}
+    new_strat = d.get('strategy', '').upper()
+    if new_strat not in SUPPORTED_EXIT_STRATEGIES:
+        return jsonify(success=False, error=f"Invalid strategy. Use: {', '.join(SUPPORTED_EXIT_STRATEGIES)}"), 400
+
+    old_strat = pos['strategy']
+    pos['strategy'] = new_strat
+    pos['bot_state'] = {}  # reset strategy state
+
+    # Re-initialize for new strategy
+    cur_px = pos['entry_price']  # approximate
+    if new_strat == 'MOMENTUM':
+        pos['bot_state']['entry_atr'] = cur_px * 0.015
+        pos['bot_state']['fee_estimate'] = cur_px * pos['size'] * 0.005
+        pos['bot_state']['high_water_mark'] = cur_px
+        pos['bot_state']['stop_phase'] = 1
+    elif new_strat == 'TRAP':
+        pos['bot_state']['avg_entry'] = pos['entry_price']
+        pos['bot_state']['entry_stage'] = 2
+        pos['bot_state']['breakout_atr'] = cur_px * 0.015
+    elif new_strat == 'NPR':
+        pos['bot_state']['npr_state'] = 'IN_POSITION'
+        pos['bot_state']['event_stop'] = cur_px * 0.97
+        pos['bot_state']['high_water_mark'] = cur_px
+        pos['bot_state']['trail_distance'] = cur_px * 0.02
+
+    _save_manual_positions()
+    log.info(f"[{pos['pair']}] Strategy switched: {old_strat} -> {new_strat}")
+    return jsonify(success=True, message=f"Exit strategy changed to {new_strat}")
+
+
+@trading_bp.route('/api/manual/positions', methods=['GET'])
+def get_manual_positions():
+    """Return all manual positions with live PnL."""
+    result = []
+    for pos_id, pos in MANUAL_POSITIONS.items():
+        entry = dict(pos)
+        entry['pos_id'] = pos_id
+        # Live PnL for active positions
+        if pos['status'] == 'ACTIVE':
+            try:
+                cur_px = float(client.get_product(product_id=pos['pair']).price)
+                mult = get_contract_multiplier(pos['pair'])
+                entry['current_price'] = cur_px
+                entry['unrealized_pnl'] = round((cur_px - pos['entry_price']) * pos['size'] * mult, 4)
+                entry['pnl_pct'] = round(((cur_px - pos['entry_price']) / pos['entry_price']) * 100, 2)
+                # Strategy status
+                bs = pos.get('bot_state', {})
+                if pos['strategy'] == 'MOMENTUM':
+                    phase = bs.get('stop_phase', 1)
+                    hwm = bs.get('high_water_mark', pos['entry_price'])
+                    entry['strategy_status'] = f"Phase {phase}, HWM ${hwm:.0f}"
+                elif pos['strategy'] == 'TRAP':
+                    tp_pct = 2.5
+                    entry['strategy_status'] = f"TP +{tp_pct}%, SL -ATR"
+                elif pos['strategy'] == 'NPR':
+                    stop = bs.get('event_stop', 0)
+                    entry['strategy_status'] = f"Stop ${stop:.0f}"
+                else:
+                    entry['strategy_status'] = 'Monitoring'
+            except Exception:
+                entry['current_price'] = 0
+                entry['unrealized_pnl'] = 0
+                entry['strategy_status'] = 'Price fetch error'
+        # Remove bot_state from response (internal)
+        entry.pop('bot_state', None)
+        result.append(entry)
+    return jsonify(result)
+
+
+def _manual_position_evaluator():
+    """Background thread: evaluates exit conditions for all active manual positions every 15s."""
+    _load_manual_positions()
+    while True:
+        time.sleep(15)
+        for pos_id, pos in list(MANUAL_POSITIONS.items()):
+            if pos.get('status') != 'ACTIVE':
+                continue
+            pair = pos['pair']
+            strategy = pos['strategy']
+            bs = pos.get('bot_state', {})
+            try:
+                p_info = client.get_product(product_id=pair)
+                cur_px = float(p_info.price)
+                mult = get_contract_multiplier(pair)
+            except Exception:
+                continue
+
+            should_exit = False
+            exit_reason = ''
+
+            try:
+                if strategy in ('QUAD', 'QUAD_SUPER'):
+                    # Fetch candles and check exit signal
+                    end_ts = int(time.time())
+                    start_ts = end_ts - (300 * 900)
+                    res = client.get(f"/api/v3/brokerage/products/{pair}/candles",
+                                     params={"start": str(start_ts), "end": str(end_ts), "granularity": "FIFTEEN_MINUTE"})
+                    candles = res.get('candles', [])
+                    if len(candles) >= 200:
+                        parsed = [{'start': int(c['start']), 'open': float(c['open']), 'high': float(c['high']),
+                                   'low': float(c['low']), 'close': float(c['close']), 'volume': float(c.get('volume', 0))}
+                                  for c in candles]
+                        df = pd.DataFrame(parsed).sort_values('start').reset_index(drop=True)
+                        fn = calculate_quad_rotation if strategy == 'QUAD' else calculate_quad_super
+                        signal, reason = fn(df)
+                        if signal == 'SELL':
+                            should_exit = True
+                            exit_reason = f'STRATEGY_EXIT ({reason})'
+
+                elif strategy == 'ORB':
+                    end_ts = int(time.time())
+                    start_ts = end_ts - (300 * 300)
+                    res = client.get(f"/api/v3/brokerage/products/{pair}/candles",
+                                     params={"start": str(start_ts), "end": str(end_ts), "granularity": "FIVE_MINUTE"})
+                    candles = res.get('candles', [])
+                    if len(candles) >= 50:
+                        parsed = [{'start': int(c['start']), 'open': float(c['open']), 'high': float(c['high']),
+                                   'low': float(c['low']), 'close': float(c['close']), 'volume': float(c.get('volume', 0))}
+                                  for c in candles]
+                        df = pd.DataFrame(parsed).sort_values('start').reset_index(drop=True)
+                        signal, reason = calculate_orb(df, pos_side='LONG')
+                        if signal == 'EXIT_LONG':
+                            should_exit = True
+                            exit_reason = f'STRATEGY_EXIT ({reason})'
+
+                elif strategy == 'TRAP':
+                    avg_entry = bs.get('avg_entry', pos['entry_price'])
+                    atr = bs.get('breakout_atr', pos['entry_price'] * 0.015)
+                    tp_hit = (cur_px - avg_entry) / avg_entry >= 0.025
+                    sl_hit = cur_px <= avg_entry - atr
+                    if tp_hit:
+                        should_exit = True
+                        exit_reason = 'TAKE_PROFIT (+2.5%)'
+                    elif sl_hit:
+                        should_exit = True
+                        exit_reason = 'STOP_LOSS (ATR)'
+
+                elif strategy == 'MOMENTUM':
+                    hwm = bs.get('high_water_mark', pos['entry_price'])
+                    if cur_px > hwm:
+                        bs['high_water_mark'] = cur_px
+                    # Build a mini-bot dict for momentum_get_stop_price
+                    mock_bot = {
+                        'entry_price': pos['entry_price'],
+                        'high_water_mark': bs.get('high_water_mark', pos['entry_price']),
+                        'entry_atr': bs.get('entry_atr', pos['entry_price'] * 0.015),
+                        'fee_estimate': bs.get('fee_estimate', 0),
+                        'allocated_usd': pos['entry_price'] * pos['size'] * mult,
+                    }
+                    stop_px, phase = momentum_get_stop_price(mock_bot, cur_px)
+                    bs['stop_phase'] = phase
+                    if stop_px > 0 and cur_px <= stop_px:
+                        should_exit = True
+                        exit_reason = f'STOP_LOSS (Phase {phase})' if phase == 1 else f'TRAILING_STOP (Phase {phase})'
+
+                elif strategy == 'NPR':
+                    event_stop = bs.get('event_stop', 0)
+                    hwm = bs.get('high_water_mark', pos['entry_price'])
+                    trail = bs.get('trail_distance', pos['entry_price'] * 0.02)
+                    if cur_px > hwm:
+                        bs['high_water_mark'] = cur_px
+                    trail_stop = bs['high_water_mark'] - trail
+                    if event_stop > 0 and cur_px <= event_stop:
+                        should_exit = True
+                        exit_reason = 'EVENT_STOP'
+                    elif cur_px <= trail_stop:
+                        should_exit = True
+                        exit_reason = 'TRAILING_STOP'
+
+            except Exception as e:
+                log.debug(f"[{pair}] Manual eval error ({strategy}): {e}")
+                continue
+
+            if should_exit:
+                try:
+                    oid = str(uuid.uuid4())
+                    str_qty = snap_to_increment(pos['size'], pos['base_inc'])
+                    client.market_order_sell(client_order_id=oid, product_id=pair, base_size=str_qty)
+                    fill_px, fill_sz, fill_fee = poll_market_fill(oid, pair, retries=2, delay=0.5)
+                    exit_px = fill_px if fill_px else cur_px
+                    pnl = (exit_px - pos['entry_price']) * pos['size'] * mult
+                    pos['status'] = 'CLOSED'
+                    pos['exit_price'] = exit_px
+                    pos['pnl'] = round(pnl, 4)
+                    pos['closed_at'] = time.time()
+                    pos['exit_reason'] = exit_reason
+                    _save_manual_positions()
+                    log.info(f"[{pair}] Manual {strategy} EXIT ({exit_reason}): PnL ${pnl:.2f}")
+                except Exception as e:
+                    log.error(f"[{pair}] Manual exit sell failed: {e}")
+
+
+def start_manual_evaluator():
+    threading.Thread(target=_manual_position_evaluator, daemon=True).start()

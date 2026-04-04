@@ -5,9 +5,12 @@ import threading
 from decimal import Decimal, ROUND_DOWN
 from datetime import datetime, timezone
 from shared import ACTIVE_BOTS, new_bot_stats
+from logger import get_logger
+
+log = get_logger('bot_engine')
 
 BOTS_FILE = "bots.json"
-BOTS_LOCK = threading.Lock()
+BOTS_LOCK = threading.RLock()
 
 # ==========================================
 # TIMEFRAME CONFIGURATION
@@ -31,6 +34,8 @@ STRATEGY_DEFAULT_TF = {
     "MOMENTUM":   "5m",
     "DCA":        "5m",
     "NPR":        "2m",
+    "VWAP_MR":    "5m",
+    "SQUEEZE":    "15m",
 }
 
 def get_bot_tf(bot):
@@ -129,7 +134,8 @@ def snap_to_increment(value, increment):
         snapped = (v / i).quantize(Decimal('1'), rounding=ROUND_DOWN) * i
         result = f"{snapped:f}"
         return result.rstrip('0').rstrip('.') if '.' in result else result
-    except:
+    except (ValueError, ArithmeticError, TypeError) as e:
+        log.debug(f"snap_to_increment fallback: {e}")
         return str(value)
 
 # ==========================================
@@ -156,17 +162,23 @@ def record_trade(bot, entry_px, exit_px, size, side, exit_reason, pair, multipli
     If actual_fee is provided (from Coinbase fill data), uses that instead of estimating.
     """
     stats = ensure_stats(bot)
-    
+
+    # Use Decimal for PnL to avoid float accumulation errors
+    d_entry = Decimal(str(entry_px))
+    d_exit = Decimal(str(exit_px))
+    d_size = Decimal(str(abs(size)))
+    d_mult = Decimal(str(multiplier))
+
     if side == 'LONG':
-        raw_pnl = (exit_px - entry_px) * abs(size) * multiplier
+        raw_pnl = float((d_exit - d_entry) * d_size * d_mult)
     else:
-        raw_pnl = (entry_px - exit_px) * abs(size) * multiplier
-    
+        raw_pnl = float((d_entry - d_exit) * d_size * d_mult)
+
     # Use actual fee from Coinbase if available, otherwise estimate
     if actual_fee is not None:
         fee = actual_fee
     else:
-        fee = abs(size) * multiplier * exit_px * 0.0025  # fallback: maker fee estimate
+        fee = float(d_size * d_mult * d_exit * Decimal('0.0025'))
     net_pnl = raw_pnl - fee
 
     stats['total_trades'] += 1
@@ -200,7 +212,7 @@ def record_trade(bot, entry_px, exit_px, size, side, exit_reason, pair, multipli
     try:
         update_permanent_stats(strategy, pair, entry_px, exit_px, size, side, exit_reason, round(net_pnl, 4), actual_fee=fee)
     except Exception as e:
-        print(f"[record_trade] update_permanent_stats failed: {e}")
+        log.error(f"update_permanent_stats failed: {e}")
     save_bots()
 
 _stats_lock = threading.Lock()

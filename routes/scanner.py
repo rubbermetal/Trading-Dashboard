@@ -4,6 +4,9 @@ import pandas as pd
 import pandas_ta as ta
 from flask import Blueprint, jsonify
 from shared import client
+from logger import get_logger
+
+log = get_logger('api')
 
 scanner_bp = Blueprint('scanner', __name__)
 
@@ -403,6 +406,5 @@ def get_scanner(pair):
         })
 
     except Exception as e:
-        import traceback
-        traceback.print_exc()
+        log.error("Scanner error for %s: %s", pair, e, exc_info=True)
         return jsonify(error=str(e))

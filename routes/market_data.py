@@ -3,6 +3,9 @@ import pandas as pd
 import pandas_ta as ta
 from flask import Blueprint, jsonify
 from shared import client
+from logger import get_logger
+
+log = get_logger('api')
 
 market_data_bp = Blueprint('market_data', __name__)
 
@@ -29,7 +32,7 @@ def get_products():
             fut_res = client.get("/api/v3/brokerage/products", params={"limit": 5000, "product_type": "FUTURE"})
             products += fut_res.get('products', [])
         except Exception as e:
-            print(f"[PRODUCTS] Failed to fetch futures: {e}")
+            log.warning("Failed to fetch futures products: %s", e)
 
         spot, deriv = [], []
         for p in products:

@@ -8,15 +8,19 @@ from datetime import datetime, timezone
 
 # --- Shared & Core Imports ---
 from shared import client, ACTIVE_BOTS, new_bot_stats
+from logger import get_logger
+
+log = get_logger('bot_engine')
 from bot_utils import (
-    save_bots, ensure_stats, get_contract_multiplier, 
-    TF_MAP, STRATEGY_DEFAULT_TF
+    save_bots, ensure_stats, get_contract_multiplier,
+    TF_MAP, STRATEGY_DEFAULT_TF, BOTS_LOCK
 )
 
 # --- Engine & Strategy Imports ---
-from bot_executors import execute_orb, execute_quad, execute_trap, execute_momentum, execute_dca, execute_npr
+from bot_executors import execute_orb, execute_quad, execute_trap, execute_momentum, execute_dca, execute_npr, execute_vwap_mr, execute_squeeze
 from grid_engine import execute_grid_bot, calculate_max_loss, calculate_grid_pnl, cancel_all_pair_orders, cancel_order_safe
 from bot_ws import start_ws_engine
+from validators import validate_start_bot, rate_limit
 
 bot_manager_bp = Blueprint('bot_manager', __name__)
 BOTS_FILE = "bots.json"
@@ -38,7 +42,7 @@ def _cancel_by_client_oid(pair, client_oid):
                     return True
                 break
     except Exception as e:
-        print(f"[CLEANUP] Cancel by client_oid error: {e}")
+        log.error(f"[CLEANUP] Cancel by client_oid error: {e}")
     return False
 
 def _cleanup_bot_orders(bot_id, bot):
@@ -63,13 +67,13 @@ def _cleanup_bot_orders(bot_id, bot):
             risk['per_fill_trails'] = []
             risk['cancelled_buy_levels'] = []
             risk['depth_score'] = 0
-            print(f"[CLEANUP] GRID {pair}: cancelled {cancelled} grid orders")
+            log.warning(f"[CLEANUP] GRID {pair}: cancelled {cancelled} grid orders")
 
         elif strategy == 'MOMENTUM':
             oid = bot.get('pending_order_oid')
             if oid and _cancel_by_client_oid(pair, oid):
                 cancelled += 1
-                print(f"[CLEANUP] MOMENTUM {pair}: cancelled pending entry")
+                log.warning(f"[CLEANUP] MOMENTUM {pair}: cancelled pending entry")
             bot.pop('pending_order_oid', None)
             bot.pop('pending_order_time', None)
             bot.pop('signal_retries', None)
@@ -78,7 +82,7 @@ def _cleanup_bot_orders(bot_id, bot):
             buy_oid = bot.get('pending_buy_oid')
             if buy_oid and _cancel_by_client_oid(pair, buy_oid):
                 cancelled += 1
-                print(f"[CLEANUP] DCA {pair}: cancelled pending buy")
+                log.warning(f"[CLEANUP] DCA {pair}: cancelled pending buy")
             bot.pop('pending_buy_oid', None)
             bot.pop('pending_buy_time', None)
             # Cancel all pending sell tiers
@@ -91,14 +95,14 @@ def _cleanup_bot_orders(bot_id, bot):
                     except Exception as e:
                         errors.append(str(e))
             if bot.get('pending_sells'):
-                print(f"[CLEANUP] DCA {pair}: cancelled {cancelled - (1 if buy_oid else 0)} pending sells")
+                log.warning(f"[CLEANUP] DCA {pair}: cancelled {cancelled - (1 if buy_oid else 0)} pending sells")
             bot['pending_sells'] = []
 
         elif strategy == 'NPR':
             oid = bot.get('pending_order_oid')
             if oid and _cancel_by_client_oid(pair, oid):
                 cancelled += 1
-                print(f"[CLEANUP] NPR {pair}: cancelled pending entry")
+                log.warning(f"[CLEANUP] NPR {pair}: cancelled pending entry")
             bot.pop('pending_order_oid', None)
             bot.pop('pending_order_time', None)
             bot.pop('entry_retries', None)
@@ -107,7 +111,7 @@ def _cleanup_bot_orders(bot_id, bot):
 
     except Exception as e:
         errors.append(str(e))
-        print(f"[CLEANUP] Error cleaning up bot {bot_id}: {e}")
+        log.error(f"[CLEANUP] Error cleaning up bot {bot_id}: {e}")
 
     return {'cancelled': cancelled, 'errors': errors}
 
@@ -120,21 +124,22 @@ def load_bots():
         try:
             with open(BOTS_FILE, 'r') as f:
                 loaded = json.load(f)
+            with BOTS_LOCK:
                 ACTIVE_BOTS.update(loaded)
-                for bot_id, data in ACTIVE_BOTS.items():
-                    if data.get('status') == 'RUNNING':
-                        threading.Thread(target=run_bot, args=(bot_id,), daemon=True).start()
+            for bot_id, data in list(ACTIVE_BOTS.items()):
+                if data.get('status') == 'RUNNING':
+                    threading.Thread(target=run_bot, args=(bot_id,), daemon=True).start()
         except Exception as e:
-            print(f"Failed to load bots: {e}")
+            log.error(f"Failed to load bots: {e}")
 
 def run_bot(bot_id):
     """The master thread loop for a single bot. Evaluates every 15s."""
-    print(f"[BOT ENGINE] Started thread for Bot ID: {bot_id}")
+    log.info(f"[BOT ENGINE] Started thread for Bot ID: {bot_id}")
     while True:
         bot = ACTIVE_BOTS.get(bot_id)
         
         if not bot or bot.get('status') != 'RUNNING':
-            print(f"[BOT ENGINE] Stopping thread for Bot ID: {bot_id}")
+            log.warning(f"[BOT ENGINE] Stopping thread for Bot ID: {bot_id}")
             break 
             
         pair = bot['pair']
@@ -157,8 +162,12 @@ def run_bot(bot_id):
                 execute_dca(bot_id, bot, pair)
             elif strategy == 'NPR':
                 execute_npr(bot_id, bot, pair)
+            elif strategy == 'VWAP_MR':
+                execute_vwap_mr(bot_id, bot, pair)
+            elif strategy == 'SQUEEZE':
+                execute_squeeze(bot_id, bot, pair)
         except Exception as e:
-            print(f"[BOT ENGINE] Error in {pair} {strategy} bot: {e}")
+            log.error(f"[BOT ENGINE] Error in {pair} {strategy} bot: {e}")
             
         time.sleep(15)
 
@@ -364,8 +373,12 @@ def grid_preview():
     })
 
 @bot_manager_bp.route('/api/bots/start', methods=['POST'])
+@rate_limit
 def start_bot():
     d = request.json
+    valid, err = validate_start_bot(d)
+    if not valid:
+        return jsonify(success=False, error=err), 400
     strategy = d['strategy'].upper()
     paper = bool(d.get('paper', False))
     if paper and strategy not in ('DCA', 'GRID'):
@@ -375,22 +388,23 @@ def start_bot():
         tf = STRATEGY_DEFAULT_TF.get(strategy, '15m')
     
     bot_id = str(uuid.uuid4())[:8]
-    ACTIVE_BOTS[bot_id] = {
-        "pair": d['pair'].upper(),
-        "strategy": strategy,
-        "status": "RUNNING",
-        "allocated_usd": float(d['amount']),
-        "current_usd": float(d['amount']),
-        "asset_held": 0.0,
-        "position_side": "FLAT",
-        "timeframe": tf,
-        "settings": d.get('settings', {}),
-        "stats": new_bot_stats(),
-        "paper": bool(d.get('paper', False)),
-        "created_at": datetime.now(timezone.utc).isoformat()
-    }
-    ACTIVE_BOTS[bot_id]['stats']['deposits'] = float(d['amount'])
-    save_bots()
+    with BOTS_LOCK:
+        ACTIVE_BOTS[bot_id] = {
+            "pair": d['pair'].upper(),
+            "strategy": strategy,
+            "status": "RUNNING",
+            "allocated_usd": float(d['amount']),
+            "current_usd": float(d['amount']),
+            "asset_held": 0.0,
+            "position_side": "FLAT",
+            "timeframe": tf,
+            "settings": d.get('settings', {}),
+            "stats": new_bot_stats(),
+            "paper": bool(d.get('paper', False)),
+            "created_at": datetime.now(timezone.utc).isoformat()
+        }
+        ACTIVE_BOTS[bot_id]['stats']['deposits'] = float(d['amount'])
+        save_bots()
     threading.Thread(target=run_bot, args=(bot_id,), daemon=True).start()
     return jsonify(success=True, message=f"Bot started on {tf} timeframe!")
 
@@ -405,23 +419,24 @@ def clone_bot(bot_id):
     new_amount = float(d.get('amount', source.get('allocated_usd', 50)))
 
     new_id = str(uuid.uuid4())[:8]
-    ACTIVE_BOTS[new_id] = {
-        "pair": new_pair,
-        "strategy": source['strategy'],
-        "status": "RUNNING",
-        "allocated_usd": new_amount,
-        "current_usd": new_amount,
-        "asset_held": 0.0,
-        "position_side": "FLAT",
-        "timeframe": source.get('timeframe', '15m'),
-        "settings": {k: v for k, v in source.get('settings', {}).items() if k not in ('active_grids', 'risk')},
-        "stats": new_bot_stats(),
-        "created_at": datetime.now(timezone.utc).isoformat()
-    }
-    if source.get('buy_pct'):
-        ACTIVE_BOTS[new_id]['buy_pct'] = source['buy_pct']
-    ACTIVE_BOTS[new_id]['stats']['deposits'] = new_amount
-    save_bots()
+    with BOTS_LOCK:
+        ACTIVE_BOTS[new_id] = {
+            "pair": new_pair,
+            "strategy": source['strategy'],
+            "status": "RUNNING",
+            "allocated_usd": new_amount,
+            "current_usd": new_amount,
+            "asset_held": 0.0,
+            "position_side": "FLAT",
+            "timeframe": source.get('timeframe', '15m'),
+            "settings": {k: v for k, v in source.get('settings', {}).items() if k not in ('active_grids', 'risk')},
+            "stats": new_bot_stats(),
+            "created_at": datetime.now(timezone.utc).isoformat()
+        }
+        if source.get('buy_pct'):
+            ACTIVE_BOTS[new_id]['buy_pct'] = source['buy_pct']
+        ACTIVE_BOTS[new_id]['stats']['deposits'] = new_amount
+        save_bots()
     threading.Thread(target=run_bot, args=(new_id,), daemon=True).start()
     return jsonify(success=True, message=f"Cloned {source['strategy']} to {new_pair} with ${new_amount:.2f}", bot_id=new_id)
 
@@ -520,10 +535,12 @@ def delete_bot(bot_id):
                 for i in range(0, len(orphan_ids), 10):
                     client.cancel_orders(order_ids=orphan_ids[i:i+10])
         except Exception as e:
-            print(f"[DELETE] Orphan check error for {bot_id}: {e}")
+            log.error(f"[DELETE] Orphan check error for {bot_id}: {e}")
 
-        del ACTIVE_BOTS[bot_id]
-        save_bots()
+        with BOTS_LOCK:
+            bot['status'] = 'DELETED'
+            del ACTIVE_BOTS[bot_id]
+            save_bots()
         msg = "Bot permanently deleted."
         if orphan_count > 0:
             msg += f" {orphan_count} orphaned order(s) were cleaned up."

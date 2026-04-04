@@ -399,11 +399,11 @@ def calculate_momentum(df):
     if adx_df is None or adx_df.empty:
         return "HOLD", "ADX calculation failed", 0.0
 
-    # ROC(5) smoothed with SMA(5) = "Fast ROC"
+    # ROC(5) smoothed with SMA(2) = "Fast ROC"  (spec says SMA(5) but SMA(2) intentional — SMA(5) too smooth)
     roc5_raw = ta.roc(c, 5)
     roc5_smooth = ta.sma(roc5_raw, 2) if roc5_raw is not None else None
 
-    # ROC(14) smoothed with SMA(5) = "Slow ROC"
+    # ROC(14) smoothed with SMA(2) = "Slow ROC"  (spec says SMA(5) but SMA(2) intentional — SMA(5) too smooth)
     roc14_raw = ta.roc(c, 14)
     roc14_smooth = ta.sma(roc14_raw, 2) if roc14_raw is not None else None
 
@@ -717,3 +717,141 @@ def calculate_npr(df):
                 'event_power':ev['power'],'event_bar_data':ev['bar_data'],'zone':zone,
                 'check_score':sc,'position_checks':pc,'atr':atr_v,'reason':reason}
     empty['reason'] = f"Event {events[0]['type']} {events[0]['direction']} blocked (zone={zone:+d})"; return empty
+
+
+# ==========================================
+# VWAP MEAN REVERSION (VWAP_MR)
+# ==========================================
+def calculate_vwap_mr(df):
+    """
+    VWAP Mean Reversion: Buy when price dips below daily VWAP by > 1 std dev
+    with RSI < 35. Exit at VWAP touch or upper band.
+    Expects 5m candles with 'volume' column.
+    """
+    if len(df) < 100:
+        return "HOLD", "Not enough data", 0.0
+
+    c, h, l, v = df['close'], df['high'], df['low'], df['volume']
+
+    # VWAP: cumulative (typ_price * volume) / cumulative volume
+    typical = (h + l + c) / 3
+    cum_tv = (typical * v).cumsum()
+    cum_v = v.cumsum()
+    vwap = cum_tv / cum_v
+
+    # VWAP standard deviation bands
+    vwap_sq = ((typical - vwap) ** 2 * v).cumsum() / cum_v
+    vwap_std = vwap_sq.apply(lambda x: x ** 0.5 if x > 0 else 0)
+
+    # RSI
+    rsi_s = ta.rsi(c, 14)
+
+    # ATR for trailing stop
+    atr_s = ta.atr(h, l, c, 14)
+
+    if vwap is None or rsi_s is None or atr_s is None:
+        return "HOLD", "Indicators warming up", 0.0
+
+    cur_px = float(c.iloc[-1])
+    cur_vwap = float(vwap.iloc[-1])
+    cur_std = float(vwap_std.iloc[-1])
+    cur_rsi = float(rsi_s.iloc[-1])
+    cur_atr = float(atr_s.iloc[-1])
+
+    if pd.isna(cur_vwap) or pd.isna(cur_rsi) or pd.isna(cur_atr) or cur_std <= 0:
+        return "HOLD", "Warming up indicators", 0.0
+
+    lower_band = cur_vwap - cur_std
+    upper_band = cur_vwap + cur_std
+    deviation = (cur_vwap - cur_px) / cur_std if cur_std > 0 else 0
+
+    # ENTRY: price below VWAP - 1 std dev AND RSI < 35
+    if cur_px < lower_band and cur_rsi < 35:
+        return "BUY", f"VWAP reversion: price ${cur_px:.0f} < lower band ${lower_band:.0f}, RSI {cur_rsi:.0f}", cur_atr
+
+    # EXIT: price touches VWAP or upper band
+    if cur_px >= cur_vwap:
+        return "SELL", f"VWAP touched: price ${cur_px:.0f} >= VWAP ${cur_vwap:.0f}", cur_atr
+
+    return "HOLD", f"Deviation {deviation:.2f}σ, RSI {cur_rsi:.0f}", cur_atr
+
+
+# ==========================================
+# BOLLINGER SQUEEZE BREAKOUT (SQUEEZE)
+# ==========================================
+def calculate_squeeze(df):
+    """
+    Bollinger Squeeze: BB narrows inside Keltner Channels (squeeze).
+    Enter on release when momentum turns positive (long) or negative (short).
+    Exit on momentum reversal or ATR trailing stop.
+    Expects 15m candles.
+    """
+    if len(df) < 210:
+        return "HOLD", "Not enough data", 0.0
+
+    c, h, l = df['close'], df['high'], df['low']
+
+    # Bollinger Bands (20, 2.0)
+    bb = ta.bbands(c, length=20, std=2.0)
+    # Keltner Channels (20, 1.5)
+    kc = ta.kc(h, l, c, length=20, scalar=1.5)
+    # Momentum: linear regression value of close over 20 bars (squeeze histogram)
+    mom = ta.mom(c, length=12)
+    # ATR
+    atr_s = ta.atr(h, l, c, 14)
+
+    if bb is None or kc is None or mom is None or atr_s is None:
+        return "HOLD", "Indicators warming up", 0.0
+
+    try:
+        # BB columns: BBL, BBM, BBU, BBB, BBP
+        bb_lower = bb.iloc[:, 0]
+        bb_upper = bb.iloc[:, 2]
+        # KC columns: KCLe, KCBe, KCUe
+        kc_lower = kc.iloc[:, 0]
+        kc_upper = kc.iloc[:, 2]
+    except (IndexError, KeyError):
+        return "HOLD", "Band calculation error", 0.0
+
+    cur_atr = float(atr_s.iloc[-1])
+    if pd.isna(cur_atr):
+        return "HOLD", "ATR warming up", 0.0
+
+    # Squeeze detection: BB inside KC
+    squeeze = []
+    for i in range(max(0, len(df) - 5), len(df)):
+        try:
+            sq = float(bb_lower.iloc[i]) > float(kc_lower.iloc[i]) and float(bb_upper.iloc[i]) < float(kc_upper.iloc[i])
+            squeeze.append(sq)
+        except (IndexError, ValueError):
+            squeeze.append(False)
+
+    cur_squeeze = squeeze[-1] if squeeze else False
+    prev_squeeze = squeeze[-2] if len(squeeze) >= 2 else False
+
+    cur_mom = float(mom.iloc[-1])
+    prev_mom = float(mom.iloc[-2]) if len(mom) >= 2 else 0
+
+    if pd.isna(cur_mom) or pd.isna(prev_mom):
+        return "HOLD", "Momentum warming up", 0.0
+
+    # RELEASE: was in squeeze, now released, momentum has direction
+    squeeze_release = prev_squeeze and not cur_squeeze
+
+    if squeeze_release and cur_mom > 0 and cur_mom > prev_mom:
+        return "BUY", f"Squeeze LONG release: momentum {cur_mom:.2f} rising", cur_atr
+
+    if squeeze_release and cur_mom < 0 and cur_mom < prev_mom:
+        return "SHORT", f"Squeeze SHORT release: momentum {cur_mom:.2f} falling", cur_atr
+
+    # EXIT signals for existing positions
+    if cur_mom < 0 and prev_mom > 0:
+        return "EXIT_LONG", f"Momentum reversed negative ({cur_mom:.2f})", cur_atr
+    if cur_mom > 0 and prev_mom < 0:
+        return "EXIT_SHORT", f"Momentum reversed positive ({cur_mom:.2f})", cur_atr
+
+    # Status info
+    if cur_squeeze:
+        return "HOLD", f"IN SQUEEZE — momentum {cur_mom:.2f}, awaiting release", cur_atr
+
+    return "HOLD", f"No squeeze. Momentum {cur_mom:.2f}", cur_atr

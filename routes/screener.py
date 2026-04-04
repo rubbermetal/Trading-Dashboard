@@ -7,6 +7,9 @@ import pandas as pd
 import pandas_ta as ta
 from flask import Blueprint, jsonify, request
 from shared import client, SCREENER_DATA
+from logger import get_logger
+
+log = get_logger('api')
 
 screener_bp = Blueprint('screener', __name__)
 
@@ -466,6 +469,78 @@ def eval_npr(df):
     return {"status": "SETUP", "reason": "In NPR zone, scanning", "metrics": m}
 
 
+def eval_vwap_mr(df):
+    """VWAP_MR: Mean reversion from VWAP lower band with RSI confirmation."""
+    m = {}
+    if len(df) < 100:
+        return {"status": "NEUTRAL", "reason": "Not enough data", "metrics": m}
+
+    c, h, l, v = df['close'], df['high'], df['low'], df['volume']
+    typical = (h + l + c) / 3
+    cum_tv = (typical * v).cumsum()
+    cum_v = v.cumsum()
+    vwap = cum_tv / cum_v
+    vwap_sq = ((typical - vwap) ** 2 * v).cumsum() / cum_v
+    vwap_std = vwap_sq.apply(lambda x: x ** 0.5 if x > 0 else 0)
+    rsi_s = ta.rsi(c, 14)
+
+    try:
+        px = float(c.iloc[-1])
+        vw = float(vwap.iloc[-1])
+        sd = float(vwap_std.iloc[-1])
+        rsi = float(rsi_s.iloc[-1])
+    except (IndexError, TypeError):
+        return {"status": "NEUTRAL", "reason": "Indicators warming up", "metrics": m}
+
+    if sd <= 0:
+        return {"status": "NEUTRAL", "reason": "VWAP std zero", "metrics": m}
+
+    dev = (vw - px) / sd
+    m = {"vwap": round(vw, 2), "deviation": round(dev, 2), "rsi": round(rsi, 1)}
+
+    if px < vw - sd and rsi < 35:
+        return {"status": "SIGNAL", "reason": f"Below VWAP -1σ, RSI {rsi:.0f}", "metrics": m}
+    elif px < vw - (0.5 * sd) and rsi < 40:
+        return {"status": "SETUP", "reason": f"Approaching lower band ({dev:.1f}σ)", "metrics": m}
+    elif px > vw + sd:
+        return {"status": "AVOID", "reason": f"Above VWAP +1σ, overextended", "metrics": m}
+    return {"status": "NEUTRAL", "reason": f"Deviation {dev:.2f}σ, RSI {rsi:.0f}", "metrics": m}
+
+
+def eval_squeeze(df):
+    """SQUEEZE: Bollinger Bands inside Keltner Channels with momentum direction."""
+    m = {}
+    if len(df) < 210:
+        return {"status": "NEUTRAL", "reason": "Not enough data", "metrics": m}
+
+    c, h, l = df['close'], df['high'], df['low']
+    bb = ta.bbands(c, length=20, std=2.0)
+    kc = ta.kc(h, l, c, length=20, scalar=1.5)
+    mom = ta.mom(c, length=12)
+
+    try:
+        bb_l, bb_u = float(bb.iloc[-1, 0]), float(bb.iloc[-1, 2])
+        kc_l, kc_u = float(kc.iloc[-1, 0]), float(kc.iloc[-1, 2])
+        bb_l_p, bb_u_p = float(bb.iloc[-2, 0]), float(bb.iloc[-2, 2])
+        kc_l_p, kc_u_p = float(kc.iloc[-2, 0]), float(kc.iloc[-2, 2])
+        cur_mom = float(mom.iloc[-1])
+        prev_mom = float(mom.iloc[-2])
+    except (IndexError, TypeError, KeyError):
+        return {"status": "NEUTRAL", "reason": "Indicators warming up", "metrics": m}
+
+    in_squeeze = bb_l > kc_l and bb_u < kc_u
+    was_squeeze = bb_l_p > kc_l_p and bb_u_p < kc_u_p
+    m = {"in_squeeze": in_squeeze, "momentum": round(cur_mom, 2)}
+
+    if was_squeeze and not in_squeeze and cur_mom > 0:
+        return {"status": "SIGNAL", "reason": f"Squeeze LONG release, momentum {cur_mom:.2f}", "metrics": m}
+    elif was_squeeze and not in_squeeze and cur_mom < 0:
+        return {"status": "SIGNAL", "reason": f"Squeeze SHORT release, momentum {cur_mom:.2f}", "metrics": m}
+    elif in_squeeze:
+        return {"status": "SETUP", "reason": f"In squeeze, momentum {cur_mom:.2f}", "metrics": m}
+    return {"status": "NEUTRAL", "reason": f"No squeeze, momentum {cur_mom:.2f}", "metrics": m}
+
+
 # ==========================================
 # CORE METRICS
 # ==========================================
@@ -520,6 +595,8 @@ EVAL_MAP = {
     "MOMENTUM": lambda dd, dh, d5: eval_momentum(dh),
     "DCA":      lambda dd, dh, d5: eval_dca(dd),
     "NPR":      lambda dd, dh, d5: eval_npr(dh),
+    "VWAP_MR":  lambda dd, dh, d5: eval_vwap_mr(d5),
+    "SQUEEZE":  lambda dd, dh, d5: eval_squeeze(dh),
 }
 
 def strategy_scanner():
@@ -576,7 +653,7 @@ def strategy_scanner():
 
                 except Exception as e:
                     row["error"] = str(e)
-                    print(f"[Screener] Error on {pair}: {e}")
+                    log.error("Screener error on %s: %s", pair, e)
 
                 results.append(row)
                 time.sleep(0.5)
@@ -584,10 +661,10 @@ def strategy_scanner():
             if results:
                 SCREENER_DATA.clear()
                 SCREENER_DATA.extend(results)
-                print(f"[Screener] Scan complete: {len(results)} pairs, {len(enabled)} strategies")
+                log.info("Screener scan complete: %d pairs, %d strategies", len(results), len(enabled))
 
         except Exception as e:
-            print(f"[Screener] Thread recovered: {e}")
+            log.error("Screener thread error: %s", e)
 
         time.sleep(90)
 

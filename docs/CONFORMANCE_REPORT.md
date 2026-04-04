@@ -6,29 +6,25 @@
 
 ## Summary
 
-The codebase is **highly conformant** with all three specs. The core logic — risk escalation, trailing stops, halt modes, circuit breaker, state machines, order management, and execution order — is correctly implemented throughout. There is 1 open signal-correctness bug, 1 intentional deviation, and 6 minor/cosmetic deviations.
+The codebase is **highly conformant** with all three specs. The core logic — risk escalation, trailing stops, halt modes, circuit breaker, state machines, order management, and execution order — is correctly implemented throughout. There are 2 intentional deviations (MOMENTUM SMA(2), DCA SMA(3)) and 6 minor/cosmetic deviations.
 
 ---
 
 ## Issues
 
-### BUG-1 — MOMENTUM: ROC smoothing uses SMA(2) instead of SMA(5)
+### DEVIATION-0 — MOMENTUM: ROC smoothing uses SMA(2) instead of SMA(5) *(intentional)*
 **File:** `strategies.py:404,408`
-**Severity:** Bug (signal correctness)
+**Severity:** Intentional deviation (as-built)
 
-Spec says Fast ROC = ROC(5) smoothed with SMA(5), Slow ROC = ROC(14) smoothed with SMA(5).
+Spec says SMA(5) for both ROCs. Implementation uses SMA(2) and is staying that way.
 
 ```python
-# Current (wrong):
+# As-built (intentional):
 roc5_smooth  = ta.sma(roc5_raw,  2)
 roc14_smooth = ta.sma(roc14_raw, 2)
-
-# Should be:
-roc5_smooth  = ta.sma(roc5_raw,  5)
-roc14_smooth = ta.sma(roc14_raw, 5)
 ```
 
-**Impact:** SMA(2) produces a noisier signal than SMA(5). Entry conditions will trigger more frequently and on shallower inflections than the spec intends. The curl-up detection in particular is more sensitive than designed.
+**Rationale:** SMA(5) was tested and found to over-smooth the ROC signal, causing missed entries. SMA(2) provides faster response to rate-of-change inflections while still filtering single-bar noise. Same treatment as DEVIATION-1 (DCA SMA(3)).
 
 ---
 

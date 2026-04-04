@@ -10,6 +10,9 @@ import os
 import json
 import threading
 import requests
+from logger import get_logger
+
+log = get_logger('notifier')
 
 CONFIG_FILE = "notify_config.json"
 
@@ -65,7 +68,7 @@ def notify(title, message, priority="default", tags=None):
                 headers["Tags"] = ",".join(tags) if isinstance(tags, list) else tags
             requests.post(url, data=message.encode('utf-8'), headers=headers, timeout=5)
         except Exception as e:
-            print(f"[NOTIFY] Error: {e}")
+            log.error(f"Send failed: {e}")
 
     threading.Thread(target=_send, daemon=True).start()
 

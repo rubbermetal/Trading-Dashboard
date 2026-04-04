@@ -7,9 +7,12 @@ from datetime import datetime, timezone
 
 from shared import client, ACTIVE_BOTS
 from bot_utils import (
-    get_bot_tf, is_derivative, get_contract_multiplier, 
+    get_bot_tf, is_derivative, get_contract_multiplier,
     snap_to_increment, record_trade, save_bots
 )
+from logger import get_logger
+
+log = get_logger('grid_engine')
 
 # ==========================================
 # GRID PNL CALCULATOR
@@ -93,11 +96,11 @@ def cancel_all_pair_orders(pair):
                     r_dict = r if isinstance(r, dict) else r.__dict__ if hasattr(r, '__dict__') else {}
                     if r_dict.get('success', False): cancelled += 1
             except Exception as e:
-                print(f"[GRID] Batch cancel error: {e}")
+                log.error(f"[{pair}] Batch cancel error: {e}")
             time.sleep(0.2)
-        print(f"[GRID] cancel_all_pair_orders({pair}): {cancelled}/{len(real_ids)} cancelled")
+        log.info(f"[{pair}] cancel_all_pair_orders: {cancelled}/{len(real_ids)} cancelled")
     except Exception as e:
-        print(f"[GRID] cancel_all_pair_orders({pair}) fetch error: {e}")
+        log.error(f"[{pair}] cancel_all_pair_orders fetch error: {e}")
     return cancelled
 
 def cancel_order_safe(grid_entry):
@@ -113,7 +116,7 @@ def cancel_order_safe(grid_entry):
                 success = r.get('success', False) if isinstance(r, dict) else getattr(r, 'success', False)
                 if success: return True
         except Exception as e:
-            print(f"[GRID] Cancel by cb_oid failed for {cb_oid}: {e}")
+            log.warning(f"Cancel by cb_oid failed for {cb_oid}: {e}")
 
     if client_oid:
         try:
@@ -130,7 +133,7 @@ def cancel_order_safe(grid_entry):
                             r = results[0] if isinstance(results[0], dict) else results[0]
                             return r.get('success', False) if isinstance(r, dict) else getattr(r, 'success', False)
         except Exception as e:
-            print(f"[GRID] Cancel by client_oid lookup failed for {client_oid}: {e}")
+            log.warning(f"Cancel by client_oid lookup failed for {client_oid}: {e}")
 
     return False
 
@@ -160,9 +163,9 @@ def place_grid_buy(pair, price, chunk_usd, base_inc, quote_inc, deriv_flag, mult
                 cb_oid = getattr(api_res, 'order_id', '') or getattr(getattr(api_res, 'success_response', None), 'order_id', '')
             return {"price": float(str_price), "side": "BUY", "oid": oid, "cb_oid": cb_oid}
         else:
-            print(f"[GRID] BUY rejected at {str_price}: {fail_reason}")
+            log.error(f"BUY rejected at {str_price}: {fail_reason}")
     except Exception as e:
-        print(f"[GRID] BUY exception at {str_price}: {e}")
+        log.error(f"BUY exception at {str_price}: {e}")
     return None
 
 def place_grid_sell(pair, price, qty_or_chunk, base_inc, quote_inc, deriv_flag, mult, use_chunk=False, chunk_usd=0):
@@ -194,9 +197,9 @@ def place_grid_sell(pair, price, qty_or_chunk, base_inc, quote_inc, deriv_flag, 
                 cb_oid = getattr(api_res, 'order_id', '') or getattr(getattr(api_res, 'success_response', None), 'order_id', '')
             return {"price": float(str_price), "side": "SELL", "oid": oid, "cb_oid": cb_oid}
         else:
-            print(f"[GRID] SELL rejected at {str_price}: {fail_reason}")
+            log.error(f"SELL rejected at {str_price}: {fail_reason}")
     except Exception as e:
-        print(f"[GRID] SELL exception at {str_price}: {e}")
+        log.error(f"SELL exception at {str_price}: {e}")
     return None
 
 # ==========================================
@@ -228,7 +231,7 @@ def grid_check_fills(bot_id, bot, pair):
         })
         filled_orders = order_data.get('orders', [])
     except Exception as e:
-        print(f"[GRID REST | {pair}] Fill check API error: {e}")
+        log.error(f"[{pair}] Fill check API error: {e}")
         return
     
     filled_map = {}
@@ -262,7 +265,7 @@ def grid_check_fills(bot_id, bot, pair):
         
         if filled_size <= 0: continue
 
-        print(f"[GRID REST | {pair}] Fill detected: {grid['side']} at {grid['price']:.2f}")
+        log.info(f"[{pair}] Fill detected: {grid['side']} at {grid['price']:.2f}")
 
         if grid['side'] == 'BUY':
             new_price = grid['price'] + step_size
@@ -270,7 +273,7 @@ def grid_check_fills(bot_id, bot, pair):
             safe_price = find_safe_price(new_price, active_grids, min_gap, direction='up')
             if safe_price is None:
                 # FIX #1: No safe price found — skip placement, hold inventory with trail only
-                print(f"[GRID REST | {pair}] No safe sell price near {new_price:.2f}. Holding with trail only.")
+                log.warning(f"[{pair}] No safe sell price near {new_price:.2f}. Holding with trail only.")
                 try: active_grids.remove(grid)
                 except ValueError: pass
                 bot['asset_held'] += filled_size
@@ -283,7 +286,7 @@ def grid_check_fills(bot_id, bot, pair):
                 activate_trail(bot, avg_price, filled_size, level_idx, total_levels, step_size)
                 continue
             if safe_price != new_price:
-                print(f"[GRID REST | {pair}] Sell nudged {new_price:.2f} -> {safe_price:.2f} (spacing guard)")
+                log.debug(f"[{pair}] Sell nudged {new_price:.2f} -> {safe_price:.2f} (spacing guard)")
             new_price = safe_price
 
             new_grid = place_grid_sell(pair, new_price, filled_size, base_inc, quote_inc, deriv_flag, mult)
@@ -301,7 +304,7 @@ def grid_check_fills(bot_id, bot, pair):
                 total_levels = risk.get('total_buy_levels', 10)
                 level_idx = grid.get('level_idx', total_levels // 2)
                 activate_trail(bot, avg_price, filled_size, level_idx, total_levels, step_size, sell_grid=new_grid)
-                print(f"[GRID REST | {pair}] BUY filled -> SELL at {new_price:.2f} (trail active, depth={risk.get('depth_score', 0)})")
+                log.info(f"[{pair}] BUY filled -> SELL at {new_price:.2f} (trail active, depth={risk.get('depth_score', 0)})")
             else:
                 try: active_grids.remove(grid)
                 except ValueError: pass
@@ -313,7 +316,7 @@ def grid_check_fills(bot_id, bot, pair):
                 total_levels = risk.get('total_buy_levels', 10)
                 level_idx = grid.get('level_idx', total_levels // 2)
                 activate_trail(bot, avg_price, filled_size, level_idx, total_levels, step_size)
-                print(f"[GRID REST | {pair}] BUY filled, SELL flip failed. Trail active, inventory held.")
+                log.warning(f"[{pair}] BUY filled, SELL flip failed. Trail active, inventory held.")
 
         elif grid['side'] == 'SELL':
             buy_price = grid['price'] - step_size
@@ -326,14 +329,14 @@ def grid_check_fills(bot_id, bot, pair):
                 bot['asset_held'] -= filled_size
                 bot['current_usd'] += filled_value
                 changes_made = True
-                print(f"[GRID REST | {pair}] SELL filled during halt. Depth now={bot['settings'].get('risk', {}).get('depth_score', 0)}")
+                log.info(f"[{pair}] SELL filled during halt. Depth now={bot['settings'].get('risk', {}).get('depth_score', 0)}")
             else:
                 new_price = grid['price'] - step_size
                 # SPACING GUARD: nudge buy price down if too close to existing order
                 safe_price = find_safe_price(new_price, active_grids, min_gap, direction='down')
                 if safe_price is None:
                     # FIX #1: No safe price — record the level for redeployment later
-                    print(f"[GRID REST | {pair}] No safe buy price near {new_price:.2f}. Level queued for redeployment.")
+                    log.warning(f"[{pair}] No safe buy price near {new_price:.2f}. Level queued for redeployment.")
                     try: active_grids.remove(grid)
                     except ValueError: pass
                     bot['asset_held'] -= filled_size
@@ -343,7 +346,7 @@ def grid_check_fills(bot_id, bot, pair):
                     changes_made = True
                     continue
                 if safe_price != new_price:
-                    print(f"[GRID REST | {pair}] Buy nudged {new_price:.2f} -> {safe_price:.2f} (spacing guard)")
+                    log.debug(f"[{pair}] Buy nudged {new_price:.2f} -> {safe_price:.2f} (spacing guard)")
                 new_price = safe_price
 
                 new_grid = place_grid_buy(pair, new_price, chunk_usd, base_inc, quote_inc, deriv_flag, mult)
@@ -356,7 +359,7 @@ def grid_check_fills(bot_id, bot, pair):
                     bot['asset_held'] -= filled_size
                     bot['current_usd'] += filled_value
                     changes_made = True
-                    print(f"[GRID REST | {pair}] Flipped SELL -> BUY at {new_price:.2f}")
+                    log.info(f"[{pair}] Flipped SELL -> BUY at {new_price:.2f}")
                 else:
                     try: active_grids.remove(grid)
                     except ValueError: pass
@@ -377,7 +380,7 @@ def grid_emergency_halt(bot_id, bot, pair, cur_px, reason, halt_mode='NEUTRAL'):
     mult = get_contract_multiplier(pair)
     deriv_flag = is_derivative(pair)
 
-    print(f"[GRID HALT | {pair}] {reason}")
+    log.warning(f"[{pair}] HALT: {reason}")
 
     # FIX #3: Spec says ALL halt modes cancel buys as precaution (including FAVORABLE)
     buy_grids = [g for g in active_grids if g['side'] == 'BUY']
@@ -392,9 +395,9 @@ def grid_emergency_halt(bot_id, bot, pair, cur_px, reason, halt_mode='NEUTRAL'):
     sell_grids = [g for g in active_grids if g['side'] == 'SELL']
 
     if halt_mode == 'FAVORABLE':
-        print(f"[GRID HALT | {pair}] FAVORABLE: Cancelled {cancelled} buys (precautionary). Keeping {len(sell_grids)} sells. Widened trails.")
+        log.warning(f"[{pair}] FAVORABLE: Cancelled {cancelled} buys (precautionary). Keeping {len(sell_grids)} sells. Widened trails.")
     else:
-        print(f"[GRID HALT | {pair}] {halt_mode}: Cancelled {cancelled} buys. Keeping {len(sell_grids)} sells.")
+        log.warning(f"[{pair}] {halt_mode}: Cancelled {cancelled} buys. Keeping {len(sell_grids)} sells.")
 
     held = abs(bot.get('asset_held', 0))
     if held > 0 and not any(g['side'] == 'SELL' for g in active_grids) and step_size > 0:
@@ -405,12 +408,12 @@ def grid_emergency_halt(bot_id, bot, pair, cur_px, reason, halt_mode='NEUTRAL'):
         if safe_px:
             exit_px = safe_px
         else:
-            print(f"[GRID HALT | {pair}] No safe exit sell price found near {exit_px:.2f}. Trail-only exit.")
+            log.warning(f"[{pair}] No safe exit sell price found near {exit_px:.2f}. Trail-only exit.")
         if safe_px:
             exit_grid = place_grid_sell(pair, exit_px, held, base_inc, quote_inc, deriv_flag, mult)
             if exit_grid:
                 active_grids.append(exit_grid)
-                print(f"[GRID HALT | {pair}] Placed exit SELL at {exit_px:.2f}")
+                log.info(f"[{pair}] Placed exit SELL at {exit_px:.2f}")
 
     bot['settings']['halted'] = True
     bot['settings']['halted_reason'] = reason
@@ -477,10 +480,11 @@ def grid_follow(bot_id, bot, pair, cur_px, df):
         if not old_grid:
             return  # All orders are too fresh to recycle
         
-        # Calculate new price: grid-aligned, one step above current highest
-        new_buy_px = grid_high + step_size
-        # If that's still below price, step up until we're just below cur_px
-        while new_buy_px + step_size < cur_px:
+        # Calculate new price: grid-aligned, one step below cur_px (O(1))
+        import math
+        steps_above = max(1, math.floor((cur_px - grid_high) / step_size))
+        new_buy_px = grid_high + steps_above * step_size
+        if new_buy_px + step_size < cur_px:
             new_buy_px += step_size
         
         # Ensure it's actually below current price (it's a buy)
@@ -510,10 +514,10 @@ def grid_follow(bot_id, bot, pair, cur_px, df):
                     settings['lower_price'] = min(remaining_prices)
                     settings['upper_price'] = max(remaining_prices)
                 save_bots()
-                print(f"[GRID FOLLOW | {pair}] Recycled BUY {old_grid['price']:.2f} -> {new_buy_px:.2f}")
+                log.info(f"[{pair}] Follow recycled BUY {old_grid['price']:.2f} -> {new_buy_px:.2f}")
             else:
                 # FIX #2: Placement failed after cancel — queue level for redeployment
-                print(f"[GRID FOLLOW | {pair}] Recycle placement failed at {new_buy_px:.2f}. Queued for redeployment.")
+                log.error(f"[{pair}] Follow recycle placement failed at {new_buy_px:.2f}. Queued for redeployment.")
                 active_grids.remove(old_grid)
                 risk = bot['settings'].setdefault('risk', {})
                 risk.setdefault('cancelled_buy_levels', []).append(old_grid['price'])
@@ -532,9 +536,11 @@ def grid_follow(bot_id, bot, pair, cur_px, df):
         if not old_grid:
             return
         
-        # Grid-aligned: one step below current lowest
-        new_buy_px = grid_low - step_size
-        while new_buy_px - step_size > cur_px:
+        # Grid-aligned: one step above cur_px, below grid_low (O(1))
+        import math
+        steps_below = max(1, math.floor((grid_low - cur_px) / step_size))
+        new_buy_px = grid_low - steps_below * step_size
+        if new_buy_px - step_size > cur_px:
             new_buy_px -= step_size
         
         if new_buy_px >= cur_px:
@@ -560,10 +566,10 @@ def grid_follow(bot_id, bot, pair, cur_px, df):
                     settings['lower_price'] = min(remaining_prices)
                     settings['upper_price'] = max(remaining_prices)
                 save_bots()
-                print(f"[GRID FOLLOW | {pair}] Followed DOWN: BUY {old_grid['price']:.2f} -> {new_buy_px:.2f}")
+                log.info(f"[{pair}] Followed DOWN: BUY {old_grid['price']:.2f} -> {new_buy_px:.2f}")
             else:
                 # FIX #2: Placement failed after cancel — queue level for redeployment
-                print(f"[GRID FOLLOW | {pair}] Follow-down placement failed at {new_buy_px:.2f}. Queued for redeployment.")
+                log.error(f"[{pair}] Follow-down placement failed at {new_buy_px:.2f}. Queued for redeployment.")
                 active_grids.remove(old_grid)
                 risk = bot['settings'].setdefault('risk', {})
                 risk.setdefault('cancelled_buy_levels', []).append(old_grid['price'])
@@ -587,7 +593,8 @@ def compute_direction(df):
         if cur_px > cur_sma and slope > 0: return "RISING"
         elif cur_px < cur_sma and slope < 0: return "FALLING"
         return "CHOPPY"
-    except:
+    except (ValueError, TypeError, IndexError) as e:
+        log.debug(f"compute_direction failed: {e}")
         return "CHOPPY"
 
 def get_trail_distance(level_index, total_levels, step_size):
@@ -712,7 +719,7 @@ def evaluate_depth_escalation(bot, pair, direction, cur_px):
                 if g in active_grids: active_grids.remove(g)
                 count += 1
         if count:
-            print(f"[RISK ENGINE | {pair}] CRITICAL depth={depth}: Cancelled {count} open buys")
+            log.warning(f"[{pair}] CRITICAL depth={depth}: Cancelled {count} open buys")
             save_bots()
 
     elif depth >= 4 and direction == 'FALLING':
@@ -724,7 +731,7 @@ def evaluate_depth_escalation(bot, pair, direction, cur_px):
                 if g in active_grids: active_grids.remove(g)
                 count += 1
         if count:
-            print(f"[RISK ENGINE | {pair}] ELEVATED depth={depth} FALLING: Cancelled {count} lowest buys")
+            log.warning(f"[{pair}] ELEVATED depth={depth} FALLING: Cancelled {count} lowest buys")
             save_bots()
 
 def evaluate_buy_redeployment(bot, pair, direction, cur_px, step_size, base_inc, quote_inc, deriv_flag, mult, chunk_usd):
@@ -748,7 +755,7 @@ def evaluate_buy_redeployment(bot, pair, direction, cur_px, step_size, base_inc,
         # SPACING GUARD: nudge down if too close to any existing order
         safe_px = find_safe_price(new_price, active_grids, min_gap, direction='down')
         if not safe_px:
-            print(f"[RISK ENGINE | {pair}] Redeployment skipped at ~{new_price:.2f}: no safe price")
+            log.debug(f"[{pair}] Redeployment skipped at ~{new_price:.2f}: no safe price")
             continue
         new_price = safe_px
 
@@ -761,7 +768,7 @@ def evaluate_buy_redeployment(bot, pair, direction, cur_px, step_size, base_inc,
     if deployed:
         risk['cancelled_buy_levels'] = cancelled[deployed:]
         save_bots()
-        print(f"[RISK ENGINE | {pair}] Redeployed {deployed} buys. {len(cancelled) - deployed} still cancelled.")
+        log.info(f"[{pair}] Redeployed {deployed} buys. {len(cancelled) - deployed} still cancelled.")
 
 def check_circuit_breaker(bot, cur_px, pair):
     risk = bot['settings'].get('risk', {})
@@ -781,7 +788,7 @@ def check_circuit_breaker(bot, cur_px, pair):
     cb_threshold = 0.06
 
     if loss_pct >= cb_threshold:
-        print(f"[CIRCUIT BREAKER | {pair}] TRIGGERED: ${total_loss:.2f} = {loss_pct*100:.1f}% of ${allocated:.2f}")
+        log.warning(f"[{pair}] CIRCUIT BREAKER TRIGGERED: ${total_loss:.2f} = {loss_pct*100:.1f}% of ${allocated:.2f}")
         cancel_all_pair_orders(pair)
         time.sleep(0.3)
 
@@ -797,7 +804,7 @@ def check_circuit_breaker(bot, cur_px, pair):
                 bot['asset_held'] = 0.0
                 bot['current_usd'] += held * cur_px * 0.995
             except Exception as e:
-                print(f"[CIRCUIT BREAKER | {pair}] Sell failed: {e}")
+                log.error(f"[{pair}] Circuit breaker sell failed: {e}")
 
         risk['per_fill_trails'] = []
         risk['depth_score'] = 0
@@ -833,7 +840,7 @@ def manage_runner_exits(bot, pair, cur_px):
                     t['sell_oid'] = ''
                     t['sell_cb_oid'] = ''
                     converted += 1
-                    print(f"[RISK ENGINE | {pair}] RUNNER: fill@{t['fill_price']:.2f} now +{profit_steps:.1f} steps. Sell cancelled, trailing only.")
+                    log.info(f"[{pair}] RUNNER: fill@{t['fill_price']:.2f} now +{profit_steps:.1f} steps. Sell cancelled, trailing only.")
                     break
     if converted: save_bots()
 
@@ -870,7 +877,7 @@ def check_trailing_stops(bot, cur_px, pair):
     for t in triggered:
         qty = t['quantity']
         effective = t.get('effective_trail', t.get('base_trail_distance', 0))
-        print(f"[RISK ENGINE | {pair}] TRAILING STOP: fill@{t['fill_price']:.2f} "
+        log.info(f"[{pair}] TRAILING STOP: fill@{t['fill_price']:.2f} "
               f"HWM={t['high_water_mark']:.2f} trail={effective:.2f} exit@{cur_px:.2f}")
         try:
             oid = str(uuid.uuid4())
@@ -889,7 +896,7 @@ def check_trailing_stops(bot, cur_px, pair):
                     active_grids.remove(g)
                     break
         except Exception as e:
-            print(f"[RISK ENGINE | {pair}] Trail stop sell failed: {e}")
+            log.error(f"[{pair}] Trail stop sell failed: {e}")
             continue
 
         trails.remove(t)
@@ -910,7 +917,7 @@ def _paper_grid_execute(bot_id, bot, pair):
         p_info = client.get_product(product_id=pair)
         cur_px = float(p_info.price)
     except Exception as e:
-        print(f"[PAPER GRID | {pair}] Price fetch error: {e}")
+        log.error(f"[{pair}] Paper grid price fetch error: {e}")
         return
 
     # Initialize paper grids on first run
@@ -937,7 +944,7 @@ def _paper_grid_execute(bot_id, bot, pair):
         settings['paper_chunk_usd'] = bot['current_usd'] / total_orders
         settings['paper_step'] = step
         save_bots()
-        print(f"[PAPER GRID | {pair}] Initialized {len(levels)} virtual levels, ${settings['paper_chunk_usd']:.2f}/level")
+        log.info(f"[{pair}] Paper grid initialized {len(levels)} virtual levels, ${settings['paper_chunk_usd']:.2f}/level")
         return
 
     grids = settings['paper_grids']
@@ -960,7 +967,7 @@ def _paper_grid_execute(bot_id, bot, pair):
             sell_px = round(g['price'] + step, 6)
             grids.append({'price': sell_px, 'side': 'SELL', 'filled': False, 'qty': qty})
             changes = True
-            print(f"[PAPER GRID | {pair}] BUY filled @ ${g['price']:.4f} -> SELL @ ${sell_px:.4f}")
+            log.info(f"[{pair}] Paper BUY filled @ ${g['price']:.4f} -> SELL @ ${sell_px:.4f}")
         elif g['side'] == 'SELL' and cur_px >= g['price']:
             # Simulate sell fill
             qty = g.get('qty', chunk_usd / g['price'])
@@ -974,7 +981,7 @@ def _paper_grid_execute(bot_id, bot, pair):
             grids.append({'price': buy_px, 'side': 'BUY', 'filled': False})
             changes = True
             pnl = (g['price'] - (g['price'] - step)) * qty - (fee * 2)
-            print(f"[PAPER GRID | {pair}] SELL filled @ ${g['price']:.4f} -> BUY @ ${buy_px:.4f} (flip PnL ~${pnl:.4f})")
+            log.info(f"[{pair}] Paper SELL filled @ ${g['price']:.4f} -> BUY @ ${buy_px:.4f} (flip PnL ~${pnl:.4f})")
 
     if changes:
         # Clean up filled entries to prevent unbounded growth
@@ -1001,7 +1008,7 @@ def execute_grid_bot(bot_id, bot, pair):
         base_inc = getattr(p_info, 'base_increment', '0.00000001')
         quote_inc = getattr(p_info, 'quote_increment', '0.01')
     except Exception as e:
-        print(f"[GRID BOT | {pair}] Data fetch error: {e}")
+        log.error(f"[{pair}] Data fetch error: {e}")
         return
 
     if len(candles) < 50: return
@@ -1017,7 +1024,8 @@ def execute_grid_bot(bot_id, bot, pair):
         atr_series = ta.atr(df['high'], df['low'], df['close'], length=14)
         curr_adx = float(adx_df.iloc[-1, 0]) if adx_df is not None and not adx_df.empty else 0.0
         curr_atr = float(atr_series.iloc[-1]) if atr_series is not None and not atr_series.empty else 0.0
-    except:
+    except (ValueError, TypeError, IndexError) as e:
+        log.debug(f"[{pair}] ADX/ATR computation failed: {e}")
         curr_adx, curr_atr = 0.0, 0.0
 
     active_grids = settings.get('active_grids', [])
@@ -1069,7 +1077,7 @@ def execute_grid_bot(bot_id, bot, pair):
             
             # DORMANT BYPASS: no position, just abort grid
             if depth == 0 and held < 0.000001:
-                print(f"[GRID BOT | {pair}] Aborting deployed grid (0 depth). Reverting to DORMANT. Reason: {halt_reason}")
+                log.warning(f"[{pair}] Aborting deployed grid (0 depth). Reverting to DORMANT. Reason: {halt_reason}")
                 cancel_all_pair_orders(pair)
                 settings.pop('active_grids', None)
                 settings.pop('step_size', None)
@@ -1100,27 +1108,27 @@ def execute_grid_bot(bot_id, bot, pair):
             if cur_px > halt_trigger_px:
                 new_mode = 'NEUTRAL'
                 risk['direction_streak'] = 0
-                print(f"[DEADBAND | {pair}] ADVERSE -> NEUTRAL: price {cur_px:.2f} > trigger {halt_trigger_px:.2f}")
+                log.info(f"[{pair}] Deadband ADVERSE -> NEUTRAL: price {cur_px:.2f} > trigger {halt_trigger_px:.2f}")
         elif halt_mode == 'NEUTRAL':
             if direction == 'RISING' and streak >= 3:
                 new_mode = 'FAVORABLE'
                 risk['direction_streak'] = 0
-                print(f"[DEADBAND | {pair}] NEUTRAL -> FAVORABLE: 3 consecutive RISING")
+                log.info(f"[{pair}] Deadband NEUTRAL -> FAVORABLE: 3 consecutive RISING")
             elif cur_px < halt_trigger_px or (direction == 'FALLING' and streak >= 2):
                 new_mode = 'ADVERSE'
                 risk['direction_streak'] = 0
                 reason = f"price {cur_px:.2f} < trigger {halt_trigger_px:.2f}" if cur_px < halt_trigger_px else "2 consecutive FALLING"
-                print(f"[DEADBAND | {pair}] NEUTRAL -> ADVERSE: {reason}")
+                log.warning(f"[{pair}] Deadband NEUTRAL -> ADVERSE: {reason}")
         elif halt_mode == 'FAVORABLE':
             if direction == 'FALLING' and streak >= 3:
                 new_mode = 'ADVERSE'
                 risk['direction_streak'] = 0
                 risk['halt_trigger_price'] = cur_px
-                print(f"[DEADBAND | {pair}] FAVORABLE -> ADVERSE: 3 consecutive FALLING (fast path)")
+                log.warning(f"[{pair}] Deadband FAVORABLE -> ADVERSE: 3 consecutive FALLING (fast path)")
             elif direction == 'FALLING' and streak >= 2:
                 new_mode = 'NEUTRAL'
                 risk['direction_streak'] = 0
-                print(f"[DEADBAND | {pair}] FAVORABLE -> NEUTRAL: 2 consecutive FALLING")
+                log.info(f"[{pair}] Deadband FAVORABLE -> NEUTRAL: 2 consecutive FALLING")
 
         halt_mode = new_mode
         risk['halt_mode'] = halt_mode
@@ -1137,7 +1145,7 @@ def execute_grid_bot(bot_id, bot, pair):
                         cancelled_prices.append(g['price'])
                         if g in active_grids: active_grids.remove(g)
                         count += 1
-                if count: print(f"[GRID HALT | {pair}] {halt_mode}: Cancelled {count} buys")
+                if count: log.warning(f"[{pair}] {halt_mode}: Cancelled {count} buys")
 
         if has_grids: grid_check_fills(bot_id, bot, pair)
 
@@ -1152,7 +1160,7 @@ def execute_grid_bot(bot_id, bot, pair):
         # that blocks halt clearing forever. If inventory value < $0.10, sweep it.
         dust_usd = held * cur_px * get_contract_multiplier(pair)
         if held > 0 and dust_usd < 0.10:
-            print(f"[GRID HALT | {pair}] Sweeping dust: {held:.8f} units (${dust_usd:.4f}). Zeroing out.")
+            log.debug(f"[{pair}] Sweeping dust: {held:.8f} units (${dust_usd:.4f}). Zeroing out.")
             bot['asset_held'] = 0.0
             held = 0.0
             # Clear any orphan trails that might reference this dust
@@ -1167,9 +1175,9 @@ def execute_grid_bot(bot_id, bot, pair):
                 risk['halt_mode'] = None; risk['cancelled_buy_levels'] = []
                 settings.pop('active_grids', None); settings.pop('step_size', None); settings.pop('chunk_size', None)
                 save_bots()
-                print(f"[GRID BOT | {pair}] Halt cleared. ADX={curr_adx:.1f}. Ready to redeploy.")
+                log.info(f"[{pair}] Halt cleared. ADX={curr_adx:.1f}. Ready to redeploy.")
             else:
-                print(f"[GRID HALT | {pair}] Waiting for ADX < 25 to clear halt (current ADX={curr_adx:.1f})")
+                log.debug(f"[{pair}] Waiting for ADX < 25 to clear halt (current ADX={curr_adx:.1f})")
         elif held > 0.000001 and depth == 0:
             remaining = settings.get('active_grids', [])
             has_active_sell = any(g['side'] == 'SELL' for g in remaining)
@@ -1188,10 +1196,10 @@ def execute_grid_bot(bot_id, bot, pair):
                 if exit_grid:
                     remaining.append(exit_grid)
                     save_bots()
-                    print(f"[GRID HALT | {pair}] Re-placed exit SELL at {exit_px:.2f}")
+                    log.info(f"[{pair}] Re-placed exit SELL at {exit_px:.2f}")
                 elif curr_adx < 25:
                     # Limit sell failed AND ADX is clear — market sell to unblock
-                    print(f"[GRID HALT | {pair}] Limit sell failed. ADX={curr_adx:.1f} < 25. Market-selling {held:.8f} to clear halt.")
+                    log.warning(f"[{pair}] Limit sell failed. ADX={curr_adx:.1f} < 25. Market-selling {held:.8f} to clear halt.")
                     try:
                         oid = str(uuid.uuid4())
                         str_qty = snap_to_increment(held, base_inc)
@@ -1202,11 +1210,11 @@ def execute_grid_bot(bot_id, bot, pair):
                         bot['asset_held'] = 0.0
                         save_bots()
                     except Exception as e:
-                        print(f"[GRID HALT | {pair}] Market sell for halt clear failed: {e}")
+                        log.error(f"[{pair}] Market sell for halt clear failed: {e}")
             else:
-                print(f"[GRID HALT | {pair}] Waiting: held={held:.8f} depth={depth} sells_active={has_active_sell} ADX={curr_adx:.1f}")
+                log.debug(f"[{pair}] Waiting: held={held:.8f} depth={depth} sells_active={has_active_sell} ADX={curr_adx:.1f}")
         else:
-            print(f"[GRID HALT | {pair}] Waiting: held={held:.8f} depth={depth} ADX={curr_adx:.1f} mode={halt_mode}")
+            log.debug(f"[{pair}] Waiting: held={held:.8f} depth={depth} ADX={curr_adx:.1f} mode={halt_mode}")
 
         save_bots()
         return
@@ -1229,17 +1237,17 @@ def execute_grid_bot(bot_id, bot, pair):
 
     if has_grids:
         if settings.get('follow', False):
-            if depth > 3: print(f"[RISK ENGINE | {pair}] Follow BLOCKED: depth={depth} > 3")
+            if depth > 3: log.warning(f"[{pair}] Follow BLOCKED: depth={depth} > 3")
             else: grid_follow(bot_id, bot, pair, cur_px, df)
         return
 
     if curr_adx >= 25:
-        print(f"[GRID BOT | {pair}] DORMANT: ADX={curr_adx:.1f} >= 25. Waiting to deploy.")
+        log.debug(f"[{pair}] DORMANT: ADX={curr_adx:.1f} >= 25. Waiting to deploy.")
         return
 
     orphans_killed = cancel_all_pair_orders(pair)
     if orphans_killed > 0:
-        print(f"[GRID INIT | {pair}] Swept {orphans_killed} orphan orders.")
+        log.info(f"[{pair}] Swept {orphans_killed} orphan orders.")
         time.sleep(0.5)
 
     deriv_flag = is_derivative(pair)
@@ -1250,7 +1258,7 @@ def execute_grid_bot(bot_id, bot, pair):
     step_pct = settings.get('step_pct', 0.6) / 100.0
 
     if not lower or not upper or upper <= lower:
-        print(f"[GRID BOT | {pair}] Invalid floor/ceiling: {lower}/{upper}. Reconfigure.")
+        log.error(f"[{pair}] Invalid floor/ceiling: {lower}/{upper}. Reconfigure.")
         return
 
     step = cur_px * step_pct
@@ -1269,11 +1277,11 @@ def execute_grid_bot(bot_id, bot, pair):
     if mode == 'LONG': sell_levels = []
     elif mode == 'SHORT':
         buy_levels = []
-        if not deriv_flag: print(f"[GRID BOT | {pair}] WARNING: SHORT mode on spot requires inventory.")
+        if not deriv_flag: log.warning(f"[{pair}] SHORT mode on spot requires inventory.")
 
     total_orders = len(buy_levels) + len(sell_levels)
     if total_orders == 0:
-        print(f"[GRID BOT | {pair}] No valid levels in old range. Auto-recentering on {cur_px:.2f}")
+        log.info(f"[{pair}] No valid levels in old range. Auto-recentering on {cur_px:.2f}")
         grid_count = settings.get('grid_count', max(2, int(bot['current_usd'] / settings.get('min_order_usd', 5))))
         if mode == 'LONG':
             lower = cur_px - (grid_count * step)
@@ -1297,14 +1305,14 @@ def execute_grid_bot(bot_id, bot, pair):
         elif mode == 'SHORT': buy_levels = []
         total_orders = len(buy_levels) + len(sell_levels)
         if total_orders == 0:
-            print(f"[GRID BOT | {pair}] Still no valid levels after recenter. Waiting.")
+            log.warning(f"[{pair}] Still no valid levels after recenter. Waiting.")
             return
-        print(f"[GRID BOT | {pair}] Recentered: {lower:.2f} - {upper:.2f}, {total_orders} levels")
+        log.info(f"[{pair}] Recentered: {lower:.2f} - {upper:.2f}, {total_orders} levels")
 
     chunk_size_usd = bot['current_usd'] / total_orders
 
     max_loss = init_risk_state(settings, buy_levels, step, chunk_size_usd, cur_px)
-    print(f"[GRID INIT | {pair}] Max loss envelope: ${max_loss:.2f} ({max_loss/bot['allocated_usd']*100:.1f}% of capital)")
+    log.info(f"[{pair}] Max loss envelope: ${max_loss:.2f} ({max_loss/bot['allocated_usd']*100:.1f}% of capital)")
 
     for idx, price in enumerate(buy_levels):
         g = place_grid_buy(pair, price, chunk_size_usd, base_inc, quote_inc, deriv_flag, mult)
@@ -1326,20 +1334,20 @@ def execute_grid_bot(bot_id, bot, pair):
                     client.market_order_buy(client_order_id=buy_oid, product_id=pair, quote_size=str(round(total_sell_cost * 0.99, 2)))
                     bot['asset_held'] += total_sell_qty
                     bot['current_usd'] -= total_sell_cost
-                    print(f"[GRID INIT] Market bought {total_sell_qty:.6f} inventory for sell grid")
+                    log.info(f"[{pair}] Market bought {total_sell_qty:.6f} inventory for sell grid")
                     time.sleep(1)
                     for price in sell_levels:
                         qty = float(chunk_size_usd * 0.99) / price
                         g = place_grid_sell(pair, price, qty, base_inc, quote_inc, deriv_flag, mult)
                         if g: new_grids.append(g)
                 except Exception as e:
-                    print(f"[GRID INIT] Inventory buy failed: {e}")
+                    log.error(f"[{pair}] Inventory buy failed: {e}")
             else:
-                print(f"[GRID INIT] Insufficient capital for sell inventory. Skipping sell side.")
+                log.warning(f"[{pair}] Insufficient capital for sell inventory. Skipping sell side.")
 
     if new_grids:
         bot['settings']['active_grids'] = new_grids
         bot['settings']['step_size'] = step
         bot['settings']['chunk_size'] = chunk_size_usd
         save_bots()
-        print(f"[GRID BOT] Deployed {len(new_grids)} levels ({mode} mode, {step_pct*100:.1f}% step, follow={'ON' if settings.get('follow') else 'OFF'})")
+        log.info(f"[{pair}] Deployed {len(new_grids)} levels ({mode} mode, {step_pct*100:.1f}% step, follow={'ON' if settings.get('follow') else 'OFF'})")

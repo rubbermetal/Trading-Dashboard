@@ -1,4 +1,17 @@
+import os
+import stat
 from flask import Flask, render_template
+
+
+def _check_permissions():
+    env_path = os.path.join(os.path.dirname(__file__), '.env')
+    if os.path.exists(env_path):
+        mode = stat.S_IMODE(os.stat(env_path).st_mode)
+        if mode & (stat.S_IRGRP | stat.S_IROTH):
+            print(f"WARNING: .env is readable by group/others (mode {oct(mode)}). Run: chmod 600 .env")
+
+
+_check_permissions()
 from routes.screener import screener_bp
 from routes.portfolio import portfolio_bp
 from routes.trading import trading_bp
@@ -30,5 +43,7 @@ def home():
     response.headers['Expires'] = '0'
     return response
 
-if __name__ == '__main__': 
+if __name__ == '__main__':
+    from routes.trading import start_manual_evaluator
+    start_manual_evaluator()
     app.run(host='0.0.0.0', port=5000)

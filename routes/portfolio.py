@@ -1,6 +1,9 @@
 import uuid, time, json, os, threading
 from flask import Blueprint, jsonify, request
 from shared import client, MANUAL_SPOT_ENTRIES, REBALANCE_TARGETS, TRAILING_STOPS, BRACKET_ORDERS, ACTIVE_BOTS
+from logger import get_logger
+
+log = get_logger('api')
 
 portfolio_bp = Blueprint('portfolio', __name__)
 
@@ -29,7 +32,7 @@ def _auto_rebalance_thread():
                 interval = _rebalance_schedule.get('interval_hours', 24) * 3600
                 last = _rebalance_schedule.get('last_run', 0)
                 if time.time() - last >= interval:
-                    print("[AUTO-REBALANCE] Running scheduled rebalance...")
+                    log.info("Running scheduled auto-rebalance")
                     _, total, _, spot_map, _ = fetch_data()
                     sells, buys = [], []
                     for asset, target_pct in REBALANCE_TARGETS.items():
@@ -43,19 +46,19 @@ def _auto_rebalance_thread():
                             else: buys.append({"pair": f"{asset}-USD", "size": str(round(abs(diff_usd), 2))})
                     for s in sells:
                         client.market_order_sell(client_order_id=str(uuid.uuid4()), product_id=s['pair'], base_size=s['size'])
-                        print(f"[AUTO-REBALANCE] Sold {s['size']} {s['pair']}")
+                        log.info("Auto-rebalance sold %s %s", s['size'], s['pair'])
                     if sells and buys: time.sleep(2)
                     for b in buys:
                         client.market_order_buy(client_order_id=str(uuid.uuid4()), product_id=b['pair'], quote_size=b['size'])
-                        print(f"[AUTO-REBALANCE] Bought ${b['size']} of {b['pair']}")
+                        log.info("Auto-rebalance bought $%s of %s", b['size'], b['pair'])
                     _rebalance_schedule['last_run'] = time.time()
                     _save_rebal_schedule()
                     if not sells and not buys:
-                        print("[AUTO-REBALANCE] Already balanced, no trades needed.")
+                        log.info("Auto-rebalance: already balanced, no trades needed")
                     from notifier import notify
                     notify("Auto-Rebalance", f"Executed {len(sells)} sells, {len(buys)} buys", tags=["scales"])
         except Exception as e:
-            print(f"[AUTO-REBALANCE] Error: {e}")
+            log.error("Auto-rebalance error: %s", e)
         time.sleep(300)  # check every 5 minutes
 
 threading.Thread(target=_auto_rebalance_thread, daemon=True).start()
@@ -129,7 +132,7 @@ def fetch_data():
                     'price': px, 'entry_price': entry_px, 'usd_value': usd, 
                     'liquidation': 'N/A', 'pnl': pnl_str
                 })
-    except Exception as e: print(f"Spot Error: {e}")
+    except Exception as e: log.error("Spot fetch error: %s", e)
 
     # --- 2. CFM Margin Fetch ---
     cfm_equity, maint_margin = 0.0, 0.0
@@ -195,7 +198,7 @@ def fetch_data():
                     'price': cur_px, 'entry_price': entry_px, 'usd_value': pnl, 
                     'pnl': f"{'+' if pnl > 0 else ''}${pnl:.2f}", 'liquidation': est_liq
                 })
-    except Exception as e: print(f"Derivative Error: {e}")
+    except Exception as e: log.error("Derivative fetch error: %s", e)
 
     # --- 4. Recent Order History (For the main dashboard snippet) ---
     try:
@@ -341,7 +344,7 @@ def get_all_orders():
         for o in open_res.get('orders', []):
             combined_orders.append(format_order_data(o))
     except Exception as e:
-        print(f"Error fetching OPEN orders: {e}")
+        log.error("Error fetching OPEN orders: %s", e)
 
     # 2. Fetch Historical orders (FILLED, CANCELLED, FAILED)
     try:
@@ -352,7 +355,7 @@ def get_all_orders():
         for o in hist_res.get('orders', []):
             combined_orders.append(format_order_data(o))
     except Exception as e:
-        print(f"Error fetching historical orders: {e}")
+        log.error("Error fetching historical orders: %s", e)
 
     # Sort the combined list by time, newest first
     combined_orders.sort(key=lambda x: x['raw_time'], reverse=True)

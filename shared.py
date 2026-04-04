@@ -7,10 +7,7 @@ load_dotenv()
 client = RESTClient(api_key=os.getenv("COINBASE_API_KEY_NAME"), api_secret=os.getenv("COINBASE_API_PRIVATE_KEY"))
 
 # Shared State
-MANUAL_SPOT_ENTRIES = {
-    "BTC": 60000.00,  
-    "ETH": 3000.00    
-}
+MANUAL_SPOT_ENTRIES = {}  # populated dynamically; legacy fallback for portfolio entry prices
 
 TRAILING_STOPS = {}   # {pair: {side, trail_pct, highest_price/lowest_price, size, entry_price}}
 BRACKET_ORDERS = {}   # {pair: {size, side, entry_price, tp_price, sl_price, tp_oid, sl_oid}}
@@ -29,6 +26,7 @@ SCREENER_DATA = []
 #    "settings": {} 
 # }
 ACTIVE_BOTS = {}
+MANUAL_POSITIONS = {}  # {pos_id: {pair, side, entry_price, size, strategy, status, bot_state, ...}}
 
 def new_bot_stats():
     """Returns a fresh stats object for a newly created bot."""

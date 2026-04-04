@@ -381,6 +381,60 @@
                         </div>
                     </div>
                 </div>
+
+                <!-- STRATEGY-MANAGED MANUAL TRADING -->
+                <div class="card card-custom p-4 shadow-sm mb-4">
+                    <div class="d-flex justify-content-between align-items-center mb-3" data-bs-toggle="collapse" data-bs-target="#manual-strategy-section" style="cursor:pointer">
+                        <h5 class="fw-bold text-info mb-0"><i class="bi bi-crosshair me-2"></i>STRATEGY EXIT MANAGEMENT</h5>
+                        <i class="bi bi-chevron-down text-muted"></i>
+                    </div>
+                    <div class="collapse show" id="manual-strategy-section">
+                        <div class="row g-3 mb-4">
+                            <div class="col-md-3">
+                                <label class="form-label text-muted small">Pair</label>
+                                <input type="text" id="manual-pair" class="form-control bg-dark text-white border-secondary" placeholder="BTC-USD">
+                            </div>
+                            <div class="col-md-2">
+                                <label class="form-label text-muted small">USD Amount</label>
+                                <input type="number" id="manual-amount" class="form-control bg-dark text-white border-secondary" placeholder="50" min="1">
+                            </div>
+                            <div class="col-md-2">
+                                <label class="form-label text-muted small">Entry Type</label>
+                                <select id="manual-order-type" class="form-select bg-dark text-white border-secondary">
+                                    <option value="MARKET">Market</option>
+                                    <option value="MAKER">Maker Limit</option>
+                                </select>
+                            </div>
+                            <div class="col-md-3">
+                                <label class="form-label text-muted small">Exit Strategy</label>
+                                <select id="manual-strategy" class="form-select bg-dark text-white border-secondary" onchange="updateStrategyDesc()">
+                                    <option value="MOMENTUM">MOMENTUM - 3-phase trailing</option>
+                                    <option value="QUAD">QUAD - Stoch(9) exit at 80</option>
+                                    <option value="QUAD_SUPER">QUAD SUPER - Stoch(9) exit</option>
+                                    <option value="TRAP">TRAP - +2.5% TP / ATR stop</option>
+                                    <option value="ORB">ORB - Midpoint stop</option>
+                                    <option value="NPR">NPR - Event + trail stop</option>
+                                </select>
+                            </div>
+                            <div class="col-md-2 d-flex align-items-end">
+                                <button class="btn btn-success w-100" onclick="manualEnter()"><i class="bi bi-box-arrow-in-right me-1"></i>ENTER</button>
+                            </div>
+                        </div>
+                        <div id="manual-strategy-desc" class="text-muted small mb-3" style="font-style:italic">Strategy manages exit automatically after entry.</div>
+
+                        <h6 class="fw-bold text-light mb-2">Active Positions</h6>
+                        <div class="table-responsive">
+                            <table class="table table-dark table-sm table-hover mb-0">
+                                <thead><tr>
+                                    <th>Pair</th><th>Entry</th><th>Current</th><th>PnL</th><th>Strategy</th><th>Status</th><th></th>
+                                </tr></thead>
+                                <tbody id="manual-positions-body">
+                                    <tr><td colspan="7" class="text-muted text-center">No active positions</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
             </div>
 
             <div class="tab-pane fade" id="orders-panel" role="tabpanel">
@@ -432,6 +486,8 @@
                                     <option value="MOMENTUM">Momentum (Trend Dip Reversal)</option>
                                     <option value="DCA">DCA (Signal-Gated Accumulation)</option>
                                     <option value="NPR">NPR (Name-Position-Risk - Derivs Only)</option>
+                                    <option value="VWAP_MR">VWAP MR (VWAP Mean Reversion)</option>
+                                    <option value="SQUEEZE">Squeeze (BB/KC Squeeze Breakout)</option>
                                 </select>
                             </div>
 
@@ -3233,6 +3289,100 @@
 
         // Load equity + P&L + notify config when analytics tab is shown
         document.getElementById('analytics-tab').addEventListener('shown.bs.tab', () => { loadEquity(); loadPnlWaterfall(); loadNotifyConfig(); });
+
+        // ==========================================
+        // STRATEGY-MANAGED MANUAL POSITIONS
+        // ==========================================
+        const STRAT_DESCS = {
+            'MOMENTUM': 'Entry freezes ATR. Phase 1: breakeven stop. Phase 2: lock profit at 1x fee. Phase 3: trail from high-water mark.',
+            'QUAD': 'Exit when Trigger Stochastic (9-period) crosses above 80. Best for pullback entries in strong uptrends.',
+            'QUAD_SUPER': 'Exit when Trigger Stochastic (9-period) crosses above 80. Best for capitulation reversal entries.',
+            'TRAP': 'Take profit at +2.5% above entry. Stop loss at entry minus 1x ATR.',
+            'ORB': 'Exit if price crosses below the opening range midpoint.',
+            'NPR': 'Event-based stop (3% below entry) plus trailing stop from high-water mark.'
+        };
+
+        function updateStrategyDesc() {
+            const strat = document.getElementById('manual-strategy').value;
+            document.getElementById('manual-strategy-desc').textContent = STRAT_DESCS[strat] || '';
+        }
+
+        async function manualEnter() {
+            const pair = document.getElementById('manual-pair').value.trim().toUpperCase();
+            const amount = parseFloat(document.getElementById('manual-amount').value);
+            const orderType = document.getElementById('manual-order-type').value;
+            const strategy = document.getElementById('manual-strategy').value;
+            if (!pair || !amount || amount <= 0) { alert('Enter a valid pair and amount.'); return; }
+            try {
+                const res = await fetch('/api/manual/enter', {
+                    method: 'POST', headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({pair, amount, order_type: orderType, strategy})
+                });
+                const data = await res.json();
+                if (data.success) {
+                    refreshManualPositions();
+                } else { alert(data.error || 'Entry failed'); }
+            } catch (e) { alert('Network error'); }
+        }
+
+        async function manualClose(posId) {
+            if (!confirm('Close this position at market?')) return;
+            try {
+                const res = await fetch(`/api/manual/close/${posId}`, {method: 'POST'});
+                const data = await res.json();
+                if (data.success) { refreshManualPositions(); }
+                else { alert(data.error || 'Close failed'); }
+            } catch (e) { alert('Network error'); }
+        }
+
+        async function manualSwitchStrategy(posId) {
+            const strats = Object.keys(STRAT_DESCS);
+            const choice = prompt('Switch to strategy:\n' + strats.join(', '));
+            if (!choice || !strats.includes(choice.toUpperCase())) return;
+            try {
+                const res = await fetch(`/api/manual/strategy/${posId}`, {
+                    method: 'POST', headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({strategy: choice.toUpperCase()})
+                });
+                const data = await res.json();
+                if (data.success) { refreshManualPositions(); }
+                else { alert(data.error); }
+            } catch (e) { alert('Network error'); }
+        }
+
+        async function refreshManualPositions() {
+            try {
+                const res = await fetch('/api/manual/positions');
+                const positions = await res.json();
+                const tbody = document.getElementById('manual-positions-body');
+                const active = positions.filter(p => p.status === 'ACTIVE');
+                if (active.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="7" class="text-muted text-center">No active positions</td></tr>';
+                    return;
+                }
+                tbody.innerHTML = active.map(p => {
+                    const pnlClass = (p.unrealized_pnl || 0) >= 0 ? 'text-success' : 'text-danger';
+                    const pnlStr = (p.unrealized_pnl || 0) >= 0 ? `+$${(p.unrealized_pnl||0).toFixed(2)}` : `-$${Math.abs(p.unrealized_pnl||0).toFixed(2)}`;
+                    return `<tr>
+                        <td class="fw-bold">${p.pair}</td>
+                        <td>$${(p.entry_price||0).toFixed(2)}</td>
+                        <td>$${(p.current_price||0).toFixed(2)}</td>
+                        <td class="${pnlClass}">${pnlStr} (${(p.pnl_pct||0).toFixed(1)}%)</td>
+                        <td><span class="badge bg-info">${p.strategy}</span></td>
+                        <td class="small">${p.strategy_status || ''}</td>
+                        <td>
+                            <button class="btn btn-sm btn-outline-warning me-1" onclick="manualSwitchStrategy('${p.pos_id}')" title="Switch strategy"><i class="bi bi-arrow-repeat"></i></button>
+                            <button class="btn btn-sm btn-outline-danger" onclick="manualClose('${p.pos_id}')" title="Close now"><i class="bi bi-x-lg"></i></button>
+                        </td>
+                    </tr>`;
+                }).join('');
+            } catch (e) { console.error('Manual positions refresh error:', e); }
+        }
+
+        // Auto-refresh manual positions every 15s
+        setInterval(refreshManualPositions, 15000);
+        refreshManualPositions();
+        updateStrategyDesc();
     </script>
 </body>
 </html>

@@ -3,12 +3,17 @@ import uuid
 import pandas as pd
 from shared import client, ACTIVE_BOTS
 from notifier import notify_bot_entry, notify_bot_exit, notify_drawdown
-from strategies import calculate_quad_rotation, calculate_quad_super, calculate_orb, calculate_trap, calculate_momentum, calculate_dca, calculate_npr, NPR_CONFIG, _compute_zone
+from strategies import (calculate_quad_rotation, calculate_quad_super, calculate_orb,
+    calculate_trap, calculate_momentum, calculate_dca, calculate_npr, NPR_CONFIG, _compute_zone,
+    calculate_vwap_mr, calculate_squeeze)
 from bot_utils import (
-    get_bot_tf, is_derivative, get_contract_multiplier, 
+    get_bot_tf, is_derivative, get_contract_multiplier,
     snap_to_increment, record_trade, save_bots,
     extract_fee, poll_market_fill
 )
+from logger import get_logger
+
+log = get_logger('bot_engine')
 
 
 def paper_fill_buy(bot, pair, qty, price, mult):
@@ -36,7 +41,7 @@ def paper_fill_buy(bot, pair, qty, price, mult):
     bot.pop('pending_buy_time', None)
     bot.pop('buy_retries', None)
     save_bots()
-    print(f"[PAPER DCA | {pair}] BUY: {filled_size:.8f} at ${fill_px:.2f}. Avg entry ${new_avg:.2f}")
+    log.info(f"[{pair}] PAPER BUY: {filled_size:.8f} at ${fill_px:.2f}. Avg entry ${new_avg:.2f}")
     notify_bot_entry(pair, 'DCA (PAPER)', fill_px, filled_size)
 
 
@@ -56,7 +61,7 @@ def paper_fill_sell(bot, pair, tier_pct, qty, price, mult):
     bot['highest_tier_sold'] = max(bot.get('highest_tier_sold', 0), tier_pct)
     save_bots()
     pnl = (fill_px - bot.get('avg_entry', fill_px)) * filled_size * mult
-    print(f"[PAPER DCA | {pair}] SELL tier {tier_pct}%: {filled_size:.8f} at ${fill_px:.2f} PnL ${pnl:.4f}")
+    log.info(f"[{pair}] PAPER SELL tier {tier_pct}%: {filled_size:.8f} at ${fill_px:.2f} PnL ${pnl:.4f}")
     notify_bot_exit(pair, 'DCA (PAPER)', fill_px, pnl, f'Tier {tier_pct}%')
     # Don't call record_trade — paper trades must not pollute permanent stats
 
@@ -97,15 +102,15 @@ def execute_orb(bot_id, bot, pair):
         if profit_pct >= activation_pct and not bot.get('trail_active', False):
             bot['trail_active'] = True
             bot['high_water_mark'] = current_px
-            print(f"[ORB BOT] {pair} Trailing Stop ACTIVATED at +{profit_pct*100:.2f}% profit!")
+            log.info(f"[{pair}] Trailing Stop ACTIVATED at +{profit_pct*100:.2f}% profit!")
             save_bots()
-            
+
         if bot.get('trail_active', False):
             high_mark = bot.get('high_water_mark', current_px)
             if current_px > high_mark:
                 bot['high_water_mark'] = current_px
                 save_bots()
-                
+
             if current_px <= bot['high_water_mark'] * (1 - trail_pct):
                 signal = 'EXIT_LONG'
                 reason = f"Trailing Stop Hit! Secured profit (1.5% pullback from high)."
@@ -115,7 +120,7 @@ def execute_orb(bot_id, bot, pair):
         if profit_pct >= activation_pct and not bot.get('trail_active', False):
             bot['trail_active'] = True
             bot['low_water_mark'] = current_px
-            print(f"[ORB BOT] {pair} Trailing Stop ACTIVATED at +{profit_pct*100:.2f}% profit!")
+            log.info(f"[{pair}] Trailing Stop ACTIVATED at +{profit_pct*100:.2f}% profit!")
             save_bots()
             
         if bot.get('trail_active', False):
@@ -129,12 +134,12 @@ def execute_orb(bot_id, bot, pair):
                 reason = f"Trailing Stop Hit! Secured profit (1.5% pullback from low)."
 
     if signal == 'LONG' and pos_side == 'FLAT' and bot['current_usd'] > 5.0:
-        print(f"[ORB BOT] {pair} LONG TRIGGERED: {reason}")
-        
+        log.info(f"[{pair}] LONG TRIGGERED: {reason}")
+
         if deriv_flag:
             qty = int((bot['current_usd'] * 0.99) / (current_px * mult))
             if qty < 1:
-                print(f"[ORB BOT] {pair} Insufficient capital for 1 derivative contract.")
+                log.warning(f"[{pair}] Insufficient capital for 1 derivative contract.")
                 return
         else:
             qty = round((bot['current_usd'] * 0.99) / current_px, 6)
@@ -151,18 +156,18 @@ def execute_orb(bot_id, bot, pair):
             bot['position_side'] = 'LONG'
             bot['entry_price'] = current_px
             save_bots()
-        except Exception as e: print(f"Order failed: {e}")
-        
+        except Exception as e: log.error(f"[{pair}] Order failed: {e}")
+
     elif signal == 'SHORT' and pos_side == 'FLAT' and bot['current_usd'] > 5.0:
-        print(f"[ORB BOT] {pair} SHORT TRIGGERED: {reason}")
-        
+        log.info(f"[{pair}] SHORT TRIGGERED: {reason}")
+
         if deriv_flag:
             qty = int((bot['current_usd'] * 0.99) / (current_px * mult))
             if qty < 1:
-                print(f"[ORB BOT] {pair} Insufficient capital for 1 derivative contract.")
+                log.warning(f"[{pair}] Insufficient capital for 1 derivative contract.")
                 return
         else:
-            print(f"[ORB BOT] WARNING: Cannot naturally short Spot pair {pair}. Skipping execution.")
+            log.warning(f"[{pair}] Cannot naturally short Spot pair. Skipping execution.")
             return
             
         try:
@@ -173,10 +178,10 @@ def execute_orb(bot_id, bot, pair):
             bot['position_side'] = 'SHORT'
             bot['entry_price'] = current_px
             save_bots()
-        except Exception as e: print(f"Order failed: {e}")
-        
+        except Exception as e: log.error(f"[{pair}] Order failed: {e}")
+
     elif signal == 'EXIT_LONG' and pos_side == 'LONG':
-        print(f"[ORB BOT] {pair} EXIT LONG: {reason}")
+        log.info(f"[{pair}] EXIT LONG: {reason}")
         exit_reason = 'TRAILING_STOP' if 'Trailing' in reason else ('STOP_LOSS' if 'Stop' in reason else 'SIGNAL')
         try:
             oid = str(uuid.uuid4())
@@ -197,10 +202,10 @@ def execute_orb(bot_id, bot, pair):
             bot.pop('high_water_mark', None)
             bot.pop('trail_active', None)
             save_bots()
-        except Exception as e: print(f"Exit failed: {e}")
-        
+        except Exception as e: log.error(f"[{pair}] Exit failed: {e}")
+
     elif signal == 'EXIT_SHORT' and pos_side == 'SHORT':
-        print(f"[ORB BOT] {pair} EXIT SHORT: {reason}")
+        log.info(f"[{pair}] EXIT SHORT: {reason}")
         exit_reason = 'TRAILING_STOP' if 'Trailing' in reason else ('STOP_LOSS' if 'Stop' in reason else 'SIGNAL')
         try:
             oid = str(uuid.uuid4())
@@ -221,7 +226,7 @@ def execute_orb(bot_id, bot, pair):
             bot.pop('low_water_mark', None)
             bot.pop('trail_active', None)
             save_bots()
-        except Exception as e: print(f"Exit failed: {e}")
+        except Exception as e: log.error(f"[{pair}] Exit failed: {e}")
 
 def execute_quad(bot_id, bot, pair, mode='STANDARD'):
     cb_gran, tf_sec = get_bot_tf(bot)
@@ -261,8 +266,8 @@ def execute_quad(bot_id, bot, pair, mode='STANDARD'):
             bot['entry_price'] = current_px
             bot['position_side'] = 'LONG'
             save_bots()
-        except Exception as e: print(f"Order failed: {e}")
-        
+        except Exception as e: log.error(f"[{pair}] Order failed: {e}")
+
     elif signal == 'SELL' and bot['asset_held'] > 0:
         try:
             oid = str(uuid.uuid4())
@@ -281,7 +286,7 @@ def execute_quad(bot_id, bot, pair, mode='STANDARD'):
             bot['asset_held'] = 0.0
             bot['position_side'] = 'FLAT'
             save_bots()
-        except Exception as e: print(f"Order failed: {e}")
+        except Exception as e: log.error(f"[{pair}] Order failed: {e}")
 
 def execute_trap(bot_id, bot, pair):
     """
@@ -298,7 +303,7 @@ def execute_trap(bot_id, bot, pair):
         })
         candles = res.get('candles', [])
     except Exception as e:
-        print(f"[TRAP BOT | {pair}] Candle fetch error: {e}")
+        log.error(f"[{pair}] Candle fetch error: {e}")
         return
     if len(candles) < 210: return
 
@@ -317,7 +322,7 @@ def execute_trap(bot_id, bot, pair):
     mult = get_contract_multiplier(pair)
 
     signal, reason, bo_data = calculate_trap(df, pos_side, entry_stage, avg_entry, breakout_data)
-    print(f"[TRAP BOT | {pair}] {signal}: {reason}")
+    log.debug(f"[{pair}] {signal}: {reason}")
 
     # --- BREAKOUT ENTRY (25% of capital) ---
     if signal == 'BREAKOUT_LONG' and pos_side == 'FLAT' and bot['current_usd'] > 5.0:
@@ -344,9 +349,9 @@ def execute_trap(bot_id, bot, pair):
             bot['entry_stage'] = 1
             bot['breakout_data'] = bo_data
             save_bots()
-            print(f"[TRAP BOT | {pair}] LONG STAGE 1: 25% at {current_px:.2f}")
+            log.info(f"[{pair}] LONG STAGE 1: 25% at {current_px:.2f}")
         except Exception as e:
-            print(f"[TRAP BOT | {pair}] Stage 1 order failed: {e}")
+            log.error(f"[{pair}] Stage 1 order failed: {e}")
 
     elif signal == 'BREAKOUT_SHORT' and pos_side == 'FLAT' and bot['current_usd'] > 5.0:
         if not deriv_flag:
@@ -369,9 +374,9 @@ def execute_trap(bot_id, bot, pair):
             bot['entry_stage'] = 1
             bot['breakout_data'] = bo_data
             save_bots()
-            print(f"[TRAP BOT | {pair}] SHORT STAGE 1: 25% at {current_px:.2f}")
+            log.info(f"[{pair}] SHORT STAGE 1: 25% at {current_px:.2f}")
         except Exception as e:
-            print(f"[TRAP BOT | {pair}] Stage 1 order failed: {e}")
+            log.error(f"[{pair}] Stage 1 order failed: {e}")
 
     # --- ADD TO POSITION (75% remaining) ---
     elif signal == 'ADD_LONG' and pos_side == 'LONG' and entry_stage == 1 and bot['current_usd'] > 5.0:
@@ -399,9 +404,9 @@ def execute_trap(bot_id, bot, pair):
             bot['current_usd'] = 0.0
             bot['entry_stage'] = 2
             save_bots()
-            print(f"[TRAP BOT | {pair}] LONG STAGE 2: +75% at {current_px:.2f}, avg {bot['avg_entry']:.2f}")
+            log.info(f"[{pair}] LONG STAGE 2: +75% at {current_px:.2f}, avg {bot['avg_entry']:.2f}")
         except Exception as e:
-            print(f"[TRAP BOT | {pair}] Stage 2 order failed: {e}")
+            log.error(f"[{pair}] Stage 2 order failed: {e}")
 
     elif signal == 'ADD_SHORT' and pos_side == 'SHORT' and entry_stage == 1 and bot['current_usd'] > 5.0:
         if not deriv_flag: return
@@ -424,9 +429,9 @@ def execute_trap(bot_id, bot, pair):
             bot['current_usd'] = 0.0
             bot['entry_stage'] = 2
             save_bots()
-            print(f"[TRAP BOT | {pair}] SHORT STAGE 2: +75% at {current_px:.2f}, avg {bot['avg_entry']:.2f}")
+            log.info(f"[{pair}] SHORT STAGE 2: +75% at {current_px:.2f}, avg {bot['avg_entry']:.2f}")
         except Exception as e:
-            print(f"[TRAP BOT | {pair}] Stage 2 order failed: {e}")
+            log.error(f"[{pair}] Stage 2 order failed: {e}")
 
     # --- EXITS ---
     elif signal == 'EXIT_LONG' and pos_side == 'LONG' and bot['asset_held'] > 0:
@@ -450,9 +455,9 @@ def execute_trap(bot_id, bot, pair):
             bot['avg_entry'] = 0.0
             bot.pop('breakout_data', None)
             save_bots()
-            print(f"[TRAP BOT | {pair}] EXIT LONG: {reason}")
+            log.info(f"[{pair}] EXIT LONG: {reason}")
         except Exception as e:
-            print(f"[TRAP BOT | {pair}] Exit failed: {e}")
+            log.error(f"[{pair}] Exit failed: {e}")
 
     elif signal == 'EXIT_SHORT' and pos_side == 'SHORT' and bot['asset_held'] < 0:
         exit_reason = 'STOP_LOSS' if 'STOP' in reason.upper() else 'SIGNAL'
@@ -475,9 +480,9 @@ def execute_trap(bot_id, bot, pair):
             bot['avg_entry'] = 0.0
             bot.pop('breakout_data', None)
             save_bots()
-            print(f"[TRAP BOT | {pair}] EXIT SHORT: {reason}")
+            log.info(f"[{pair}] EXIT SHORT: {reason}")
         except Exception as e:
-            print(f"[TRAP BOT | {pair}] Exit failed: {e}")
+            log.error(f"[{pair}] Exit failed: {e}")
 
 # ==========================================
 # MOMENTUM EXECUTOR
@@ -544,7 +549,7 @@ def execute_momentum(bot_id, bot, pair):
         base_inc = getattr(p_info, 'base_increment', '0.00000001')
         quote_inc = getattr(p_info, 'quote_increment', '0.01')
     except Exception as e:
-        print(f"[MOMENTUM | {pair}] Data fetch error: {e}")
+        log.error(f"[{pair}] Data fetch error: {e}")
         return
 
     if len(candles) < 210:
@@ -576,7 +581,7 @@ def execute_momentum(bot_id, bot, pair):
             # STOP TRIGGERED
             exit_reason = 'STOP_LOSS' if phase == 1 else 'TRAILING_STOP'
             held = abs(bot['asset_held'])
-            print(f"[MOMENTUM | {pair}] Phase {phase} stop triggered: price {cur_px:.2f} <= stop {stop_px:.2f}")
+            log.warning(f"[{pair}] Phase {phase} stop triggered: price {cur_px:.2f} <= stop {stop_px:.2f}")
 
             try:
                 oid = str(uuid.uuid4())
@@ -598,9 +603,9 @@ def execute_momentum(bot_id, bot, pair):
                             'pending_order_oid', 'pending_order_time', 'signal_retries']:
                     bot.pop(key, None)
                 save_bots()
-                print(f"[MOMENTUM | {pair}] EXIT ({exit_reason}): PnL ${profit:.2f}")
+                log.info(f"[{pair}] EXIT ({exit_reason}): PnL ${profit:.2f}")
             except Exception as e:
-                print(f"[MOMENTUM | {pair}] Exit sell failed: {e}")
+                log.error(f"[{pair}] Exit sell failed: {e}")
         else:
             save_bots()
         return
@@ -629,7 +634,7 @@ def execute_momentum(bot_id, bot, pair):
                     mom_order_obj = o
                     break
         except Exception as e:
-            print(f"[MOMENTUM | {pair}] Fill check error: {e}")
+            log.error(f"[{pair}] Fill check error: {e}")
             return
 
         if filled and filled_size > 0:
@@ -655,7 +660,7 @@ def execute_momentum(bot_id, bot, pair):
             bot.pop('pending_order_time', None)
             bot.pop('signal_retries', None)
             save_bots()
-            print(f"[MOMENTUM | {pair}] FILLED at {avg_fill_px:.2f}. ATR={entry_atr:.2f}. Phase 1 stop at {avg_fill_px - 1.5*entry_atr:.2f}")
+            log.info(f"[{pair}] FILLED at {avg_fill_px:.2f}. ATR={entry_atr:.2f}. Phase 1 stop at {avg_fill_px - 1.5*entry_atr:.2f}")
             return
 
         # Check timeout
@@ -670,10 +675,10 @@ def execute_momentum(bot_id, bot, pair):
                         real_id = o.get('order_id')
                         if real_id:
                             client.cancel_orders(order_ids=[real_id])
-                            print(f"[MOMENTUM | {pair}] Cancelled stale limit order ({elapsed:.0f}s)")
+                            log.debug(f"[{pair}] Cancelled stale limit order ({elapsed:.0f}s)")
                         break
             except Exception as e:
-                print(f"[MOMENTUM | {pair}] Cancel error: {e}")
+                log.error(f"[{pair}] Cancel error: {e}")
 
             # Re-evaluate signal
             signal, reason, sig_atr = calculate_momentum(df)
@@ -706,9 +711,9 @@ def execute_momentum(bot_id, bot, pair):
                     bot['pending_order_time'] = time.time()
                     bot['signal_retries'] = retries + 1
                     save_bots()
-                    print(f"[MOMENTUM | {pair}] Re-placed limit buy at {str_price} (retry {retries + 1}/3)")
+                    log.debug(f"[{pair}] Re-placed limit buy at {str_price} (retry {retries + 1}/3)")
                 except Exception as e:
-                    print(f"[MOMENTUM | {pair}] Re-place failed: {e}")
+                    log.error(f"[{pair}] Re-place failed: {e}")
                     bot.pop('pending_order_oid', None)
                     bot.pop('pending_order_time', None)
                     bot.pop('signal_retries', None)
@@ -716,7 +721,7 @@ def execute_momentum(bot_id, bot, pair):
             else:
                 # Signal died or max retries — abandon
                 reason_str = f"signal lost ({reason})" if signal != 'BUY' else f"max retries ({retries})"
-                print(f"[MOMENTUM | {pair}] Abandoned entry: {reason_str}")
+                log.warning(f"[{pair}] Abandoned entry: {reason_str}")
                 bot.pop('pending_order_oid', None)
                 bot.pop('pending_order_time', None)
                 bot.pop('signal_retries', None)
@@ -734,7 +739,7 @@ def execute_momentum(bot_id, bot, pair):
     if signal != 'BUY':
         return
 
-    print(f"[MOMENTUM | {pair}] SIGNAL: {reason}")
+    log.info(f"[{pair}] SIGNAL: {reason}")
 
     # Place maker limit buy 1 tick below current price
     limit_px = cur_px - float(quote_inc)
@@ -743,7 +748,7 @@ def execute_momentum(bot_id, bot, pair):
     if deriv_flag:
         qty = int((bot['current_usd'] * 0.99) / (limit_px * mult))
         if qty < 1:
-            print(f"[MOMENTUM | {pair}] Insufficient capital for 1 derivative contract.")
+            log.warning(f"[{pair}] Insufficient capital for 1 derivative contract.")
             return
         str_qty = str(qty)
     else:
@@ -767,11 +772,11 @@ def execute_momentum(bot_id, bot, pair):
             bot['pending_order_time'] = time.time()
             bot['signal_retries'] = 0
             save_bots()
-            print(f"[MOMENTUM | {pair}] Limit BUY placed at {str_price} (post_only). Waiting for fill...")
+            log.info(f"[{pair}] Limit BUY placed at {str_price} (post_only). Waiting for fill...")
         else:
-            print(f"[MOMENTUM | {pair}] Limit order rejected: {fail_reason}")
+            log.error(f"[{pair}] Limit order rejected: {fail_reason}")
     except Exception as e:
-        print(f"[MOMENTUM | {pair}] Order placement failed: {e}")
+        log.error(f"[{pair}] Order placement failed: {e}")
 
 # ==========================================
 # DCA EXECUTOR
@@ -807,11 +812,11 @@ def _dca_cancel_all_sells(bot, pair):
                             cancelled += 1
                         break
             except Exception as e:
-                print(f"[DCA | {pair}] Cancel sell error: {e}")
+                log.error(f"[{pair}] Cancel sell error: {e}")
     bot['pending_sells'] = []
     bot['highest_tier_sold'] = 0
     if cancelled:
-        print(f"[DCA | {pair}] Cancelled {cancelled} pending sells (avg entry changed)")
+        log.debug(f"[{pair}] Cancelled {cancelled} pending sells (avg entry changed)")
     save_bots()
 
 def _dca_check_sell_fills(bot, pair):
@@ -830,7 +835,7 @@ def _dca_check_sell_fills(bot, pair):
         })
         filled_orders = {o.get('client_order_id'): o for o in order_data.get('orders', []) if o.get('client_order_id')}
     except Exception as e:
-        print(f"[DCA | {pair}] Sell fill check error: {e}")
+        log.error(f"[{pair}] Sell fill check error: {e}")
         return
 
     new_pending = []
@@ -866,14 +871,14 @@ def _dca_check_sell_fills(bot, pair):
                 bot['highest_tier_sold'] = max(bot.get('highest_tier_sold', 0), tier_pct)
                 changes = True
                 pnl_val = (avg_px - bot.get('avg_entry', avg_px)) * filled_size * mult
-                print(f"[DCA | {pair}] Tier {tier_pct}% sell FILLED: {filled_size:.8f} at ${avg_px:.2f} (fee=${real_fee:.4f})")
+                log.info(f"[{pair}] Tier {tier_pct}% sell FILLED: {filled_size:.8f} at ${avg_px:.2f} (fee=${real_fee:.4f})")
                 notify_bot_exit(pair, 'DCA', avg_px, pnl_val, f'Tier {tier_pct}%')
 
                 # Record trade AFTER state is fully updated and sell is NOT in new_pending
                 try:
                     record_trade(bot, bot.get('avg_entry', avg_px), avg_px, filled_size, 'LONG', 'DCA_TIER', pair, mult, actual_fee=real_fee)
                 except Exception as e:
-                    print(f"[DCA | {pair}] record_trade error: {e}")
+                    log.error(f"[{pair}] record_trade error: {e}")
                 continue  # Don't add to new_pending
         new_pending.append(sell)
 
@@ -892,11 +897,11 @@ def _dca_check_sell_fills(bot, pair):
                 # so it doesn't inflate avg_entry on the next buy cycle
                 dust_cost = held_remaining * bot.get('avg_entry', 0)
                 bot['total_cost'] = dust_cost
-                print(f"[DCA | {pair}] Tiers scaled out. {held_remaining:.8f} remains at avg ${bot.get('avg_entry',0):.2f}. Cycling to SCANNING.")
+                log.info(f"[{pair}] Tiers scaled out. {held_remaining:.8f} remains at avg ${bot.get('avg_entry',0):.2f}. Cycling to SCANNING.")
                 bot['position_side'] = 'LONG'
             else:
                 # Truly empty (asset_held == 0 exactly)
-                print(f"[DCA | {pair}] Position fully closed. Resetting to SCANNING.")
+                log.info(f"[{pair}] Position fully closed. Resetting to SCANNING.")
                 bot['position_side'] = 'FLAT'
                 bot['avg_entry'] = 0
                 bot['total_cost'] = 0
@@ -942,10 +947,10 @@ def _dca_manage_stale_sells(bot, pair, cur_px):
                             client.cancel_orders(order_ids=[real_id])
                         break
             except Exception as e:
-                print(f"[DCA | {pair}] Stale sell cancel error: {e}")
+                log.error(f"[{pair}] Stale sell cancel error: {e}")
             pending.remove(sell)
             changed = True
-            print(f"[DCA | {pair}] Cancelled stale {tier_pct}% sell (profit now {profit_pct:.2f}%, underwater)")
+            log.warning(f"[{pair}] Cancelled stale {tier_pct}% sell (profit now {profit_pct:.2f}%, underwater)")
 
     if changed:
         bot['pending_sells'] = pending
@@ -973,7 +978,7 @@ def execute_dca(bot_id, bot, pair):
         if base_min * cur_px < 0.25:
             base_min = 0.25 / cur_px
     except Exception as e:
-        print(f"[DCA | {pair}] Data fetch error: {e}")
+        log.error(f"[{pair}] Data fetch error: {e}")
         return
 
     if len(candles) < 210:
@@ -1006,16 +1011,40 @@ def execute_dca(bot_id, bot, pair):
     drawdown_mult = 1.0
     if held >= base_min and avg_entry > 0:
         drawdown_pct = ((avg_entry - cur_px) / avg_entry) * 100
+
+        # CIRCUIT BREAKER: hard exit at -25% drawdown
+        if drawdown_pct >= 25 and dca_state not in ('CIRCUIT_BREAK', 'PAUSED'):
+            log.warning(f"[{pair}] CIRCUIT BREAKER: {drawdown_pct:.1f}% drawdown — liquidating position")
+            try:
+                oid = str(uuid.uuid4())
+                str_qty = snap_to_increment(held, base_inc)
+                client.market_order_sell(client_order_id=oid, product_id=pair, base_size=str_qty)
+                fill_px, fill_sz, fill_fee = poll_market_fill(oid, pair, retries=2, delay=0.5)
+                actual_exit = fill_px if fill_px else cur_px
+                actual_fee = fill_fee if fill_fee is not None else (actual_exit * held * mult * 0.0025)
+                record_trade(bot, avg_entry, actual_exit, held, 'LONG', 'CIRCUIT_BREAK', pair, mult, actual_fee=actual_fee)
+                bot['current_usd'] += (held * actual_exit * mult) - actual_fee
+                bot['asset_held'] = 0.0
+                bot['position_side'] = 'FLAT'
+                bot['avg_entry'] = 0
+                bot['total_cost'] = 0
+                bot['dca_state'] = 'CIRCUIT_BREAK'
+                notify_drawdown(pair, 'DCA', drawdown_pct)
+                save_bots()
+            except Exception as e:
+                log.error(f"[{pair}] Circuit breaker sell failed: {e}")
+            return
+
         if dca_state != 'PAUSED' and drawdown_pct >= 25:
             bot['dca_state'] = 'PAUSED'
             bot['paused_at'] = time.time()
-            print(f"[DCA | {pair}] PAUSED: {drawdown_pct:.1f}% drawdown — catastrophic threshold")
+            log.warning(f"[{pair}] PAUSED: {drawdown_pct:.1f}% drawdown — catastrophic threshold")
             notify_drawdown(pair, 'DCA', drawdown_pct)
             save_bots()
         elif dca_state == 'PAUSED' and drawdown_pct < 22:  # 3% hysteresis
             bot['dca_state'] = 'ACCUMULATING'
             bot['paused_at'] = 0
-            print(f"[DCA | {pair}] UN-PAUSED: drawdown recovered to {drawdown_pct:.1f}%")
+            log.info(f"[{pair}] UN-PAUSED: drawdown recovered to {drawdown_pct:.1f}%")
             save_bots()
         elif drawdown_pct >= 20:
             drawdown_mult = 0.25  # quarter-size buys
@@ -1046,7 +1075,7 @@ def execute_dca(bot_id, bot, pair):
                     buy_order_obj = o
                     break
         except Exception as e:
-            print(f"[DCA | {pair}] Buy fill check error: {e}")
+            log.error(f"[{pair}] Buy fill check error: {e}")
             return
 
         if filled and filled_size > 0:
@@ -1079,7 +1108,7 @@ def execute_dca(bot_id, bot, pair):
             _dca_cancel_all_sells(bot, pair)
 
             save_bots()
-            print(f"[DCA | {pair}] BUY FILLED: {filled_size:.8f} at ${avg_fill_px:.2f}. Avg entry now ${new_avg:.2f}. Total buys: {bot['total_buys']}")
+            log.info(f"[{pair}] BUY FILLED: {filled_size:.8f} at ${avg_fill_px:.2f}. Avg entry now ${new_avg:.2f}. Total buys: {bot['total_buys']}")
             notify_bot_entry(pair, 'DCA', avg_fill_px, filled_size)
             return
 
@@ -1096,7 +1125,7 @@ def execute_dca(bot_id, bot, pair):
                             client.cancel_orders(order_ids=[real_id])
                         break
             except Exception as e:
-                print(f"[DCA | {pair}] Cancel buy error: {e}")
+                log.error(f"[{pair}] Cancel buy error: {e}")
 
             # Re-evaluate
             signal, reason, data = calculate_dca(df, 'ARMED', last_cross)
@@ -1125,9 +1154,9 @@ def execute_dca(bot_id, bot, pair):
                     bot['pending_buy_time'] = time.time()
                     bot['buy_retries'] = retries + 1
                     save_bots()
-                    print(f"[DCA | {pair}] Re-placed buy at ${str_price} (retry {retries+1}/3)")
+                    log.debug(f"[{pair}] Re-placed buy at ${str_price} (retry {retries+1}/3)")
                 except Exception as e:
-                    print(f"[DCA | {pair}] Re-place failed: {e}")
+                    log.error(f"[{pair}] Re-place failed: {e}")
             else:
                 bot['dca_state'] = 'ACCUMULATING' if held > 0 else 'ARMED'
                 bot.pop('pending_buy_oid', None)
@@ -1156,7 +1185,7 @@ def execute_dca(bot_id, bot, pair):
         profit_pct = ((cur_px - avg_entry) / avg_entry) * 100
         highest_sold = bot.get('highest_tier_sold', 0)
         if profit_pct <= -3.0 and highest_sold > 0:
-            print(f"[DCA | {pair}] TIER RESET: profit {profit_pct:.2f}% hit -3.0% with tier {highest_sold}% sold. Resetting tiers.")
+            log.warning(f"[{pair}] TIER RESET: profit {profit_pct:.2f}% hit -3.0% with tier {highest_sold}% sold. Resetting tiers.")
             _dca_cancel_all_sells(bot, pair)
             bot['highest_tier_sold'] = 0
             bot['tier_reset_at'] = time.time()
@@ -1227,12 +1256,12 @@ def execute_dca(bot_id, bot, pair):
                             available_held -= float(str_qty)  # deduct for next tier in this loop
                             bot['pending_sells'] = pending_sells
                             save_bots()
-                            print(f"[DCA | {pair}] Placed {tier_pct}% tier sell: {str_qty} at ${str_price}")
+                            log.info(f"[{pair}] Placed {tier_pct}% tier sell: {str_qty} at ${str_price}")
                         else:
                             fail = getattr(api_res, 'failure_reason', '') or (isinstance(api_res, dict) and api_res.get('failure_reason', ''))
-                            print(f"[DCA | {pair}] Tier sell rejected: {fail}")
+                            log.error(f"[{pair}] Tier sell rejected: {fail}")
                     except Exception as e:
-                        print(f"[DCA | {pair}] Tier sell error: {e}")
+                        log.error(f"[{pair}] Tier sell error: {e}")
 
     # ==========================================
     # STEP 6: SIGNAL EVALUATION
@@ -1249,16 +1278,16 @@ def execute_dca(bot_id, bot, pair):
             bot['dca_state'] = 'ARMED'
             bot['armed_at'] = time.time()
             save_bots()
-            print(f"[DCA | {pair}] ARMED: {reason}")
+            log.debug(f"[{pair}] ARMED: {reason}")
 
         elif signal == 'DISARM':
             bot['dca_state'] = 'SCANNING'
             save_bots()
-            print(f"[DCA | {pair}] DISARMED: {reason}")
+            log.debug(f"[{pair}] DISARMED: {reason}")
 
         elif signal == 'BUY':
-            if bot['current_usd'] < base_min * cur_px * 0.5:
-                print(f"[DCA | {pair}] Signal BUY but insufficient capital (${bot['current_usd']:.2f})")
+            if bot['current_usd'] < base_min * cur_px:
+                log.warning(f"[{pair}] Signal BUY but insufficient capital (${bot['current_usd']:.2f})")
                 return
 
             # Correlation guard: if multiple bots are entering simultaneously,
@@ -1272,10 +1301,10 @@ def execute_dca(bot_id, bot, pair):
             corr_mult = 1.0
             if concurrent_entries >= 3:
                 corr_mult = 0.33
-                print(f"[DCA | {pair}] CORRELATION GUARD: {concurrent_entries} other bots entering, sizing to 33%")
+                log.warning(f"[{pair}] CORRELATION GUARD: {concurrent_entries} other bots entering, sizing to 33%")
             elif concurrent_entries >= 2:
                 corr_mult = 0.50
-                print(f"[DCA | {pair}] CORRELATION GUARD: {concurrent_entries} other bots entering, sizing to 50%")
+                log.warning(f"[{pair}] CORRELATION GUARD: {concurrent_entries} other bots entering, sizing to 50%")
 
             depth_mult = data.get('depth_multiplier', 1.0)
             buy_pct = bot.get('buy_pct', 5.0)
@@ -1287,7 +1316,7 @@ def execute_dca(bot_id, bot, pair):
                 if kelly_pct is not None:
                     buy_pct = kelly_pct
                     if buy_pct != bot.get('_last_kelly_pct'):
-                        print(f"[DCA | {pair}] Kelly sizing: {kelly_pct}% (was {bot.get('buy_pct', 5.0)}%)")
+                        log.debug(f"[{pair}] Kelly sizing: {kelly_pct}% (was {bot.get('buy_pct', 5.0)}%)")
                         bot['_last_kelly_pct'] = buy_pct
 
             buy_usd = bot['current_usd'] * (buy_pct / 100.0) * depth_mult * drawdown_mult * corr_mult
@@ -1304,7 +1333,7 @@ def execute_dca(bot_id, bot, pair):
 
             buy_usd = float(str_qty) * limit_px * mult
             if buy_usd > bot['current_usd'] * 0.99 or float(str_qty) <= 0:
-                print(f"[DCA | {pair}] Buy size ${buy_usd:.2f} exceeds available ${bot['current_usd']:.2f}")
+                log.warning(f"[{pair}] Buy size ${buy_usd:.2f} exceeds available ${bot['current_usd']:.2f}")
                 return
 
             if bot.get('paper'):
@@ -1326,11 +1355,11 @@ def execute_dca(bot_id, bot, pair):
                     bot['pending_buy_time'] = time.time()
                     bot['buy_retries'] = 0
                     save_bots()
-                    print(f"[DCA | {pair}] BUYING: {str_qty} at ${str_price} ({depth_mult:.2f}x min). {reason}")
+                    log.info(f"[{pair}] BUYING: {str_qty} at ${str_price} ({depth_mult:.2f}x min). {reason}")
                 else:
-                    print(f"[DCA | {pair}] Buy rejected: {fail_reason}")
+                    log.error(f"[{pair}] Buy rejected: {fail_reason}")
             except Exception as e:
-                print(f"[DCA | {pair}] Buy placement failed: {e}")
+                log.error(f"[{pair}] Buy placement failed: {e}")
 
     elif dca_state == 'ACCUMULATING':
         # Check for re-arm cycle
@@ -1339,14 +1368,14 @@ def execute_dca(bot_id, bot, pair):
         if signal == 'CROSS_ABOVE':
             bot['last_cross_direction'] = 'ABOVE'
             save_bots()
-            print(f"[DCA | {pair}] {reason}")
+            log.debug(f"[{pair}] {reason}")
 
         elif signal == 'ARM':
             bot['dca_state'] = 'ARMED'
             bot['armed_at'] = time.time()
             bot['last_cross_direction'] = 'BELOW'
             save_bots()
-            print(f"[DCA | {pair}] RE-ARMED: {reason}")
+            log.debug(f"[{pair}] RE-ARMED: {reason}")
 
 
 # ==========================================
@@ -1405,7 +1434,7 @@ def execute_npr(bot_id, bot, pair):
         if base_min * cur_px < 0.25:
             base_min = 0.25 / cur_px
     except Exception as e:
-        print(f"[NPR | {pair}] Data fetch error: {e}")
+        log.error(f"[{pair}] Data fetch error: {e}")
         return
 
     if len(candles) < 210:
@@ -1429,14 +1458,14 @@ def execute_npr(bot_id, bot, pair):
         if npr_state == 'DAILY_HALT':
             bot['npr_state'] = 'SCANNING'
             npr_state = 'SCANNING'
-            print(f"[NPR | {pair}] New UTC day -- resuming from DAILY_HALT")
+            log.info(f"[{pair}] New UTC day -- resuming from DAILY_HALT")
         save_bots()
 
     if bot.get('daily_loss', 0) >= max_loss_day:
         if npr_state != 'DAILY_HALT':
             bot['npr_state'] = 'DAILY_HALT'
             save_bots()
-            print(f"[NPR | {pair}] DAILY HALT: Loss ${bot['daily_loss']:.2f} >= max ${max_loss_day:.2f}")
+            log.warning(f"[{pair}] DAILY HALT: Loss ${bot['daily_loss']:.2f} >= max ${max_loss_day:.2f}")
         return
 
     # === IN_POSITION: Manage exits ===
@@ -1481,9 +1510,9 @@ def execute_npr(bot_id, bot, pair):
                             'atr_at_entry', 'pending_order_oid', 'pending_order_time']:
                     bot.pop(key, None)
                 save_bots()
-                print(f"[NPR | {pair}] EXIT ({exit_reason}): PnL ${pnl:.2f}")
+                log.info(f"[{pair}] EXIT ({exit_reason}): PnL ${pnl:.2f}")
             except Exception as e:
-                print(f"[NPR | {pair}] Exit order failed: {e}")
+                log.error(f"[{pair}] Exit order failed: {e}")
             return
 
         # Activate trailing after breakeven + 0.25 ATR
@@ -1505,7 +1534,7 @@ def execute_npr(bot_id, bot, pair):
                 else:
                     bot['event_stop'] = entry_px - float(quote_inc)
                 save_bots()
-                print(f"[NPR | {pair}] Breakeven + trail. dist={bot['trail_distance']:.2f}")
+                log.debug(f"[{pair}] Breakeven + trail. dist={bot['trail_distance']:.2f}")
         return
 
     # === ENTERING: Check pending order ===
@@ -1530,7 +1559,7 @@ def execute_npr(bot_id, bot, pair):
                     avg_fill_px = float(o.get('average_filled_price', cur_px))
                     break
         except Exception as e:
-            print(f"[NPR | {pair}] Fill check error: {e}")
+            log.error(f"[{pair}] Fill check error: {e}")
             return
 
         if filled and filled_size > 0:
@@ -1546,8 +1575,8 @@ def execute_npr(bot_id, bot, pair):
                         'signal_bar_time', '_entry_size', 'entry_bar_start']:
                 bot.pop(key, None)
             save_bots()
-            print(f"[NPR | {pair}] FILLED {bot['position_side']}: {filled_size:.8f} at ${avg_fill_px:.2f} "
-                  f"Event={bot.get('event_type')} Zone={bot.get('zone')} Score={bot.get('check_score')}")
+            log.info(f"[{pair}] FILLED {bot['position_side']}: {filled_size:.8f} at ${avg_fill_px:.2f} "
+                     f"Event={bot.get('event_type')} Zone={bot.get('zone')} Score={bot.get('check_score')}")
             return
 
         if elapsed >= 30:
@@ -1562,7 +1591,7 @@ def execute_npr(bot_id, bot, pair):
                             client.cancel_orders(order_ids=[real_id])
                         break
             except Exception as e:
-                print(f"[NPR | {pair}] Cancel error: {e}")
+                log.error(f"[{pair}] Cancel error: {e}")
 
             bar_start = bot.get('entry_bar_start', 0)
             if retries < 2 and (time.time() - bar_start) < tf_sec:
@@ -1585,9 +1614,9 @@ def execute_npr(bot_id, bot, pair):
                     bot['pending_order_time'] = time.time()
                     bot['entry_retries'] = retries + 1
                     save_bots()
-                    print(f"[NPR | {pair}] Retry {retries+1}/2 at ${str_price}")
+                    log.debug(f"[{pair}] Retry {retries+1}/2 at ${str_price}")
                 except Exception as e:
-                    print(f"[NPR | {pair}] Retry failed: {e}")
+                    log.error(f"[{pair}] Retry failed: {e}")
                 return
 
             bot['npr_state'] = 'SCANNING'
@@ -1597,7 +1626,7 @@ def execute_npr(bot_id, bot, pair):
                         'event_power', 'zone', 'check_score', 'position_checks', 'atr_at_entry']:
                 bot.pop(key, None)
             save_bots()
-            print(f"[NPR | {pair}] Entry abandoned")
+            log.warning(f"[{pair}] Entry abandoned")
         return
 
     # === SCANNING / SIGNAL_WAIT: Detect events ===
@@ -1617,7 +1646,7 @@ def execute_npr(bot_id, bot, pair):
             if position_cost > bot['current_usd'] * 0.95:
                 position_size = (bot['current_usd'] * 0.95) / (cur_px * mult)
             if position_size < base_min:
-                print(f"[NPR | {pair}] Size too small for risk. Skip.")
+                log.warning(f"[{pair}] Size too small for risk. Skip.")
                 return
 
             if in_entry_window:
@@ -1654,18 +1683,232 @@ def execute_npr(bot_id, bot, pair):
                         bot['atr_at_entry'] = signal['atr']
                         bot['_entry_size'] = position_size
                         save_bots()
-                        print(f"[NPR | {pair}] ENTERING: {signal['reason']}")
+                        log.info(f"[{pair}] ENTERING: {signal['reason']}")
                     else:
-                        print(f"[NPR | {pair}] Order rejected: {fail_reason}")
+                        log.error(f"[{pair}] Order rejected: {fail_reason}")
                 except Exception as e:
-                    print(f"[NPR | {pair}] Order failed: {e}")
+                    log.error(f"[{pair}] Order failed: {e}")
             else:
                 if npr_state != 'SIGNAL_WAIT':
                     bot['npr_state'] = 'SIGNAL_WAIT'
                     bot['signal_bar_time'] = float(df['start'].iloc[-1])
                     save_bots()
-                    print(f"[NPR | {pair}] SIGNAL_WAIT: {signal['reason']} (bar {elapsed_in_bar:.0f}s/{tf_sec}s)")
+                    log.debug(f"[{pair}] SIGNAL_WAIT: {signal['reason']} (bar {elapsed_in_bar:.0f}s/{tf_sec}s)")
         elif npr_state == 'SIGNAL_WAIT':
             bot['npr_state'] = 'SCANNING'
             bot.pop('signal_bar_time', None)
             save_bots()
+
+
+# ==========================================
+# VWAP MEAN REVERSION EXECUTOR
+# ==========================================
+def execute_vwap_mr(bot_id, bot, pair):
+    """VWAP_MR: Buy at VWAP - 1σ with RSI<35, sell at VWAP touch. ATR trailing stop."""
+    cb_gran, tf_sec = get_bot_tf(bot)
+    end_ts = int(time.time())
+    start_ts = end_ts - (300 * tf_sec)
+
+    try:
+        res = client.get(f"/api/v3/brokerage/products/{pair}/candles",
+                         params={"start": str(start_ts), "end": str(end_ts), "granularity": cb_gran})
+        candles = res.get('candles', [])
+        p_info = client.get_product(product_id=pair)
+        cur_px = float(p_info.price)
+        base_inc = str(getattr(p_info, 'base_increment', '0.00000001'))
+        quote_inc = str(getattr(p_info, 'quote_increment', '0.01'))
+    except Exception as e:
+        log.error(f"[{pair}] VWAP_MR data fetch error: {e}")
+        return
+
+    if len(candles) < 100:
+        return
+
+    parsed = [{'open': float(c['open']), 'high': float(c['high']), 'low': float(c['low']),
+               'close': float(c['close']), 'volume': float(c.get('volume', 0))} for c in candles]
+    df = pd.DataFrame(parsed).sort_values(by=pd.RangeIndex(len(parsed))).reset_index(drop=True)
+
+    signal, reason, atr_val = calculate_vwap_mr(df)
+    mult = get_contract_multiplier(pair)
+    held = bot.get('asset_held', 0)
+    pos_side = bot.get('position_side', 'FLAT')
+
+    if signal == 'BUY' and pos_side == 'FLAT':
+        buy_usd = bot['current_usd'] * 0.95
+        if buy_usd < 1:
+            log.warning(f"[{pair}] VWAP_MR insufficient capital")
+            return
+        try:
+            oid = str(uuid.uuid4())
+            client.market_order_buy(client_order_id=oid, product_id=pair, quote_size=str(round(buy_usd, 2)))
+            fill_px, fill_sz, fill_fee = poll_market_fill(oid, pair)
+            actual_px = fill_px if fill_px else cur_px
+            actual_sz = fill_sz if fill_sz else buy_usd / cur_px
+            actual_fee = fill_fee if fill_fee is not None else buy_usd * 0.0025
+            bot['asset_held'] = actual_sz
+            bot['entry_price'] = actual_px
+            bot['position_side'] = 'LONG'
+            bot['current_usd'] -= (actual_sz * actual_px * mult + actual_fee)
+            bot['high_water_mark'] = actual_px
+            bot['entry_atr'] = atr_val if atr_val > 0 else actual_px * 0.015
+            save_bots()
+            log.info(f"[{pair}] VWAP_MR BUY: {actual_sz:.8f} @ ${actual_px:.2f} ({reason})")
+            notify_bot_entry(pair, 'VWAP_MR', actual_px, actual_sz)
+        except Exception as e:
+            log.error(f"[{pair}] VWAP_MR buy failed: {e}")
+
+    elif signal == 'SELL' and pos_side == 'LONG' and held > 0:
+        try:
+            oid = str(uuid.uuid4())
+            str_qty = snap_to_increment(held, base_inc)
+            client.market_order_sell(client_order_id=oid, product_id=pair, base_size=str_qty)
+            fill_px, fill_sz, fill_fee = poll_market_fill(oid, pair)
+            actual_exit = fill_px if fill_px else cur_px
+            actual_fee = fill_fee if fill_fee is not None else actual_exit * held * mult * 0.0025
+            record_trade(bot, bot['entry_price'], actual_exit, held, 'LONG', 'VWAP_TOUCH', pair, mult, actual_fee=actual_fee)
+            profit = (actual_exit - bot['entry_price']) * held * mult
+            bot['current_usd'] += (held * actual_exit * mult) - actual_fee
+            bot['asset_held'] = 0.0
+            bot['position_side'] = 'FLAT'
+            for k in ['entry_price', 'high_water_mark', 'entry_atr']:
+                bot.pop(k, None)
+            save_bots()
+            log.info(f"[{pair}] VWAP_MR EXIT: PnL ${profit:.2f} ({reason})")
+            notify_bot_exit(pair, 'VWAP_MR', actual_exit, profit)
+        except Exception as e:
+            log.error(f"[{pair}] VWAP_MR sell failed: {e}")
+
+    elif pos_side == 'LONG' and held > 0:
+        # ATR trailing stop while in position
+        hwm = bot.get('high_water_mark', bot.get('entry_price', cur_px))
+        if cur_px > hwm:
+            bot['high_water_mark'] = cur_px
+        entry_atr = bot.get('entry_atr', cur_px * 0.015)
+        stop_px = bot['high_water_mark'] - (1.5 * entry_atr)
+        if cur_px <= stop_px:
+            try:
+                oid = str(uuid.uuid4())
+                str_qty = snap_to_increment(held, base_inc)
+                client.market_order_sell(client_order_id=oid, product_id=pair, base_size=str_qty)
+                fill_px, fill_sz, fill_fee = poll_market_fill(oid, pair)
+                actual_exit = fill_px if fill_px else cur_px
+                actual_fee = fill_fee if fill_fee is not None else actual_exit * held * mult * 0.0025
+                record_trade(bot, bot['entry_price'], actual_exit, held, 'LONG', 'TRAILING_STOP', pair, mult, actual_fee=actual_fee)
+                profit = (actual_exit - bot['entry_price']) * held * mult
+                bot['current_usd'] += (held * actual_exit * mult) - actual_fee
+                bot['asset_held'] = 0.0
+                bot['position_side'] = 'FLAT'
+                for k in ['entry_price', 'high_water_mark', 'entry_atr']:
+                    bot.pop(k, None)
+                save_bots()
+                log.warning(f"[{pair}] VWAP_MR TRAILING STOP: PnL ${profit:.2f}")
+                notify_bot_exit(pair, 'VWAP_MR', actual_exit, profit)
+            except Exception as e:
+                log.error(f"[{pair}] VWAP_MR stop sell failed: {e}")
+
+
+# ==========================================
+# BOLLINGER SQUEEZE BREAKOUT EXECUTOR
+# ==========================================
+def execute_squeeze(bot_id, bot, pair):
+    """SQUEEZE: Enter on BB/KC squeeze release, exit on momentum reversal or ATR trail."""
+    cb_gran, tf_sec = get_bot_tf(bot)
+    end_ts = int(time.time())
+    start_ts = end_ts - (300 * tf_sec)
+
+    try:
+        res = client.get(f"/api/v3/brokerage/products/{pair}/candles",
+                         params={"start": str(start_ts), "end": str(end_ts), "granularity": cb_gran})
+        candles = res.get('candles', [])
+        p_info = client.get_product(product_id=pair)
+        cur_px = float(p_info.price)
+        base_inc = str(getattr(p_info, 'base_increment', '0.00000001'))
+        quote_inc = str(getattr(p_info, 'quote_increment', '0.01'))
+    except Exception as e:
+        log.error(f"[{pair}] SQUEEZE data fetch error: {e}")
+        return
+
+    if len(candles) < 210:
+        return
+
+    parsed = [{'open': float(c['open']), 'high': float(c['high']), 'low': float(c['low']),
+               'close': float(c['close']), 'volume': float(c.get('volume', 0))} for c in candles]
+    df = pd.DataFrame(parsed).sort_values(by=pd.RangeIndex(len(parsed))).reset_index(drop=True)
+
+    signal, reason, atr_val = calculate_squeeze(df)
+    mult = get_contract_multiplier(pair)
+    held = bot.get('asset_held', 0)
+    pos_side = bot.get('position_side', 'FLAT')
+
+    if signal == 'BUY' and pos_side == 'FLAT':
+        buy_usd = bot['current_usd'] * 0.95
+        if buy_usd < 1:
+            log.warning(f"[{pair}] SQUEEZE insufficient capital")
+            return
+        try:
+            oid = str(uuid.uuid4())
+            client.market_order_buy(client_order_id=oid, product_id=pair, quote_size=str(round(buy_usd, 2)))
+            fill_px, fill_sz, fill_fee = poll_market_fill(oid, pair)
+            actual_px = fill_px if fill_px else cur_px
+            actual_sz = fill_sz if fill_sz else buy_usd / cur_px
+            actual_fee = fill_fee if fill_fee is not None else buy_usd * 0.0025
+            bot['asset_held'] = actual_sz
+            bot['entry_price'] = actual_px
+            bot['position_side'] = 'LONG'
+            bot['current_usd'] -= (actual_sz * actual_px * mult + actual_fee)
+            bot['high_water_mark'] = actual_px
+            bot['entry_atr'] = atr_val if atr_val > 0 else actual_px * 0.015
+            save_bots()
+            log.info(f"[{pair}] SQUEEZE BUY: {actual_sz:.8f} @ ${actual_px:.2f} ({reason})")
+            notify_bot_entry(pair, 'SQUEEZE', actual_px, actual_sz)
+        except Exception as e:
+            log.error(f"[{pair}] SQUEEZE buy failed: {e}")
+
+    elif signal == 'EXIT_LONG' and pos_side == 'LONG' and held > 0:
+        try:
+            oid = str(uuid.uuid4())
+            str_qty = snap_to_increment(held, base_inc)
+            client.market_order_sell(client_order_id=oid, product_id=pair, base_size=str_qty)
+            fill_px, fill_sz, fill_fee = poll_market_fill(oid, pair)
+            actual_exit = fill_px if fill_px else cur_px
+            actual_fee = fill_fee if fill_fee is not None else actual_exit * held * mult * 0.0025
+            record_trade(bot, bot['entry_price'], actual_exit, held, 'LONG', 'MOMENTUM_REVERSAL', pair, mult, actual_fee=actual_fee)
+            profit = (actual_exit - bot['entry_price']) * held * mult
+            bot['current_usd'] += (held * actual_exit * mult) - actual_fee
+            bot['asset_held'] = 0.0
+            bot['position_side'] = 'FLAT'
+            for k in ['entry_price', 'high_water_mark', 'entry_atr']:
+                bot.pop(k, None)
+            save_bots()
+            log.info(f"[{pair}] SQUEEZE EXIT: PnL ${profit:.2f} ({reason})")
+            notify_bot_exit(pair, 'SQUEEZE', actual_exit, profit)
+        except Exception as e:
+            log.error(f"[{pair}] SQUEEZE sell failed: {e}")
+
+    elif pos_side == 'LONG' and held > 0:
+        # ATR trailing stop
+        hwm = bot.get('high_water_mark', bot.get('entry_price', cur_px))
+        if cur_px > hwm:
+            bot['high_water_mark'] = cur_px
+        entry_atr = bot.get('entry_atr', cur_px * 0.015)
+        stop_px = bot['high_water_mark'] - (2.0 * entry_atr)
+        if cur_px <= stop_px:
+            try:
+                oid = str(uuid.uuid4())
+                str_qty = snap_to_increment(held, base_inc)
+                client.market_order_sell(client_order_id=oid, product_id=pair, base_size=str_qty)
+                fill_px, fill_sz, fill_fee = poll_market_fill(oid, pair)
+                actual_exit = fill_px if fill_px else cur_px
+                actual_fee = fill_fee if fill_fee is not None else actual_exit * held * mult * 0.0025
+                record_trade(bot, bot['entry_price'], actual_exit, held, 'LONG', 'TRAILING_STOP', pair, mult, actual_fee=actual_fee)
+                profit = (actual_exit - bot['entry_price']) * held * mult
+                bot['current_usd'] += (held * actual_exit * mult) - actual_fee
+                bot['asset_held'] = 0.0
+                bot['position_side'] = 'FLAT'
+                for k in ['entry_price', 'high_water_mark', 'entry_atr']:
+                    bot.pop(k, None)
+                save_bots()
+                log.warning(f"[{pair}] SQUEEZE TRAILING STOP: PnL ${profit:.2f}")
+                notify_bot_exit(pair, 'SQUEEZE', actual_exit, profit)
+            except Exception as e:
+                log.error(f"[{pair}] SQUEEZE stop sell failed: {e}")

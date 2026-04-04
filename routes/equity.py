@@ -2,6 +2,9 @@ import sqlite3
 import time
 import threading
 from flask import Blueprint, jsonify, request
+from logger import get_logger
+
+log = get_logger('api')
 
 equity_bp = Blueprint('equity', __name__)
 
@@ -77,7 +80,7 @@ def _log_equity():
             conn.commit()
             conn.close()
         except Exception as e:
-            print(f"[EQUITY] Log error: {e}")
+            log.error("Equity log error: %s", e)
 
         time.sleep(LOG_INTERVAL)
 

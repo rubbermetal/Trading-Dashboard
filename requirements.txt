@@ -1,0 +1,25 @@
+# Core
+Flask==3.1.3
+python-dotenv==1.2.2
+requests==2.32.5
+
+# Coinbase
+coinbase-advanced-py==1.8.2
+websockets==13.1
+
+# Data / Indicators
+pandas==3.0.1
+pandas-ta==0.4.71b0
+numpy==2.2.6
+numba==0.61.2
+
+# Crypto / Auth
+cryptography==46.0.5
+pycryptodome==3.23.0
+PyJWT==2.11.0
+
+# Transitive (pinned for reproducibility)
+Jinja2==3.1.6
+Werkzeug==3.1.6
+urllib3==2.6.3
+certifi==2026.2.25
