@@ -146,10 +146,8 @@ def run_bot(bot_id):
         strategy = bot['strategy']
         
         try:
-            if strategy == 'QUAD':
-                execute_quad(bot_id, bot, pair, mode='STANDARD')
-            elif strategy == 'QUAD_SUPER':
-                execute_quad(bot_id, bot, pair, mode='SUPER')
+            if strategy in ('QUAD', 'QUAD_SUPER'):
+                execute_quad(bot_id, bot, pair)
             elif strategy == 'ORB':
                 execute_orb(bot_id, bot, pair)
             elif strategy == 'GRID':
@@ -285,6 +283,11 @@ def get_bots():
                 'pending_sells': len(bot.get('pending_sells', [])),
                 'paused': bot.get('dca_state') == 'PAUSED',
                 'corr_count': concurrent,
+                'engine': bot.get('settings', {}).get('dca_engine', 'legacy'),
+                'defense_mode': bot.get('defense_mode', 'NORMAL'),
+                'crisis_score': int(bot.get('crisis_score', 0) or 0),
+                'wounded_mode': bool(bot.get('wounded_mode', False)),
+                'sub_held': float(bot.get('sub_held', 0) or 0),
             }
         
         if bot.get('strategy') == 'NPR':
@@ -381,8 +384,8 @@ def start_bot():
         return jsonify(success=False, error=err), 400
     strategy = d['strategy'].upper()
     paper = bool(d.get('paper', False))
-    if paper and strategy not in ('DCA', 'GRID'):
-        return jsonify(success=False, error=f"Paper trading is only supported for DCA and GRID strategies.")
+    if paper and strategy not in ('DCA', 'GRID', 'QUAD', 'QUAD_SUPER'):
+        return jsonify(success=False, error=f"Paper trading is only supported for DCA, GRID, and QUAD strategies.")
     tf = d.get('timeframe', STRATEGY_DEFAULT_TF.get(strategy, '15m'))
     if tf not in TF_MAP:
         tf = STRATEGY_DEFAULT_TF.get(strategy, '15m')

@@ -344,22 +344,46 @@ def compute_confluence(rows):
 @scanner_bp.route('/api/scanner/<pair>')
 def get_scanner(pair):
     """
-    On-demand scanner: fetches 15m/30m/1h/4h for the dashboard rows,
-    plus the user's selected TF for chart candles and overlays.
+    On-demand scanner: loads 15m/30m/1h/4h for the dashboard rows and the user's
+    selected TF for chart candles and overlays. Pulls from candles.db (deep history)
+    so EMA200, Tar Baby, and other long-warmup indicators have enough bars on every TF.
+    Falls back to a direct Coinbase fetch if the pair isn't seeded in the DB.
     """
     from flask import request
+    from candle_db import get_chart_candles, get_last_timestamp, fetch_and_store_1m
+
     base_tf = request.args.get('tf', '15m')
     if base_tf not in CB_GRAN:
         base_tf = '15m'
 
+    # Per-TF bars — enough for EMA200 + Tar Baby (RMA 120 warmup)
+    SCAN_BARS = 500
+
+    def _db_or_cb(tf_key, tf_minutes):
+        """Return a DataFrame with columns time/open/high/low/close/volume."""
+        try:
+            df = get_chart_candles(pair, tf_minutes, SCAN_BARS)
+            if not df.empty:
+                return df.rename(columns={'start': 'time'}).reset_index(drop=True)
+        except Exception as e:
+            log.warning("scanner DB fetch failed for %s %s: %s", pair, tf_key, e)
+        # Fallback: direct Coinbase (capped at 300 bars by API)
+        return fetch_ohlcv(pair, tf_key, min(SCAN_BARS, 300))
+
     try:
-        # Dashboard rows always use these 4 timeframes
-        df_15m = fetch_ohlcv(pair, "15m", 300)
-        time.sleep(0.15)
-        df_30m = fetch_ohlcv(pair, "30m", 300)
-        time.sleep(0.15)
-        df_1h  = fetch_ohlcv(pair, "1h",  300)
-        df_4h  = aggregate_4h(df_1h)
+        # Top up the 1m store so the DB has the latest bar
+        try:
+            now_ts = int(time.time())
+            last_1m = get_last_timestamp(pair)
+            if last_1m > 0 and (now_ts - last_1m) > 60:
+                fetch_and_store_1m(pair, last_1m, now_ts)
+        except Exception as e:
+            log.warning("scanner tail top-up failed for %s: %s", pair, e)
+
+        df_15m = _db_or_cb("15m", 15)
+        df_30m = _db_or_cb("30m", 30)
+        df_1h  = _db_or_cb("1h",  60)
+        df_4h  = _db_or_cb("1h",  240)  # 4h via 1m resample in DB (Coinbase has no native 4h)
 
         rows = []
         for label, df in [("15m", df_15m), ("30m", df_30m), ("1H", df_1h), ("4H", df_4h)]:
@@ -368,15 +392,13 @@ def get_scanner(pair):
             rows.append(r)
 
         # Base TF candles for the chart — use whichever TF the user has selected
-        # Reuse already-fetched data if it matches, otherwise fetch
         tf_df_map = {"15m": df_15m, "30m": df_30m, "1h": df_1h}
         if base_tf in tf_df_map:
             df_base = tf_df_map[base_tf]
         elif base_tf == "4h":
             df_base = df_4h
         else:
-            time.sleep(0.15)
-            df_base = fetch_ohlcv(pair, base_tf, 300)
+            df_base = _db_or_cb(base_tf, CB_GRAN[base_tf][1] // 60)
 
         # Volume-colored candles for the selected TF
         vol_colors = compute_volume_colors(df_base)

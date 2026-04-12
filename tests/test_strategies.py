@@ -4,7 +4,6 @@ import numpy as np
 import pytest
 from strategies import (
     calculate_quad_rotation,
-    calculate_quad_super,
     calculate_advanced_grid,
     calculate_orb,
     calculate_trap,
@@ -34,17 +33,6 @@ class TestQuadRotation:
         assert signal in ("BUY", "SELL", "HOLD")
 
 
-class TestQuadSuper:
-    def test_hold_on_insufficient_data(self, small_df):
-        signal, reason = calculate_quad_super(small_df)
-        assert signal == "HOLD"
-
-    def test_returns_valid_signal(self, trending_up_df):
-        signal, reason = calculate_quad_super(trending_up_df)
-        assert signal in ("BUY", "SELL", "HOLD")
-        assert isinstance(reason, str)
-
-
 class TestGridSignal:
     def test_hold_on_insufficient_data(self, small_df):
         signal, reason = calculate_advanced_grid(small_df, lower_price=59000, upper_price=61000, grids=10)
@@ -64,14 +52,25 @@ class TestGridSignal:
 class TestORB:
     def test_hold_on_insufficient_data(self, small_df):
         small_df['start'] = np.arange(len(small_df)) * 300 + 1700000000
-        signal, reason = calculate_orb(small_df)
+        signal, reason, meta = calculate_orb(small_df)
         assert signal == "HOLD"
 
     def test_returns_valid_signal(self, trending_up_df):
-        # ORB needs 'start' column with epoch timestamps (5m candles starting at midnight UTC)
         trending_up_df['start'] = np.arange(len(trending_up_df)) * 300 + 1700000000
-        signal, reason = calculate_orb(trending_up_df)
-        assert signal in ("LONG", "SHORT", "EXIT_LONG", "EXIT_SHORT", "HOLD")
+        signal, reason, meta = calculate_orb(trending_up_df)
+        assert signal in ("LONG", "SHORT", "EXIT_LONG", "EXIT_SHORT",
+                          "PARTIAL_EXIT_LONG", "PARTIAL_EXIT_SHORT", "HOLD")
+        assert isinstance(meta, dict)
+
+    def test_returns_three_tuple(self, trending_up_df):
+        trending_up_df['start'] = np.arange(len(trending_up_df)) * 300 + 1700000000
+        result = calculate_orb(trending_up_df)
+        assert len(result) == 3
+
+    def test_configurable_range_hour(self, trending_up_df):
+        trending_up_df['start'] = np.arange(len(trending_up_df)) * 300 + 1700000000
+        signal, reason, meta = calculate_orb(trending_up_df, range_start_hour=0)
+        assert len((signal, reason, meta)) == 3
 
 
 class TestTrap:
@@ -83,11 +82,19 @@ class TestTrap:
         result = calculate_trap(ranging_df)
         signal = result[0]
         assert signal in ("BREAKOUT_LONG", "BREAKOUT_SHORT", "ADD_LONG", "ADD_SHORT",
-                          "EXIT_LONG", "EXIT_SHORT", "HOLD")
+                          "EXIT_LONG", "EXIT_SHORT", "PARTIAL_EXIT_LONG", "PARTIAL_EXIT_SHORT",
+                          "HOLD")
 
     def test_returns_three_tuple(self, trending_up_df):
         result = calculate_trap(trending_up_df)
         assert len(result) == 3  # (signal, reason, bo_data)
+
+    def test_tp_stage_parameter(self, ranging_df):
+        """Verify tp_stage parameter is accepted"""
+        result = calculate_trap(ranging_df, tp_stage=0)
+        assert len(result) == 3
+        result = calculate_trap(ranging_df, tp_stage=1)
+        assert len(result) == 3
 
 
 class TestMomentum:

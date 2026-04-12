@@ -615,16 +615,16 @@ def get_indicators(pair):
 # STRATEGY-MANAGED MANUAL POSITIONS
 # ==========================================
 from strategies import (
-    calculate_quad_rotation, calculate_quad_super, calculate_orb,
+    calculate_quad_rotation, calculate_orb,
     calculate_trap, calculate_momentum, calculate_npr
 )
 from bot_executors import momentum_get_stop_price, npr_get_stop_and_trail
 
 SUPPORTED_EXIT_STRATEGIES = {
-    'QUAD':       'Stoch(9) crosses above 80',
-    'QUAD_SUPER': 'Stoch(9) crosses above 80',
+    'QUAD':       'ATR SL/TP + counter-trend + sequential bear rotation',
+    'QUAD_SUPER': 'ATR SL/TP + counter-trend + sequential bear rotation',
     'ORB':        'Price crosses below midpoint',
-    'TRAP':       '+2.5% TP or ATR-based stop',
+    'TRAP':       'R-multiple TP (2.5R/4.0R) + 2x ATR / elephant bar stop',
     'MOMENTUM':   '3-phase trailing stop (ATR-based)',
     'NPR':        'Event stop + trailing stop',
     'VWAP_MR':    'VWAP touch or 1.5x ATR trail',
@@ -725,8 +725,9 @@ def manual_enter():
             bot_state['stop_phase'] = 1
         elif strategy == 'TRAP':
             bot_state['avg_entry'] = entry_px
-            bot_state['entry_stage'] = 2  # treat as fully entered
-            # Fetch ATR
+            bot_state['entry_stage'] = 3  # treat as fully entered (Velez 3-stage)
+            bot_state['tp_stage'] = 0
+            # Fetch ATR for stop calculation
             try:
                 end_ts = int(time.time())
                 start_ts = end_ts - (300 * 300)
@@ -824,7 +825,8 @@ def manual_switch_strategy(pos_id):
         pos['bot_state']['stop_phase'] = 1
     elif new_strat == 'TRAP':
         pos['bot_state']['avg_entry'] = pos['entry_price']
-        pos['bot_state']['entry_stage'] = 2
+        pos['bot_state']['entry_stage'] = 3
+        pos['bot_state']['tp_stage'] = 0
         pos['bot_state']['breakout_atr'] = cur_px * 0.015
     elif new_strat == 'NPR':
         pos['bot_state']['npr_state'] = 'IN_POSITION'
@@ -859,8 +861,10 @@ def get_manual_positions():
                     hwm = bs.get('high_water_mark', pos['entry_price'])
                     entry['strategy_status'] = f"Phase {phase}, HWM ${hwm:.0f}"
                 elif pos['strategy'] == 'TRAP':
-                    tp_pct = 2.5
-                    entry['strategy_status'] = f"TP +{tp_pct}%, SL -ATR"
+                    tp_stg = bs.get('tp_stage', 0)
+                    stage = bs.get('entry_stage', 0)
+                    tp_label = "T1 hit, trailing" if tp_stg >= 1 else "T1: 2.5R"
+                    entry['strategy_status'] = f"Stage {stage}/3, {tp_label}"
                 elif pos['strategy'] == 'NPR':
                     stop = bs.get('event_stop', 0)
                     entry['strategy_status'] = f"Stop ${stop:.0f}"
@@ -910,8 +914,7 @@ def _manual_position_evaluator():
                                    'low': float(c['low']), 'close': float(c['close']), 'volume': float(c.get('volume', 0))}
                                   for c in candles]
                         df = pd.DataFrame(parsed).sort_values('start').reset_index(drop=True)
-                        fn = calculate_quad_rotation if strategy == 'QUAD' else calculate_quad_super
-                        signal, reason = fn(df)
+                        signal, reason, _meta = calculate_quad_rotation(df)
                         if signal == 'SELL':
                             should_exit = True
                             exit_reason = f'STRATEGY_EXIT ({reason})'
@@ -927,22 +930,35 @@ def _manual_position_evaluator():
                                    'low': float(c['low']), 'close': float(c['close']), 'volume': float(c.get('volume', 0))}
                                   for c in candles]
                         df = pd.DataFrame(parsed).sort_values('start').reset_index(drop=True)
-                        signal, reason = calculate_orb(df, pos_side='LONG')
-                        if signal == 'EXIT_LONG':
+                        orb_data = bs.get('orb_data', None)
+                        tp_stg = bs.get('tp_stage', 0)
+                        signal, reason, _ = calculate_orb(df, pos_side='LONG',
+                                                          entry_price=pos['entry_price'],
+                                                          orb_data=orb_data, tp_stage=tp_stg)
+                        if signal in ('EXIT_LONG', 'PARTIAL_EXIT_LONG'):
                             should_exit = True
                             exit_reason = f'STRATEGY_EXIT ({reason})'
 
                 elif strategy == 'TRAP':
                     avg_entry = bs.get('avg_entry', pos['entry_price'])
                     atr = bs.get('breakout_atr', pos['entry_price'] * 0.015)
-                    tp_hit = (cur_px - avg_entry) / avg_entry >= 0.025
-                    sl_hit = cur_px <= avg_entry - atr
-                    if tp_hit:
+                    tp_stg = bs.get('tp_stage', 0)
+                    # Velez: stop = 2x ATR (simplified for manual — no elephant bar data)
+                    sl_price = avg_entry - (2.0 * atr)
+                    if tp_stg >= 1:
+                        sl_price = max(sl_price, avg_entry)  # breakeven after T1
+                    R = avg_entry - sl_price if sl_price < avg_entry else atr
+                    r_mult = (cur_px - avg_entry) / R if R > 0 else 0
+                    sl_hit = cur_px <= sl_price
+                    if tp_stg == 0 and r_mult >= 2.5:
                         should_exit = True
-                        exit_reason = 'TAKE_PROFIT (+2.5%)'
+                        exit_reason = f'TARGET_1 (+{r_mult:.1f}R)'
+                    elif tp_stg >= 1 and r_mult >= 4.0:
+                        should_exit = True
+                        exit_reason = f'TARGET_2 (+{r_mult:.1f}R)'
                     elif sl_hit:
                         should_exit = True
-                        exit_reason = 'STOP_LOSS (ATR)'
+                        exit_reason = 'STOP_LOSS (2x ATR)'
 
                 elif strategy == 'MOMENTUM':
                     hwm = bs.get('high_water_mark', pos['entry_price'])

@@ -122,17 +122,17 @@ def get_candles(pair, granularity):
     g = GRANULARITY_MAP.get(granularity)
     if not g:
         return jsonify(error=f"Invalid granularity. Use: {', '.join(GRANULARITY_MAP.keys())}")
-    
+
     try:
         limit = min(int(request.args.get('limit', 300)), 300)
         end_ts = int(time.time())
         start_ts = end_ts - (limit * g['seconds'])
-        
+
         res = client.get(f"/api/v3/brokerage/products/{pair}/candles", params={
             "start": str(start_ts), "end": str(end_ts), "granularity": g['cb']
         })
         candles = res.get('candles', [])
-        
+
         parsed = sorted([{
             "time": int(c['start']),
             "open": float(c['open']),
@@ -141,50 +141,288 @@ def get_candles(pair, granularity):
             "close": float(c['close']),
             "volume": float(c.get('volume', 0))
         } for c in candles], key=lambda x: x['time'])
-        
+
         return jsonify(parsed)
     except Exception as e:
         return jsonify(error=str(e))
 
+
+@market_data_bp.route('/api/chart_candles/<pair>/<granularity>')
+def get_chart_candles_endpoint(pair, granularity):
+    """
+    DB-first chart candles. Reads historical bars from candles.db (1m store,
+    aggregated on the fly to the requested TF) then fills in the recent tail
+    from Coinbase so the last few bars are live.
+    Falls back to a pure Coinbase fetch if the pair has no DB coverage.
+    """
+    from flask import request
+    from candle_db import get_chart_candles, get_last_timestamp, fetch_and_store_1m
+
+    g = GRANULARITY_MAP.get(granularity)
+    if not g:
+        return jsonify(error=f"Invalid granularity. Use: {', '.join(GRANULARITY_MAP.keys())}")
+
+    try:
+        limit = max(10, min(int(request.args.get('limit', 1500)), 5000))
+        tf_minutes = g['seconds'] // 60
+        now_ts = int(time.time())
+        tf_seconds = g['seconds']
+
+        # Top up the 1m store if it's more than one TF period stale
+        last_1m = get_last_timestamp(pair)
+        if last_1m > 0 and (now_ts - last_1m) > tf_seconds:
+            try:
+                fetch_and_store_1m(pair, last_1m, now_ts)
+            except Exception as e:
+                log.warning(f"[{pair}] chart tail top-up failed: {e}")
+
+        df = get_chart_candles(pair, tf_minutes, limit)
+
+        if df.empty:
+            # No DB coverage — straight Coinbase fallback (bounded to 300)
+            fallback_limit = min(limit, 300)
+            start_ts = now_ts - (fallback_limit * tf_seconds)
+            res = client.get(f"/api/v3/brokerage/products/{pair}/candles", params={
+                "start": str(start_ts), "end": str(now_ts), "granularity": g['cb']
+            })
+            parsed = sorted([{
+                "time": int(c['start']),
+                "open": float(c['open']),
+                "high": float(c['high']),
+                "low": float(c['low']),
+                "close": float(c['close']),
+                "volume": float(c.get('volume', 0))
+            } for c in res.get('candles', [])], key=lambda x: x['time'])
+            return jsonify(parsed)
+
+        parsed = [{
+            "time": int(row.start),
+            "open": float(row.open),
+            "high": float(row.high),
+            "low": float(row.low),
+            "close": float(row.close),
+            "volume": float(row.volume)
+        } for row in df.itertuples(index=False)]
+
+        return jsonify(parsed)
+    except Exception as e:
+        log.error(f"[{pair}] chart_candles error: {e}")
+        return jsonify(error=str(e))
+
+@market_data_bp.route('/api/chart_indicators/<pair>/<granularity>')
+def get_chart_indicators(pair, granularity):
+    """
+    Deep-history oscillator indicators computed from candles.db.
+    Query with ?set=rsi,adx,roc,macd,stoch — any subset.
+    Returns {indicator_key: [{time, value}, ...]} — multiple keys per indicator where relevant.
+    """
+    from flask import request
+    from candle_db import get_chart_candles, get_last_timestamp, fetch_and_store_1m
+
+    g = GRANULARITY_MAP.get(granularity)
+    if not g:
+        return jsonify(error=f"Invalid granularity")
+
+    raw_set = (request.args.get('set') or '').strip()
+    if not raw_set:
+        return jsonify({})
+    wanted = {s.strip().lower() for s in raw_set.split(',') if s.strip()}
+    if not wanted:
+        return jsonify({})
+
+    try:
+        limit = max(50, min(int(request.args.get('limit', 1500)), 5000))
+        tf_minutes = g['seconds'] // 60
+        now_ts = int(time.time())
+
+        last_1m = get_last_timestamp(pair)
+        if last_1m > 0 and (now_ts - last_1m) > g['seconds']:
+            try:
+                fetch_and_store_1m(pair, last_1m, now_ts)
+            except Exception as e:
+                log.warning(f"[{pair}] indicator tail top-up failed: {e}")
+
+        df = get_chart_candles(pair, tf_minutes, limit)
+        if df.empty:
+            return jsonify({})
+
+        c = df['close']
+        h = df['high']
+        l = df['low']
+        times = df['start'].tolist()
+
+        def to_series(series):
+            data = []
+            for i in range(len(series)):
+                val = series.iloc[i] if hasattr(series, 'iloc') else series[i]
+                if pd.notna(val) and i < len(times):
+                    data.append({'time': int(times[i]), 'value': round(float(val), 6)})
+            return data
+
+        out = {}
+
+        if 'rsi' in wanted:
+            try:
+                out['rsi'] = to_series(ta.rsi(c, length=14))
+            except Exception as e:
+                log.warning(f"[{pair}] RSI compute failed: {e}")
+
+        if 'adx' in wanted:
+            try:
+                adx_df = ta.adx(h, l, c, length=14)
+                adx_col = next((col for col in adx_df.columns if col.startswith('ADX')), None)
+                if adx_col:
+                    out['adx'] = to_series(adx_df[adx_col])
+            except Exception as e:
+                log.warning(f"[{pair}] ADX compute failed: {e}")
+
+        if 'roc' in wanted:
+            try:
+                out['roc_fast'] = to_series(ta.roc(c, length=7))
+                out['roc_slow'] = to_series(ta.roc(c, length=21))
+            except Exception as e:
+                log.warning(f"[{pair}] ROC compute failed: {e}")
+
+        if 'macd' in wanted:
+            try:
+                macd_df = ta.macd(c, fast=12, slow=26, signal=9)
+                macd_col = next((col for col in macd_df.columns if col.startswith('MACD_')), None)
+                signal_col = next((col for col in macd_df.columns if col.startswith('MACDs_')), None)
+                hist_col = next((col for col in macd_df.columns if col.startswith('MACDh_')), None)
+                if macd_col: out['macd'] = to_series(macd_df[macd_col])
+                if signal_col: out['macd_signal'] = to_series(macd_df[signal_col])
+                if hist_col: out['macd_hist'] = to_series(macd_df[hist_col])
+            except Exception as e:
+                log.warning(f"[{pair}] MACD compute failed: {e}")
+
+        if 'stoch' in wanted:
+            try:
+                stoch_df = ta.stoch(h, l, c, k=14, d=3)
+                k_col = next((col for col in stoch_df.columns if col.startswith('STOCHk')), None)
+                d_col = next((col for col in stoch_df.columns if col.startswith('STOCHd')), None)
+                if k_col: out['stoch_k'] = to_series(stoch_df[k_col])
+                if d_col: out['stoch_d'] = to_series(stoch_df[d_col])
+            except Exception as e:
+                log.warning(f"[{pair}] STOCH compute failed: {e}")
+
+        return jsonify(out)
+    except Exception as e:
+        log.error(f"[{pair}] chart_indicators error: {e}")
+        return jsonify(error=str(e))
+
+
+@market_data_bp.route('/api/chart_overlays/<pair>/<granularity>')
+def get_chart_overlays(pair, granularity):
+    """
+    Deep-history overlays (EMA20/50/200, BB, KC, Ichimoku, Alligator, Tar, ALMA)
+    computed over the same candle window the chart is showing (DB-backed, up to 1500 bars).
+    Mirrors scanner.compute_overlays but uses candles.db instead of a 300-bar Coinbase fetch.
+    """
+    from flask import request
+    from candle_db import get_chart_candles, get_last_timestamp, fetch_and_store_1m
+    from routes.scanner import compute_overlays
+
+    g = GRANULARITY_MAP.get(granularity)
+    if not g:
+        return jsonify(error=f"Invalid granularity. Use: {', '.join(GRANULARITY_MAP.keys())}")
+
+    try:
+        limit = max(50, min(int(request.args.get('limit', 1500)), 5000))
+        tf_minutes = g['seconds'] // 60
+        now_ts = int(time.time())
+
+        # Top up the DB tail so overlays include the latest bar
+        last_1m = get_last_timestamp(pair)
+        if last_1m > 0 and (now_ts - last_1m) > g['seconds']:
+            try:
+                fetch_and_store_1m(pair, last_1m, now_ts)
+            except Exception as e:
+                log.warning(f"[{pair}] overlay tail top-up failed: {e}")
+
+        df = get_chart_candles(pair, tf_minutes, limit)
+        if df.empty:
+            return jsonify({})
+
+        # compute_overlays expects a 'time' column (not 'start')
+        df = df.rename(columns={'start': 'time'})
+        overlays = compute_overlays(df)
+        return jsonify(overlays)
+    except Exception as e:
+        log.error(f"[{pair}] chart_overlays error: {e}")
+        return jsonify(error=str(e))
+
+
 @market_data_bp.route('/api/volume_profile/<pair>/<granularity>')
 def get_volume_profile(pair, granularity):
-    """Returns volume binned by price level for a volume profile overlay."""
+    """
+    Returns volume binned by price level for a volume profile overlay.
+    Uses the local candle DB (deep history) with a Coinbase fallback.
+    ?limit=N controls how many bars to bin (default 1500, max 5000).
+    """
+    from flask import request
+    from candle_db import get_chart_candles, get_last_timestamp, fetch_and_store_1m
+
     g = GRANULARITY_MAP.get(granularity)
     if not g:
         return jsonify(error="Invalid granularity")
     try:
-        end_ts = int(time.time())
-        start_ts = end_ts - (300 * g['seconds'])
-        res = client.get(f"/api/v3/brokerage/products/{pair}/candles", params={
-            "start": str(start_ts), "end": str(end_ts), "granularity": g['cb']
-        })
-        candles = res.get('candles', [])
-        if not candles:
+        limit = max(50, min(int(request.args.get('limit', 1500)), 5000))
+        tf_minutes = g['seconds'] // 60
+        now_ts = int(time.time())
+
+        # Top up the DB tail so the profile includes the latest bar
+        last_1m = get_last_timestamp(pair)
+        if last_1m > 0 and (now_ts - last_1m) > g['seconds']:
+            try:
+                fetch_and_store_1m(pair, last_1m, now_ts)
+            except Exception as e:
+                log.warning(f"[{pair}] volume_profile tail top-up failed: {e}")
+
+        df = get_chart_candles(pair, tf_minutes, limit)
+        if df.empty:
+            # Fallback: direct Coinbase (capped at 300 bars by API)
+            end_ts = now_ts
+            start_ts = end_ts - (300 * g['seconds'])
+            res = client.get(f"/api/v3/brokerage/products/{pair}/candles", params={
+                "start": str(start_ts), "end": str(end_ts), "granularity": g['cb']
+            })
+            parsed = sorted([{
+                'open': float(c['open']), 'high': float(c['high']),
+                'low': float(c['low']), 'close': float(c['close']),
+                'volume': float(c.get('volume', 0))
+            } for c in res.get('candles', [])], key=lambda x: x.get('time', 0))
+            if not parsed:
+                return jsonify([])
+            df = pd.DataFrame(parsed)
+
+        if df.empty:
             return jsonify([])
 
         # Determine price range and bin count
-        prices = [float(c['high']) for c in candles] + [float(c['low']) for c in candles]
-        price_min, price_max = min(prices), max(prices)
+        price_min = float(df['low'].min())
+        price_max = float(df['high'].max())
         price_range = price_max - price_min
         if price_range <= 0:
             return jsonify([])
 
-        num_bins = 30
+        num_bins = 40
         bin_size = price_range / num_bins
 
-        # Accumulate volume into bins, split by buy/sell
-        bins = [{'price': price_min + (i + 0.5) * bin_size, 'buy_vol': 0, 'sell_vol': 0} for i in range(num_bins)]
-        for c in candles:
-            vol = float(c.get('volume', 0))
-            mid = (float(c['high']) + float(c['low'])) / 2
+        # Accumulate volume into bins, split by buy/sell (up-close vs down-close)
+        bins = [{'price': price_min + (i + 0.5) * bin_size, 'buy_vol': 0.0, 'sell_vol': 0.0} for i in range(num_bins)]
+        for row in df.itertuples(index=False):
+            vol = float(row.volume)
+            mid = (float(row.high) + float(row.low)) / 2
             idx = min(int((mid - price_min) / bin_size), num_bins - 1)
-            if float(c['close']) >= float(c['open']):
+            if idx < 0:
+                idx = 0
+            if float(row.close) >= float(row.open):
                 bins[idx]['buy_vol'] += vol
             else:
                 bins[idx]['sell_vol'] += vol
 
         # Find max volume for normalization
-        max_vol = max(b['buy_vol'] + b['sell_vol'] for b in bins) or 1
+        max_vol = max(b['buy_vol'] + b['sell_vol'] for b in bins) or 1.0
 
         result = []
         for b in bins:
@@ -198,6 +436,7 @@ def get_volume_profile(pair, granularity):
                 })
         return jsonify(result)
     except Exception as e:
+        log.error(f"[{pair}] volume_profile error: {e}")
         return jsonify(error=str(e))
 
 # ==========================================
@@ -231,30 +470,49 @@ def get_bot_indicators(pair, granularity, strategy):
         }
     }
     """
+    from flask import request
+    from candle_db import get_chart_candles, get_last_timestamp, fetch_and_store_1m
+
     g = GRANULARITY_MAP.get(granularity)
     if not g:
         return jsonify(error="Invalid granularity")
-    
+
     try:
-        end_ts = int(time.time())
-        start_ts = end_ts - (300 * g['seconds'])
-        
-        res = client.get(f"/api/v3/brokerage/products/{pair}/candles", params={
-            "start": str(start_ts), "end": str(end_ts), "granularity": g['cb']
-        })
-        candles = res.get('candles', [])
+        limit = max(50, min(int(request.args.get('limit', 1500)), 5000))
+        tf_minutes = g['seconds'] // 60
+        now_ts = int(time.time())
+
+        # Top up the DB tail so indicators include the latest bar
+        last_1m = get_last_timestamp(pair)
+        if last_1m > 0 and (now_ts - last_1m) > g['seconds']:
+            try:
+                fetch_and_store_1m(pair, last_1m, now_ts)
+            except Exception as e:
+                log.warning(f"[{pair}] bot_indicators tail top-up failed: {e}")
+
+        df = get_chart_candles(pair, tf_minutes, limit)
+
+        if df.empty:
+            # Fallback to Coinbase direct if the DB has no coverage for this pair
+            end_ts = now_ts
+            start_ts = end_ts - (300 * g['seconds'])
+            res = client.get(f"/api/v3/brokerage/products/{pair}/candles", params={
+                "start": str(start_ts), "end": str(end_ts), "granularity": g['cb']
+            })
+            candles = res.get('candles', [])
+            if len(candles) < 50:
+                return jsonify(error="Not enough candle data")
+            parsed = sorted([{
+                'start': int(c['start']), 'open': float(c['open']), 'high': float(c['high']),
+                'low': float(c['low']), 'close': float(c['close']), 'volume': float(c.get('volume', 0))
+            } for c in candles], key=lambda x: x['start'])
+            df = pd.DataFrame(parsed)
     except Exception as e:
         return jsonify(error=str(e))
-    
-    if len(candles) < 50:
+
+    if len(df) < 50:
         return jsonify(error="Not enough candle data")
-    
-    parsed = sorted([{
-        'start': int(c['start']), 'open': float(c['open']), 'high': float(c['high']),
-        'low': float(c['low']), 'close': float(c['close']), 'volume': float(c.get('volume', 0))
-    } for c in candles], key=lambda x: x['start'])
-    
-    df = pd.DataFrame(parsed)
+
     c, h, l, o, v = df['close'], df['high'], df['low'], df['open'], df['volume']
     times = df['start'].tolist()
     

@@ -19,6 +19,7 @@ from routes.market_data import market_data_bp
 from routes.bot_manager import bot_manager_bp
 from routes.scanner import scanner_bp
 from routes.equity import equity_bp
+from routes.backtest import backtest_bp
 
 app = Flask(__name__)
 
@@ -30,6 +31,7 @@ app.register_blueprint(market_data_bp)
 app.register_blueprint(bot_manager_bp)
 app.register_blueprint(scanner_bp)
 app.register_blueprint(equity_bp)
+app.register_blueprint(backtest_bp)
 
 @app.route('/mobile')
 def mobile():

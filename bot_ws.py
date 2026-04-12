@@ -306,8 +306,22 @@ def process_grid_fill(order_id, filled_size, filled_value, status, pair):
 
                 log.info(f"[{pair}] Fill detected: {grid['side']} at {grid['price']:.2f} (order {order_id[:8]}...)")
 
+                # V3: if bot is in GTFO mode, don't reorder (it's exiting, not trading)
+                ws_risk_check = bot.get('settings', {}).get('risk', {})
+                if ws_risk_check.get('is_gtfo_active'):
+                    log.debug(f"[{pair}] WS fill ignored: GTFO mode active")
+                    continue
+
                 if grid['side'] == 'BUY':
-                    new_price = grid['price'] + step_size
+                    # Dynamic mode: regime-aware sell target
+                    if bot.get('settings', {}).get('dynamic', False):
+                        from grid_engine import compute_dynamic_sell_price
+                        ws_risk = bot['settings'].get('risk', {})
+                        new_price = compute_dynamic_sell_price(grid['price'], step_size,
+                                                               ws_risk.get('regime', 'WIDE_RANGE'),
+                                                               ws_risk.get('recovery_velocity', 0))
+                    else:
+                        new_price = grid['price'] + step_size
                     if min_gap > 0 and has_order_nearby(new_price, active_grids, min_gap):
                         safe_px = find_safe_price(new_price, active_grids, min_gap, direction='up')
                         if safe_px is None:

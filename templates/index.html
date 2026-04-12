@@ -112,14 +112,18 @@
             border-radius: 0 !important;
             border: none !important;
             padding: 8px !important;
-        }
-        .main-chart-fullscreen #tv_chart_container {
-            height: calc(100vh - 90px) !important;
-            min-height: unset !important;
+            display: flex !important;
+            flex-direction: column !important;
         }
         .main-chart-fullscreen #scanner-sub-panel {
-            max-height: 30vh;
+            order: -1;
+            max-height: 220px;
+            flex-shrink: 0;
             overflow-y: auto;
+        }
+        .main-chart-fullscreen #tv_chart_container {
+            flex: 1 1 auto;
+            min-height: 200px !important;
         }
 
         .progress-ask {
@@ -142,6 +146,7 @@
             <li class="nav-item" role="presentation"><button class="nav-link fw-bold" id="bot-tab" data-bs-toggle="tab" data-bs-target="#bot-panel" type="button" role="tab">BOT MANAGER</button></li>
             <li class="nav-item" role="presentation"><button class="nav-link fw-bold" id="screen-tab" data-bs-toggle="tab" data-bs-target="#screen-panel" type="button" role="tab">MARKET SCREENER</button></li>
             <li class="nav-item" role="presentation"><button class="nav-link fw-bold" id="analytics-tab" data-bs-toggle="tab" data-bs-target="#analytics-panel" type="button" role="tab">ANALYTICS</button></li>
+            <li class="nav-item" role="presentation"><button class="nav-link fw-bold" id="backtest-tab" data-bs-toggle="tab" data-bs-target="#backtest-panel" type="button" role="tab">BACKTESTING</button></li>
         </ul>
 
         <div class="tab-content" id="terminalTabsContent">
@@ -170,8 +175,8 @@
 
                 <div class="row mt-4 mb-4">
                     <div class="col-lg-8 mb-3">
-                        <div class="card card-custom p-2 h-100" style="min-height: 400px;">
-                            <div class="d-flex justify-content-between align-items-center px-2 pt-1 pb-1">
+                        <div class="card card-custom p-2 h-100 d-flex flex-column" style="min-height: 580px;">
+                            <div class="d-flex justify-content-between align-items-center px-2 pt-1 pb-1 flex-shrink-0">
                                 <span id="chart-pair-label" class="text-muted small fw-bold">BTC-USD</span>
                                 <div class="d-flex align-items-center gap-2">
                                     <div class="btn-group btn-group-sm" id="tf-buttons">
@@ -186,7 +191,8 @@
                                     <button class="btn btn-sm btn-outline-secondary" id="main-chart-fs-btn" onclick="toggleMainChartFullscreen()" title="Fullscreen"><i class="bi bi-arrows-fullscreen"></i></button>
                                 </div>
                             </div>
-                            <div id="overlay-controls" class="d-none d-flex gap-1 flex-wrap px-2 pb-1">
+                            <div id="overlay-controls" class="d-flex gap-1 flex-wrap align-items-center px-2 pb-1 flex-shrink-0">
+                                <span class="text-muted small me-1" style="font-size:0.6rem;">OVERLAYS:</span>
                                 <button class="btn btn-sm btn-outline-warning overlay-btn" data-group="ema" onclick="toggleOverlayGroup('ema', this)">EMA</button>
                                 <button class="btn btn-sm btn-outline-purple overlay-btn" data-group="bb" onclick="toggleOverlayGroup('bb', this)" style="color:#9B59B6; border-color:#9B59B6;">BB</button>
                                 <button class="btn btn-sm btn-outline-info overlay-btn" data-group="kc" onclick="toggleOverlayGroup('kc', this)">KC</button>
@@ -194,10 +200,17 @@
                                 <button class="btn btn-sm btn-outline-primary overlay-btn" data-group="gator" onclick="toggleOverlayGroup('gator', this)">GATOR</button>
                                 <button class="btn btn-sm btn-outline-danger overlay-btn" data-group="tar" onclick="toggleOverlayGroup('tar', this)">TAR</button>
                                 <button class="btn btn-sm btn-outline-light overlay-btn" data-group="alma" onclick="toggleOverlayGroup('alma', this)">ALMA</button>
+                                <span class="text-muted mx-2" style="font-size:0.7rem;">|</span>
+                                <span class="text-muted small me-1" style="font-size:0.6rem;">OSCILLATORS:</span>
+                                <button class="btn btn-sm btn-outline-warning osc-btn" data-osc="rsi" onclick="toggleOscillator('rsi', this)">RSI</button>
+                                <button class="btn btn-sm btn-outline-info osc-btn" data-osc="adx" onclick="toggleOscillator('adx', this)">ADX</button>
+                                <button class="btn btn-sm btn-outline-success osc-btn" data-osc="roc" onclick="toggleOscillator('roc', this)">ROC</button>
+                                <button class="btn btn-sm btn-outline-primary osc-btn" data-osc="macd" onclick="toggleOscillator('macd', this)">MACD</button>
+                                <button class="btn btn-sm btn-outline-danger osc-btn" data-osc="stoch" onclick="toggleOscillator('stoch', this)">STOCH</button>
                             </div>
-                            <div id="tv_chart_container" style="height:100%; width:100%; min-height:360px;"></div>
+                            <div id="tv_chart_container" style="flex:1 1 auto; width:100%; min-height:320px;"></div>
                             <!-- SCANNER SUB-PANEL (inside chart card) -->
-                            <div id="scanner-sub-panel" class="d-none px-2 pb-2" style="max-height:200px; overflow-y:auto;">
+                            <div id="scanner-sub-panel" class="d-none px-2 pb-2 flex-shrink-0" style="max-height:200px; overflow-y:auto;">
                                 <div class="d-flex justify-content-between align-items-center py-1">
                                     <span class="fw-bold" style="color:#66fcf1; font-size:0.7rem;"><i class="bi bi-broadcast me-1"></i>SCANNER</span>
                                     <div id="confluence-badge" class="badge bg-secondary px-2 py-1" style="font-size:0.65rem;">LOADING...</div>
@@ -411,8 +424,8 @@
                                     <option value="MOMENTUM">MOMENTUM - 3-phase trailing</option>
                                     <option value="QUAD">QUAD - Stoch(9) exit at 80</option>
                                     <option value="QUAD_SUPER">QUAD SUPER - Stoch(9) exit</option>
-                                    <option value="TRAP">TRAP - +2.5% TP / ATR stop</option>
-                                    <option value="ORB">ORB - Midpoint stop</option>
+                                    <option value="TRAP">TRAP - Velez R-multiple TP / 2x ATR stop</option>
+                                    <option value="ORB">ORB - ATR stop / R-multiple TP</option>
                                     <option value="NPR">NPR - Event + trail stop</option>
                                 </select>
                             </div>
@@ -478,8 +491,7 @@
                             <div class="mb-3">
                                 <label class="small text-muted mb-1">STRATEGY</label>
                                 <select id="bot-strategy" class="form-select bg-dark text-white border-secondary" onchange="toggleBotSettings()">
-                                    <option value="QUAD">Quad Rotation (Strict Pullbacks)</option>
-                                    <option value="QUAD_SUPER">Quad Super Signal (Extreme Reversals)</option>
+                                    <option value="QUAD">Quad Rotation — DTRS (Full Strategy)</option>
                                     <option value="ORB">ORB (Midnight Breakout - Perps Only)</option>
                                     <option value="GRID">Grid Bot (Ranging Cashflow)</option>
                                     <option value="TRAP">Trap (Consolidation Breakout)</option>
@@ -514,6 +526,93 @@
                             <div class="form-check form-switch mb-3">
                                 <input class="form-check-input" type="checkbox" id="bot-paper">
                                 <label class="form-check-label small" for="bot-paper">Paper Trading (simulated fills, no real orders)</label>
+                            </div>
+
+                            <div id="quad-settings" class="d-none border-top border-secondary pt-3 mb-4">
+                                <h6 class="text-muted small fw-bold mb-3">QUAD ROTATION PARAMETERS</h6>
+                                <div class="row g-2">
+                                    <div class="col-6">
+                                        <label class="small text-muted mb-1">ROTATION WINDOW (BARS)</label>
+                                        <input type="number" id="quad-rot-window" class="form-control form-control-sm bg-dark border-secondary text-white" value="20" step="1" min="5" max="100">
+                                    </div>
+                                    <div class="col-6 d-flex align-items-end">
+                                        <small class="text-muted" style="font-size: 0.55rem;">Max bars for fast-to-slow cascade to complete. Default 20.</small>
+                                    </div>
+                                </div>
+                                <div class="mt-2">
+                                    <small class="text-muted" style="font-size: 0.5rem;">Entry sizing: Holy Grail 90% | Rotation 70% | K/D Cross 40% of capital. SL/TP scaled by ATR per signal confidence.</small>
+                                </div>
+                            </div>
+
+                            <div id="dca-settings" class="d-none border-top border-secondary pt-3 mb-4">
+                                <h6 class="text-muted small fw-bold mb-3">DCA STRATEGY</h6>
+                                <div class="row g-2">
+                                    <div class="col-12">
+                                        <label class="small text-muted mb-1">ENGINE</label>
+                                        <select id="dca-engine" class="form-select form-select-sm bg-dark text-white border-secondary" onchange="toggleDcaResearchVisibility()">
+                                            <option value="legacy" selected>Legacy (default, tested)</option>
+                                            <option value="research">Research (backtest parity, experimental)</option>
+                                        </select>
+                                        <small class="text-muted" style="font-size:0.5rem;">Legacy: binary -25% circuit breaker, simple tier exits. Research: crisis scoring, sub-cycles, adaptive defense, dynamic depth.</small>
+                                    </div>
+                                </div>
+                                <div id="dca-research-options" class="d-none mt-3">
+                                    <div class="row g-2">
+                                        <div class="col-6">
+                                            <label class="small text-muted mb-1">FLAT TP %</label>
+                                            <input type="number" id="dca-flat-tp" class="form-control form-control-sm bg-dark border-secondary text-white" value="0" step="0.5" min="0" max="50">
+                                            <small class="text-muted" style="font-size:0.5rem;">0 = tiered exits. >0 overrides with single flat TP.</small>
+                                        </div>
+                                        <div class="col-6">
+                                            <label class="small text-muted mb-1">ADAPTIVE DEFENSE</label>
+                                            <select id="dca-adaptive-defense" class="form-select form-select-sm bg-dark text-white border-secondary" onchange="toggleDcaAdaptiveVisibility()">
+                                                <option value="off" selected>OFF</option>
+                                                <option value="on">ON</option>
+                                            </select>
+                                            <small class="text-muted" style="font-size:0.5rem;">Higher-TF trend filter → NORMAL/CAUTIOUS/SCALP mode.</small>
+                                        </div>
+                                    </div>
+                                    <div id="dca-adaptive-sub" class="d-none mt-2">
+                                        <div class="row g-2">
+                                            <div class="col-6">
+                                                <label class="small text-muted mb-1">TREND TF</label>
+                                                <select id="dca-defense-tf" class="form-select form-select-sm bg-dark text-white border-secondary">
+                                                    <option value="60">1h</option>
+                                                    <option value="240" selected>4h</option>
+                                                    <option value="1440">Daily</option>
+                                                </select>
+                                            </div>
+                                            <div class="col-6">
+                                                <label class="small text-muted mb-1">EMA LENGTH</label>
+                                                <input type="number" id="dca-defense-ema-len" class="form-control form-control-sm bg-dark border-secondary text-white" value="50" step="1" min="5" max="200">
+                                            </div>
+                                        </div>
+                                        <div class="row g-2 mt-2">
+                                            <div class="col-6">
+                                                <label class="small text-muted mb-1">DYNAMIC DEPTH</label>
+                                                <select id="dca-dynamic-depth" class="form-select form-select-sm bg-dark text-white border-secondary" onchange="toggleDcaDynamicDepthVisibility()">
+                                                    <option value="off" selected>OFF</option>
+                                                    <option value="on">ON</option>
+                                                </select>
+                                                <small class="text-muted" style="font-size:0.5rem;">Raise ARM threshold based on recent dip depths.</small>
+                                            </div>
+                                        </div>
+                                        <div id="dca-dynamic-depth-sub" class="d-none row g-2 mt-2">
+                                            <div class="col-4">
+                                                <label class="small text-muted mb-1">WINDOW</label>
+                                                <input type="number" id="dca-depth-window" class="form-control form-control-sm bg-dark border-secondary text-white" value="10" step="1" min="3" max="30">
+                                            </div>
+                                            <div class="col-4">
+                                                <label class="small text-muted mb-1">MULTIPLIER</label>
+                                                <input type="number" id="dca-depth-multiplier" class="form-control form-control-sm bg-dark border-secondary text-white" value="0.85" step="0.05" min="0.1" max="2.0">
+                                            </div>
+                                            <div class="col-4">
+                                                <label class="small text-muted mb-1">FLOOR</label>
+                                                <input type="number" id="dca-depth-floor" class="form-control form-control-sm bg-dark border-secondary text-white" value="-0.30" step="0.05" min="-5.0" max="0">
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
                             </div>
 
                             <div id="grid-settings" class="d-none border-top border-secondary pt-3 mb-4">
@@ -761,6 +860,227 @@
                 </div>
             </div>
         </div>
+
+            <!-- BACKTESTING TAB -->
+            <div class="tab-pane fade" id="backtest-panel" role="tabpanel">
+                <div class="card card-custom p-3 mb-3">
+                    <h6 class="fw-bold text-primary mb-3">STRATEGY BACKTEST</h6>
+                    <div class="row g-2 align-items-end">
+                        <div class="col-lg-2 col-md-3">
+                            <label class="small text-muted mb-1">PAIR</label>
+                            <select id="bt-pair" class="form-select form-select-sm bg-dark text-white border-secondary">
+                                <option value="">Loading...</option>
+                            </select>
+                        </div>
+                        <div class="col-lg-2 col-md-3">
+                            <label class="small text-muted mb-1">STRATEGY</label>
+                            <select id="bt-strategy" class="form-select form-select-sm bg-dark text-white border-secondary" onchange="btUpdateDefaults()">
+                                <option value="QUAD">Quad Rotation (DTRS)</option>
+                                <option value="MOMENTUM">Momentum</option>
+                                <option value="SQUEEZE">Squeeze</option>
+                                <option value="VWAP_MR">VWAP Mean Reversion</option>
+                                <option value="ORB">ORB (Opening Range)</option>
+                                <option value="TRAP">Trap (Breakout)</option>
+                                <option value="GRID">Grid Bot</option>
+                                <option value="DCA">DCA (Accumulation)</option>
+                                <option value="NPR">NPR (Event-Driven)</option>
+                            </select>
+                        </div>
+                        <div class="col-lg-1 col-md-2">
+                            <label class="small text-muted mb-1">TIMEFRAME</label>
+                            <select id="bt-timeframe" class="form-select form-select-sm bg-dark text-white border-secondary">
+                            </select>
+                        </div>
+                        <div class="col-lg-2 col-md-2">
+                            <label class="small text-muted mb-1">START DATE</label>
+                            <input type="date" id="bt-start" class="form-control form-control-sm bg-dark border-secondary text-white">
+                        </div>
+                        <div class="col-lg-2 col-md-2">
+                            <label class="small text-muted mb-1">END DATE</label>
+                            <input type="date" id="bt-end" class="form-control form-control-sm bg-dark border-secondary text-white">
+                        </div>
+                        <div class="col-lg-1 col-md-2">
+                            <label class="small text-muted mb-1">CAPITAL $</label>
+                            <input type="number" id="bt-capital" class="form-control form-control-sm bg-dark border-secondary text-white" value="1000" step="any" min="10">
+                        </div>
+                        <div class="col-lg-2 col-md-2">
+                            <button class="btn btn-success btn-sm w-100 fw-bold py-2" onclick="runBacktest()" id="bt-run-btn">RUN BACKTEST</button>
+                        </div>
+                    </div>
+                    <!-- QUAD params -->
+                    <div id="bt-quad-params" class="mt-2">
+                        <div class="row g-2">
+                            <div class="col-auto">
+                                <label class="small text-muted mb-1">Rotation Window</label>
+                                <input type="number" id="bt-rot-window" class="form-control form-control-sm bg-dark border-secondary text-white" value="20" min="5" max="100" style="width:80px;">
+                            </div>
+                        </div>
+                    </div>
+                    <!-- DCA params -->
+                    <div id="bt-dca-params" class="mt-2" style="display:none;">
+                        <div class="row g-2">
+                            <div class="col-auto">
+                                <label class="small text-muted mb-1">Buy % per signal</label>
+                                <input type="number" id="bt-dca-buypct" class="form-control form-control-sm bg-dark border-secondary text-white" value="5" min="1" max="25" step="0.5" style="width:80px;">
+                            </div>
+                            <div class="col-auto">
+                                <label class="small text-muted mb-1">Flat TP % (0 = tiered)</label>
+                                <input type="number" id="bt-dca-flattp" class="form-control form-control-sm bg-dark border-secondary text-white" value="0" min="0" max="50" step="0.5" style="width:90px;">
+                                <small class="text-muted" style="font-size:0.5rem;">0 = use tiered exits. Overrides defense mode tiers.</small>
+                            </div>
+                            <div class="col-auto">
+                                <label class="small text-muted mb-1">Adaptive Defense</label>
+                                <select id="bt-dca-defense" class="form-select form-select-sm bg-dark text-white border-secondary" style="width:90px;">
+                                    <option value="off">OFF</option>
+                                    <option value="on">ON</option>
+                                </select>
+                            </div>
+                            <div class="col-auto">
+                                <label class="small text-muted mb-1">Trend TF</label>
+                                <select id="bt-dca-defense-tf" class="form-select form-select-sm bg-dark text-white border-secondary" style="width:80px;">
+                                    <option value="60">1h</option>
+                                    <option value="240" selected>4h</option>
+                                    <option value="1440">Daily</option>
+                                </select>
+                            </div>
+                            <div class="col-auto">
+                                <label class="small text-muted mb-1">EMA Len</label>
+                                <input type="number" id="bt-dca-defense-ema" class="form-control form-control-sm bg-dark border-secondary text-white" value="50" min="10" max="200" style="width:65px;">
+                            </div>
+                        </div>
+                        <div class="row g-2 mt-1">
+                            <div class="col-auto">
+                                <label class="small text-muted mb-1">Dynamic Depth</label>
+                                <select id="bt-dca-dyn-depth" class="form-select form-select-sm bg-dark text-white border-secondary" style="width:75px;">
+                                    <option value="off" selected>OFF</option>
+                                    <option value="on">ON</option>
+                                </select>
+                                <small class="text-muted" style="font-size:0.5rem;">Adapts ARM threshold to recent dip lows. Floor: -0.30.</small>
+                            </div>
+                            <div class="col-auto">
+                                <label class="small text-muted mb-1">Depth Mult</label>
+                                <input type="number" id="bt-dca-dyn-mult" class="form-control form-control-sm bg-dark border-secondary text-white" value="0.85" min="0.5" max="1.5" step="0.05" style="width:65px;">
+                            </div>
+                            <div class="col-auto">
+                                <label class="small text-muted mb-1">Depth Window</label>
+                                <input type="number" id="bt-dca-dyn-window" class="form-control form-control-sm bg-dark border-secondary text-white" value="10" min="3" max="50" style="width:60px;">
+                            </div>
+                            <div class="col-auto">
+                                <label class="small text-muted mb-1">Dynamic TF</label>
+                                <select id="bt-dca-dyn-tf" class="form-select form-select-sm bg-dark text-white border-secondary" style="width:75px;">
+                                    <option value="off" selected>OFF</option>
+                                    <option value="on">ON</option>
+                                </select>
+                                <small class="text-muted" style="font-size:0.5rem;">After defensive action, re-evaluate trend TF.</small>
+                            </div>
+                            <div class="col-auto">
+                                <label class="small text-muted mb-1">TF Candidates</label>
+                                <input type="text" id="bt-dca-tf-candidates" class="form-control form-control-sm bg-dark border-secondary text-white" value="60,240,1440,4320" style="width:120px;">
+                                <small class="text-muted" style="font-size:0.5rem;">Comma-separated minutes (1h,4h,1d,3d)</small>
+                            </div>
+                        </div>
+                    </div>
+                    <div id="bt-grid-params" class="mt-2" style="display:none;">
+                        <div class="row g-2">
+                            <div class="col-auto">
+                                <label class="small text-muted mb-1">Step %</label>
+                                <input type="number" id="bt-grid-step" class="form-control form-control-sm bg-dark border-secondary text-white" value="0.6" min="0.1" max="5" step="0.1" style="width:75px;">
+                            </div>
+                            <div class="col-auto">
+                                <label class="small text-muted mb-1">Mode</label>
+                                <select id="bt-grid-mode" class="form-select form-select-sm bg-dark text-white border-secondary" style="width:90px;">
+                                    <option value="LONG" selected>LONG</option>
+                                    <option value="BOTH">BOTH</option>
+                                    <option value="SHORT">SHORT</option>
+                                </select>
+                            </div>
+                            <div class="col-auto">
+                                <label class="small text-muted mb-1">Min Order $</label>
+                                <input type="number" id="bt-grid-minorder" class="form-control form-control-sm bg-dark border-secondary text-white" value="5" min="1" max="100" step="1" style="width:75px;">
+                            </div>
+                            <div class="col-auto">
+                                <label class="small text-muted mb-1">Circuit Breaker %</label>
+                                <input type="number" id="bt-grid-cb" class="form-control form-control-sm bg-dark border-secondary text-white" value="6" min="1" max="20" step="0.5" style="width:75px;">
+                            </div>
+                            <div class="col-auto">
+                                <label class="small text-muted mb-1">Dynamic</label>
+                                <select id="bt-grid-dynamic" class="form-select form-select-sm bg-dark text-white border-secondary" style="width:75px;">
+                                    <option value="off">OFF</option>
+                                    <option value="on" selected>ON</option>
+                                </select>
+                            </div>
+                            <div class="col-auto">
+                                <label class="small text-muted mb-1">Min Step %</label>
+                                <input type="number" id="bt-grid-minstep" class="form-control form-control-sm bg-dark border-secondary text-white" value="0.3" min="0.1" max="2" step="0.1" style="width:70px;">
+                            </div>
+                            <div class="col-auto">
+                                <label class="small text-muted mb-1">Max Step %</label>
+                                <input type="number" id="bt-grid-maxstep" class="form-control form-control-sm bg-dark border-secondary text-white" value="3.0" min="0.5" max="10" step="0.5" style="width:70px;">
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Progress -->
+                <div id="bt-progress-container" class="d-none mb-3">
+                    <div class="card card-custom p-3">
+                        <small class="text-muted mb-1" id="bt-progress-text">Starting...</small>
+                        <div class="progress" style="height: 6px;">
+                            <div class="progress-bar bg-info" id="bt-progress-bar" role="progressbar" style="width: 0%"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Summary Stats -->
+                <div id="bt-summary" class="d-none mb-3">
+                    <div class="row g-2">
+                        <div class="col-lg-3 col-6"><div class="card card-custom p-2 text-center"><small class="text-muted d-block" style="font-size:0.6rem;">TOTAL RETURN</small><span class="fw-bold" id="bt-stat-return">—</span></div></div>
+                        <div class="col-lg-3 col-6"><div class="card card-custom p-2 text-center"><small class="text-muted d-block" style="font-size:0.6rem;">WIN RATE</small><span class="fw-bold" id="bt-stat-winrate">—</span></div></div>
+                        <div class="col-lg-3 col-6"><div class="card card-custom p-2 text-center"><small class="text-muted d-block" style="font-size:0.6rem;">MAX DRAWDOWN</small><span class="fw-bold text-danger" id="bt-stat-dd">—</span></div></div>
+                        <div class="col-lg-3 col-6"><div class="card card-custom p-2 text-center"><small class="text-muted d-block" style="font-size:0.6rem;">SHARPE RATIO</small><span class="fw-bold" id="bt-stat-sharpe">—</span></div></div>
+                    </div>
+                    <div class="row g-2 mt-1">
+                        <div class="col-lg-3 col-6"><div class="card card-custom p-2 text-center"><small class="text-muted d-block" style="font-size:0.6rem;">TRADES (CYCLE / RISK)</small><span class="fw-bold" id="bt-stat-trades">—</span></div></div>
+                        <div class="col-lg-3 col-6"><div class="card card-custom p-2 text-center"><small class="text-muted d-block" style="font-size:0.6rem;">CYCLE WIN RATE</small><span class="fw-bold" id="bt-stat-pf">—</span></div></div>
+                        <div class="col-lg-3 col-6"><div class="card card-custom p-2 text-center"><small class="text-muted d-block" style="font-size:0.6rem;">BUY & HOLD</small><span class="fw-bold" id="bt-stat-bh">—</span></div></div>
+                        <div class="col-lg-3 col-6"><div class="card card-custom p-2 text-center"><small class="text-muted d-block" style="font-size:0.6rem;">CAPITAL SAVED</small><span class="fw-bold text-info" id="bt-stat-fees">—</span></div></div>
+                    </div>
+                </div>
+
+                <!-- Results: Equity Chart + Trade Log -->
+                <div id="bt-results" class="d-none">
+                    <div class="row g-2">
+                        <div class="col-lg-7">
+                            <div class="card card-custom p-2">
+                                <h6 class="small fw-bold text-muted mb-2 px-1">EQUITY CURVE</h6>
+                                <div id="bt-equity-chart" style="height:350px;"></div>
+                            </div>
+                        </div>
+                        <div class="col-lg-5">
+                            <div class="card card-custom p-2">
+                                <h6 class="small fw-bold text-muted mb-2 px-1">TRADE LOG <span class="text-secondary">(click chart icon to view)</span></h6>
+                                <div style="max-height:350px; overflow-y:auto;">
+                                    <table class="table table-dark table-sm table-hover mb-0" style="font-size:0.65rem;">
+                                        <thead><tr><th>#</th><th>Entry</th><th>Exit</th><th>Entry $</th><th>Exit $</th><th>P&L</th><th>Reason</th><th></th></tr></thead>
+                                        <tbody id="bt-trade-log"></tbody>
+                                    </table>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <!-- Trade chart (shown when clicking a trade) -->
+                    <div id="bt-trade-chart-wrap" class="d-none mt-2">
+                        <div class="card card-custom p-2">
+                            <div class="d-flex justify-content-between align-items-center mb-1 px-1">
+                                <h6 class="small fw-bold text-muted mb-0" id="bt-trade-chart-title">TRADE CHART</h6>
+                                <button class="btn btn-sm btn-outline-secondary py-0 px-1" onclick="document.getElementById('bt-trade-chart-wrap').classList.add('d-none')" style="font-size:0.6rem;">CLOSE</button>
+                            </div>
+                            <div id="bt-trade-chart" style="height:400px;"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
     </div>
 
     <div class="modal fade" id="rebalanceModal" tabindex="-1">
@@ -869,8 +1189,8 @@
                     </div>
                 </div>
                 <div id="bot-chart-wrapper" style="width:100%; display:flex; flex-direction:column; flex:1; min-height:250px;">
-                    <div id="bot-chart-container" style="width:100%; flex:3; min-height:200px;"></div>
-                    <div id="bot-osc-panes" style="width:100%;"></div>
+                    <div id="bot-chart-container" style="width:100%; flex:1 1 auto; min-height:200px;"></div>
+                    <div id="bot-osc-panes" style="width:100%; display:none;"></div>
                 </div>
                 <div id="bot-chart-info" class="border-top border-secondary pt-2 mt-2" style="font-size:0.65rem;"></div>
             </div>
@@ -878,7 +1198,7 @@
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
-    <script src="https://unpkg.com/lightweight-charts@4.1.1/dist/lightweight-charts.standalone.production.js"></script>
+    <script src="https://unpkg.com/lightweight-charts@5.0.8/dist/lightweight-charts.standalone.production.js"></script>
 
     <script>
         let currentData = { positions: [], history: [], total_value: 0.0, rebalance: [], rebalance_configured: false, trails: [], brackets: [], free_usd: 0.0, bot_locked_usd: 0.0 };
@@ -907,7 +1227,7 @@
         let chartTF = "15m";
 
         // Strategy -> native timeframe mapping
-        const STRATEGY_TF = { "QUAD": "15m", "QUAD_SUPER": "15m", "ORB": "5m", "GRID": "1h", "TRAP": "15m", "MOMENTUM": "5m", "DCA": "5m", "NPR": "2m" , "NPR": "2m" };
+        const STRATEGY_TF = { "QUAD": "15m", "ORB": "5m", "GRID": "1h", "TRAP": "15m", "MOMENTUM": "5m", "DCA": "5m", "NPR": "2m" , "NPR": "2m" };
         const TF_LABELS = { "1m": "1m", "5m": "5m", "15m": "15m", "1h": "1H", "6h": "6H", "1d": "1D" };
 
         // Scanner state
@@ -916,6 +1236,49 @@
         let overlayLines = {};     // {name: seriesObject}
         let activeGroups = {};     // {groupName: true}
         let rawCandles = null;     // uncolored candles for toggle off
+        let chartOverlays = null;  // deep-history overlays from /api/chart_overlays
+        let chartIndicators = null; // deep-history oscillators from /api/chart_indicators
+        let activeOscillators = {}; // {rsi: true, adx: true, ...}
+        let oscillatorSeries = {};  // {oscName: Array<ISeriesApi>} — for removal on toggle-off
+
+        // Oscillator configuration: one sub-pane per indicator, each its own chart
+        const OSC_CONFIG = {
+            rsi: {
+                label: 'RSI(14)',
+                series: [{ key: 'rsi', color: '#FFD700', w: 1 }],
+                refLines: [30, 50, 70]
+            },
+            adx: {
+                label: 'ADX(14)',
+                series: [{ key: 'adx', color: '#3498DB', w: 1 }],
+                refLines: [20, 25]
+            },
+            roc: {
+                label: 'ROC 7/21',
+                series: [
+                    { key: 'roc_fast', color: '#2ECC71', w: 1 },
+                    { key: 'roc_slow', color: '#E74C3C', w: 1 }
+                ],
+                refLines: [0]
+            },
+            macd: {
+                label: 'MACD 12/26/9',
+                series: [
+                    { key: 'macd', color: '#4169E1', w: 1 },
+                    { key: 'macd_signal', color: '#FFA500', w: 1 }
+                ],
+                refLines: [0]
+            },
+            stoch: {
+                label: 'Stoch 14/3',
+                series: [
+                    { key: 'stoch_k', color: '#00FF00', w: 1 },
+                    { key: 'stoch_d', color: '#FF4B5C', w: 1 }
+                ],
+                refLines: [20, 80]
+            }
+        };
+        const OSC_PANE_HEIGHT = 140;  // px per oscillator sub-pane
 
         // Overlay group definitions: which series keys + line styles
         const OVERLAY_GROUPS = {
@@ -946,8 +1309,7 @@
 
         function createChart(container, height) {
             return LightweightCharts.createChart(container, {
-                width: container.clientWidth,
-                height: height || container.clientHeight || 360,
+                autoSize: true,
                 layout: { background: { type: 'solid', color: CHART_COLORS.bg }, textColor: CHART_COLORS.text, fontFamily: 'sans-serif', fontSize: 11 },
                 grid: { vertLines: { color: CHART_COLORS.grid }, horzLines: { color: CHART_COLORS.grid } },
                 crosshair: { mode: LightweightCharts.CrosshairMode.Normal, vertLine: { color: CHART_COLORS.crosshair, width: 1, style: 2 }, horzLine: { color: CHART_COLORS.crosshair, width: 1, style: 2 } },
@@ -959,12 +1321,12 @@
         }
 
         function addCandleAndVolume(chart) {
-            const candles = chart.addCandlestickSeries({
+            const candles = chart.addSeries(LightweightCharts.CandlestickSeries, {
                 upColor: CHART_COLORS.upBody, downColor: CHART_COLORS.downBody,
                 borderUpColor: CHART_COLORS.upBody, borderDownColor: CHART_COLORS.downBody,
                 wickUpColor: CHART_COLORS.upWick, wickDownColor: CHART_COLORS.downWick,
             });
-            const volume = chart.addHistogramSeries({
+            const volume = chart.addSeries(LightweightCharts.HistogramSeries, {
                 priceFormat: { type: 'volume' },
                 priceScaleId: '',
             });
@@ -974,11 +1336,114 @@
 
         async function fetchCandles(pair, tf) {
             try {
-                const r = await fetch(`/api/candles/${pair}/${tf}`);
+                const r = await fetch(`/api/chart_candles/${pair}/${tf}?limit=1500`);
                 const data = await r.json();
                 if (data.error) { console.error('Candle error:', data.error); return []; }
                 return data;
             } catch (e) { console.error('Fetch candle error:', e); return []; }
+        }
+
+        async function fetchChartOverlays(pair, tf) {
+            try {
+                const r = await fetch(`/api/chart_overlays/${pair}/${tf}?limit=1500`);
+                const data = await r.json();
+                if (data.error) { console.error('Overlay error:', data.error); return {}; }
+                return data;
+            } catch (e) { console.error('Fetch overlay error:', e); return {}; }
+        }
+
+        async function fetchChartIndicators(pair, tf, keys) {
+            if (!keys || !keys.length) return {};
+            try {
+                const r = await fetch(`/api/chart_indicators/${pair}/${tf}?set=${keys.join(',')}&limit=1500`);
+                const data = await r.json();
+                if (data.error) { console.error('Indicator error:', data.error); return {}; }
+                return data;
+            } catch (e) { console.error('Fetch indicator error:', e); return {}; }
+        }
+
+        // ==========================================
+        // OSCILLATOR PANES (v5 native panes on the main chart)
+        // ==========================================
+        // Panes share the main chart's time axis by construction, so vertical
+        // time grid lines are pixel-aligned with the candle pane automatically.
+
+        function _addOscillatorPane(name, paneIndex) {
+            if (!mainChart || !chartIndicators) return;
+            const cfg = OSC_CONFIG[name];
+            if (!cfg) return;
+            const lineList = [];
+            cfg.series.forEach(s => {
+                const data = chartIndicators[s.key];
+                if (!data || !data.length) return;
+                const line = mainChart.addSeries(LightweightCharts.LineSeries, {
+                    color: s.color,
+                    lineWidth: s.w || 1,
+                    priceLineVisible: false,
+                    lastValueVisible: true,
+                    crosshairMarkerVisible: true,
+                    title: cfg.label,
+                }, paneIndex);
+                line.setData(data);
+                // Reference lines (overbought/oversold/zero)
+                if (cfg.refLines) {
+                    cfg.refLines.forEach(lvl => {
+                        line.createPriceLine({
+                            price: lvl, color: '#45a29e77', lineWidth: 1, lineStyle: 2,
+                            axisLabelVisible: false, title: ''
+                        });
+                    });
+                }
+                lineList.push(line);
+            });
+            oscillatorSeries[name] = lineList;
+            // Weight the panes so the main candle pane stays prominent while
+            // oscillators share the remaining space. Main = 4, each osc = 1.
+            try {
+                const panes = mainChart.panes();
+                if (panes[0]) panes[0].setStretchFactor(4);
+                if (panes[paneIndex]) panes[paneIndex].setStretchFactor(1);
+            } catch (e) {}
+        }
+
+        function _removeOscillatorPane(name) {
+            const list = oscillatorSeries[name] || [];
+            list.forEach(line => {
+                try { mainChart.removeSeries(line); } catch (e) {}
+            });
+            delete oscillatorSeries[name];
+        }
+
+        function _rebuildAllOscillatorPanes() {
+            // Rebuild panes in insertion order so pane indices stay 1, 2, 3, ...
+            const order = Object.keys(activeOscillators);
+            order.forEach((name, i) => _addOscillatorPane(name, i + 1));
+        }
+
+        async function toggleOscillator(name, btn) {
+            if (activeOscillators[name]) {
+                // Remove this oscillator's series. To keep pane indices contiguous
+                // (avoid gaps when a middle oscillator is toggled off), tear down
+                // all oscillator panes then rebuild the remaining ones.
+                Object.keys(activeOscillators).forEach(n => _removeOscillatorPane(n));
+                delete activeOscillators[name];
+                if (btn) { btn.classList.remove('active'); btn.style.opacity = '0.6'; }
+                _rebuildAllOscillatorPanes();
+                return;
+            }
+
+            // Fetch indicator data if not already cached
+            const firstKey = OSC_CONFIG[name].series[0].key;
+            if (!chartIndicators || !chartIndicators[firstKey]) {
+                const wanted = Object.keys(activeOscillators).concat([name]);
+                const fresh = await fetchChartIndicators(chartPair, chartTF, wanted);
+                chartIndicators = Object.assign({}, chartIndicators || {}, fresh);
+            }
+
+            const paneIndex = Object.keys(activeOscillators).length + 1;
+            activeOscillators[name] = true;
+            _addOscillatorPane(name, paneIndex);
+            if (btn) { btn.classList.add('active'); btn.style.opacity = '1'; }
         }
 
         function buildVolumeData(candles) {
@@ -987,6 +1452,66 @@
                 value: c.volume,
                 color: c.close >= c.open ? CHART_COLORS.volUp : CHART_COLORS.volDown
             }));
+        }
+
+        // Volume-multiple → candle color. Matches the original server-side palette
+        // (scanner.py compute_volume_colors): 4 bull tiers, 4 bear tiers.
+        function volColorForMult(isBull, mult) {
+            if (isBull) {
+                if (mult >= 2.0) return '#00FF00';
+                if (mult >= 1.5) return '#00BFFF';
+                if (mult >= 1.0) return '#008000';
+                return '#006400';
+            } else {
+                if (mult >= 2.0) return '#FFFF00';
+                if (mult >= 1.5) return '#FFA500';
+                if (mult >= 1.0) return '#FF0000';
+                return '#8B0000';
+            }
+        }
+
+        // Client-side volume coloring — returns the candles with color/borderColor/wickColor
+        // set based on their volume relative to a 20-bar SMA (same formula as scanner.py).
+        function colorizeCandles(candles, window) {
+            const N = window || 20;
+            const out = new Array(candles.length);
+            for (let i = 0; i < candles.length; i++) {
+                const c = candles[i];
+                let sum = 0, cnt = 0;
+                for (let j = Math.max(0, i - N + 1); j <= i; j++) {
+                    sum += candles[j].volume; cnt++;
+                }
+                const avgVol = cnt > 0 ? sum / cnt : 0;
+                const mult = avgVol > 0 ? c.volume / avgVol : 0;
+                const isBull = c.close >= c.open;
+                const color = volColorForMult(isBull, mult);
+                out[i] = {
+                    time: c.time, open: c.open, high: c.high, low: c.low, close: c.close,
+                    color: color, borderColor: color, wickColor: color
+                };
+            }
+            return out;
+        }
+
+        // Color a single updated candle against the trailing N bars.
+        function colorizeLastCandle(candles, newCandle, window) {
+            const N = window || 20;
+            // Use the last N-1 bars BEFORE newCandle for the average
+            let sum = 0, cnt = 0;
+            let seen = 0;
+            for (let i = candles.length - 1; i >= 0 && seen < N - 1; i--) {
+                if (candles[i].time === newCandle.time) continue;
+                sum += candles[i].volume; cnt++; seen++;
+            }
+            const avgVol = cnt > 0 ? sum / cnt : 0;
+            const mult = avgVol > 0 ? newCandle.volume / avgVol : 0;
+            const isBull = newCandle.close >= newCandle.open;
+            const color = volColorForMult(isBull, mult);
+            return {
+                time: newCandle.time, open: newCandle.open, high: newCandle.high,
+                low: newCandle.low, close: newCandle.close,
+                color: color, borderColor: color, wickColor: color
+            };
         }
 
         // ---- MAIN TRADING DESK CHART ----
@@ -999,19 +1524,29 @@
             overlayLines = {};
 
             if (mainChart) { mainChart.remove(); mainChart = null; }
+            // Wipe oscillator series refs — the old chart took them down with it
+            oscillatorSeries = {};
             mainChart = createChart(container);
             const series = addCandleAndVolume(mainChart);
             mainCandleSeries = series.candles;
             mainVolumeSeries = series.volume;
 
-            const candles = await fetchCandles(pair, chartTF);
+            // Fetch candles + deep overlays + active oscillators in parallel
+            const activeOscKeys = Object.keys(activeOscillators);
+            const [candles, overlays, indicators] = await Promise.all([
+                fetchCandles(pair, chartTF),
+                fetchChartOverlays(pair, chartTF),
+                fetchChartIndicators(pair, chartTF, activeOscKeys)
+            ]);
+            chartOverlays = overlays;
+            chartIndicators = indicators;
             if (candles.length) {
                 rawCandles = candles;
-                mainCandleSeries.setData(candles);
+                mainCandleSeries.setData(colorizeCandles(candles));
                 mainVolumeSeries.setData(buildVolumeData(candles));
 
-                // Show last 100 candles at readable zoom
-                const barsToShow = Math.min(100, candles.length);
+                // Show last 150 candles at readable zoom
+                const barsToShow = Math.min(150, candles.length);
                 mainChart.timeScale().setVisibleLogicalRange({
                     from: candles.length - barsToShow,
                     to: candles.length + 5
@@ -1024,9 +1559,12 @@
                 updateTradePanel(pair, lastPx, activePairType);
             }
 
-            // Responsive resize
-            const ro = new ResizeObserver(() => { if (mainChart) mainChart.applyOptions({ width: container.clientWidth }); });
-            ro.observe(container);
+            // autoSize:true handles all container resize events natively — no manual observer needed.
+
+            // Rebuild any active oscillators as native v5 panes on the main chart
+            if (activeOscKeys.length) {
+                _rebuildAllOscillatorPanes();
+            }
 
             // If scanner is active, reload scanner data for new pair/TF
             if (scannerActive) {
@@ -1103,20 +1641,23 @@
         function toggleMainChartFullscreen() {
             const card = document.getElementById('tv_chart_container').closest('.card-custom');
             const btn = document.getElementById('main-chart-fs-btn');
-            if (card.classList.contains('main-chart-fullscreen')) {
-                card.classList.remove('main-chart-fullscreen');
-                btn.innerHTML = '<i class="bi bi-arrows-fullscreen"></i>';
-            } else {
+            const scanner = document.getElementById('scanner-sub-panel');
+            const entering = !card.classList.contains('main-chart-fullscreen');
+            if (entering) {
                 card.classList.add('main-chart-fullscreen');
                 btn.innerHTML = '<i class="bi bi-fullscreen-exit"></i>';
-            }
-            // Resize chart to fill new container size
-            setTimeout(() => {
-                if (mainChart) {
-                    const container = document.getElementById('tv_chart_container');
-                    mainChart.applyOptions({ width: container.clientWidth, height: container.clientHeight });
+                // Auto-open scanner so metrics are visible in fullscreen
+                if (scanner && scanner.classList.contains('d-none')) {
+                    toggleScanner();
                 }
-            }, 50);
+            } else {
+                card.classList.remove('main-chart-fullscreen');
+                btn.innerHTML = '<i class="bi bi-arrows-fullscreen"></i>';
+            }
+            // autoSize handles the resize; just restore the visible range
+            setTimeout(() => {
+                if (mainChart) mainChart.timeScale().fitContent();
+            }, 80);
         }
         // ESC key exits fullscreen
         document.addEventListener('keydown', e => {
@@ -1132,18 +1673,28 @@
         // LIVE CANDLE UPDATES (every 5 seconds)
         // ==========================================
         let liveUpdateTimer = null;
+        let liveIndicatorTimer = null;
 
         function startLiveUpdates() {
             stopLiveUpdates();
+            // Candle tick — every 5s, updates the latest bar + live price
             liveUpdateTimer = setInterval(async () => {
                 if (!chartPair || !mainCandleSeries) return;
                 try {
                     const r = await fetch(`/api/candles/${chartPair}/${chartTF}?limit=2`);
                     const data = await r.json();
                     if (!data.length) return;
-                    // Update the latest candle (or add new one)
                     const latest = data[data.length - 1];
-                    mainCandleSeries.update(latest);
+                    if (rawCandles && rawCandles.length) {
+                        const lastRaw = rawCandles[rawCandles.length - 1];
+                        if (lastRaw.time === latest.time) {
+                            rawCandles[rawCandles.length - 1] = latest;
+                        } else if (latest.time > lastRaw.time) {
+                            rawCandles.push(latest);
+                        }
+                    }
+                    const colored = colorizeLastCandle(rawCandles || [], latest);
+                    mainCandleSeries.update(colored);
                     if (mainVolumeSeries) {
                         mainVolumeSeries.update({
                             time: latest.time,
@@ -1151,15 +1702,70 @@
                             color: latest.close >= latest.open ? CHART_COLORS.volUp : CHART_COLORS.volDown
                         });
                     }
-                    // Update live price display
                     activePairPrice = latest.close;
                     document.getElementById('trade-live-price').innerText = '$' + latest.close.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 6});
                 } catch (e) { /* silent */ }
             }, 5000);
+
+            // Indicator refresh — every 20s, refetches overlays + active oscillators
+            // + scanner rows (if active) and re-applies them so EMAs, BB, RSI, scanner
+            // metrics, etc. all advance with the price.
+            liveIndicatorTimer = setInterval(async () => {
+                if (!chartPair || !mainChart) return;
+                // Scanner row refresh (if open) — independent of overlay rebind
+                if (scannerActive) {
+                    loadScanner().catch(() => {});
+                }
+                // Volume profile refresh (if toggled on)
+                if (vpvrActive) {
+                    renderVolumeProfile().catch(() => {});
+                }
+                try {
+                    const jobs = [fetchChartOverlays(chartPair, chartTF)];
+                    const activeOscKeys = Object.keys(activeOscillators);
+                    if (activeOscKeys.length) {
+                        jobs.push(fetchChartIndicators(chartPair, chartTF, activeOscKeys));
+                    }
+                    const results = await Promise.all(jobs);
+                    const freshOverlays = results[0];
+                    if (freshOverlays && Object.keys(freshOverlays).length) {
+                        chartOverlays = freshOverlays;
+                        // Rebind data on any currently-visible overlay line series
+                        Object.keys(activeGroups).forEach(groupName => {
+                            const grp = OVERLAY_GROUPS[groupName];
+                            if (!grp) return;
+                            grp.series.forEach(s => {
+                                const line = overlayLines[s.key];
+                                const data = chartOverlays[s.key];
+                                if (line && data && data.length) {
+                                    try { line.setData(data); } catch (e) {}
+                                }
+                            });
+                        });
+                    }
+                    if (activeOscKeys.length && results[1]) {
+                        chartIndicators = Object.assign({}, chartIndicators || {}, results[1]);
+                        // Rebind data on each active oscillator's series
+                        activeOscKeys.forEach(name => {
+                            const list = oscillatorSeries[name] || [];
+                            const cfg = OSC_CONFIG[name];
+                            if (!cfg) return;
+                            cfg.series.forEach((s, i) => {
+                                const line = list[i];
+                                const data = chartIndicators[s.key];
+                                if (line && data && data.length) {
+                                    try { line.setData(data); } catch (e) {}
+                                }
+                            });
+                        });
+                    }
+                } catch (e) { /* silent */ }
+            }, 20000);
         }
 
         function stopLiveUpdates() {
             if (liveUpdateTimer) { clearInterval(liveUpdateTimer); liveUpdateTimer = null; }
+            if (liveIndicatorTimer) { clearInterval(liveIndicatorTimer); liveIndicatorTimer = null; }
         }
 
         // ==========================================
@@ -1546,12 +2152,8 @@
             const mainContainer = document.getElementById('bot-chart-container');
             mainContainer.innerHTML = '';
 
-            // Determine heights
-            const wrapper = document.getElementById('bot-chart-wrapper');
-            const wrapperH = wrapper.clientHeight || 400;
-
-            const chart = createChart(mainContainer, mainContainer.clientHeight || Math.floor(wrapperH * 0.65));
-            chart.applyOptions({ width: mainContainer.clientWidth });
+            // createChart uses autoSize:true so width/height follow the container
+            const chart = createChart(mainContainer);
             const series = addCandleAndVolume(chart);
             _botChartInstances.push({ chart, container: mainContainer });
 
@@ -1629,7 +2231,7 @@
                     const overlays = indData.overlays || {};
                     Object.entries(overlays).forEach(([name, info]) => {
                         if (!info.data || !info.data.length) return;
-                        const line = chart.addLineSeries({
+                        const line = chart.addSeries(LightweightCharts.LineSeries, {
                             color: info.color || '#aaa',
                             lineWidth: info.width || 1,
                             priceLineVisible: false,
@@ -1640,89 +2242,53 @@
                         line.setData(info.data);
                     });
 
-                    // --- Oscillator sub-panes ---
+                    // --- Oscillator sub-panes — v5 native panes on the bot chart ---
+                    // Using paneIndex instead of separate chart instances guarantees
+                    // pixel-perfect time-axis alignment (shared time scale).
                     const oscillators = indData.oscillators || {};
                     const oscKeys = Object.keys(oscillators);
-                    if (oscKeys.length > 0) {
-                        const oscContainer = document.getElementById('bot-osc-panes');
-                        oscContainer.innerHTML = '';
-
-                        oscKeys.forEach(paneName => {
-                            const pane = oscillators[paneName];
-                            const paneDiv = document.createElement('div');
-                            paneDiv.style.cssText = 'width:100%; position:relative; border-top:1px solid #45a29e44; margin-top:2px;';
-                            // Height scales: 1 pane = 120px, 2 = 100px each, 3+ = 80px each
-                            const paneH = oscKeys.length === 1 ? 120 : oscKeys.length === 2 ? 100 : 80;
-                            paneDiv.style.height = paneH + 'px';
-                            oscContainer.appendChild(paneDiv);
-
-                            // Label
-                            const label = document.createElement('div');
-                            label.className = 'osc-pane-label';
-                            label.innerText = paneName;
-                            paneDiv.appendChild(label);
-
-                            // Chart
-                            const oscChart = LightweightCharts.createChart(paneDiv, {
-                                width: paneDiv.clientWidth,
-                                height: paneH,
-                                layout: { background: { type: 'solid', color: '#1a1e26' }, textColor: '#adb5bd', fontFamily: 'sans-serif', fontSize: 9 },
-                                grid: { vertLines: { color: '#45a29e11' }, horzLines: { color: '#45a29e11' } },
-                                rightPriceScale: { borderColor: '#45a29e22' },
-                                timeScale: { visible: false },
-                                crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
-                                handleScroll: false,
-                                handleScale: false,
-                            });
-                            _botChartInstances.push({ chart: oscChart, container: paneDiv });
-
-                            // Series
-                            const seriesMap = pane.series || {};
-                            Object.entries(seriesMap).forEach(([sName, sInfo]) => {
-                                if (!sInfo.data || !sInfo.data.length) return;
-                                const line = oscChart.addLineSeries({
-                                    color: sInfo.color || '#aaa',
-                                    lineWidth: sInfo.width || 1,
-                                    priceLineVisible: false,
-                                    lastValueVisible: true,
-                                    crosshairMarkerVisible: false,
-                                    title: sName,
-                                });
-                                line.setData(sInfo.data);
-                            });
-
-                            // Horizontal reference levels
-                            const levels = pane.levels || [];
-                            if (levels.length > 0 && Object.keys(seriesMap).length > 0) {
-                                // Add levels as price lines on the first series
-                                const firstSeriesName = Object.keys(seriesMap)[0];
-                                const firstData = seriesMap[firstSeriesName];
-                                if (firstData && firstData.data && firstData.data.length) {
-                                    const refSeries = oscChart.addLineSeries({
-                                        color: 'transparent', lineWidth: 0,
-                                        priceLineVisible: false, lastValueVisible: false,
-                                        crosshairMarkerVisible: false,
-                                    });
-                                    refSeries.setData(firstData.data);
-                                    levels.forEach(lv => {
-                                        refSeries.createPriceLine({
-                                            price: lv.value,
-                                            color: lv.color || '#555',
-                                            lineWidth: 1,
-                                            lineStyle: 2,
-                                            axisLabelVisible: true,
-                                            title: lv.label || '',
-                                        });
-                                    });
-                                }
-                            }
-
-                            // Sync time scale with main chart
-                            chart.timeScale().subscribeVisibleLogicalRangeChange(range => {
-                                if (range) oscChart.timeScale().setVisibleLogicalRange(range);
-                            });
+                    document.getElementById('bot-osc-panes').innerHTML = '';
+                    oscKeys.forEach((paneName, idx) => {
+                        const pane = oscillators[paneName];
+                        const paneIndex = idx + 1;  // 0 is the main candle pane
+                        const seriesMap = pane.series || {};
+                        let firstLine = null;
+                        Object.entries(seriesMap).forEach(([sName, sInfo]) => {
+                            if (!sInfo.data || !sInfo.data.length) return;
+                            const line = chart.addSeries(LightweightCharts.LineSeries, {
+                                color: sInfo.color || '#aaa',
+                                lineWidth: sInfo.width || 1,
+                                priceLineVisible: false,
+                                lastValueVisible: true,
+                                crosshairMarkerVisible: false,
+                                title: `${paneName}: ${sName}`,
+                            }, paneIndex);
+                            line.setData(sInfo.data);
+                            if (!firstLine) firstLine = line;
                         });
-                    }
+                        // Horizontal reference levels on the first series of this pane
+                        const levels = pane.levels || [];
+                        if (firstLine && levels.length) {
+                            levels.forEach(lv => {
+                                firstLine.createPriceLine({
+                                    price: lv.value,
+                                    color: lv.color || '#555',
+                                    lineWidth: 1,
+                                    lineStyle: 2,
+                                    axisLabelVisible: true,
+                                    title: lv.label || '',
+                                });
+                            });
+                        }
+                    });
+                    // Weight the panes so the main candle pane stays dominant
+                    try {
+                        const panes = chart.panes();
+                        if (panes[0]) panes[0].setStretchFactor(4);
+                        for (let i = 1; i <= oscKeys.length; i++) {
+                            if (panes[i]) panes[i].setStretchFactor(1);
+                        }
+                    } catch (e) {}
                 }
             } catch (e) { console.error('Indicator fetch error:', e); }
 
@@ -1743,7 +2309,7 @@
                         markers.push({ time: exitSnapped, position: 'aboveBar', color: isWin ? '#00d578' : '#ff4b5c', shape: 'arrowDown', text: `${isWin ? '+' : ''}$${t.pnl.toFixed(2)}` });
                     });
                     const seen = {}; const unique = markers.filter(m => { if (seen[m.time]) return false; seen[m.time] = true; return true; });
-                    series.candles.setMarkers(unique.sort((a, b) => a.time - b.time));
+                    LightweightCharts.createSeriesMarkers(series.candles, unique.sort((a, b) => a.time - b.time));
                 }
             } catch (e) { console.error('Trade log fetch error:', e); }
 
@@ -1776,14 +2342,30 @@
                         const dirColor = rsk.direction === 'RISING' ? '#00d578' : rsk.direction === 'FALLING' ? '#ff4b5c' : '#aaa';
                         riskBadges = `<div class="d-flex gap-1 flex-wrap mb-1"><span class="badge" style="background:${dColor}22;color:${dColor};border:1px solid ${dColor}">Depth ${d}/${rsk.total_buy_levels || '?'}</span><span class="badge" style="background:${dirColor}22;color:${dirColor};border:1px solid ${dirColor}">${rsk.direction || '?'}</span><span class="badge bg-dark border border-warning">Risk $${(rsk.risk_current || 0).toFixed(2)}/$${(rsk.risk_max || 0).toFixed(2)}</span>${rsk.active_trails > 0 ? `<span class="badge bg-dark border border-info">${rsk.active_trails} trails</span>` : ''}${rsk.cancelled_buys > 0 ? `<span class="badge bg-dark border border-danger">${rsk.cancelled_buys} buys cancelled</span>` : ''}</div>`;
                     }
-                    statusBadges = `<div class="d-flex gap-1 flex-wrap mb-1">${modeBadge}${stepBadge}${followOn}${haltBadge}<span class="badge bg-dark border border-success">${buys}B</span><span class="badge bg-dark border border-danger">${sells}S</span></div>${riskBadges}`;
+                    // V3 badges: GTFO mode, Quarantine, Crisis score, Regime
+                    let v3Badges = '';
+                    if (settings.dynamic) {
+                        const gtfoBadge = rsk.is_gtfo_active ? `<span class="badge bg-danger">GTFO @ $${(rsk.gtfo_target_price || 0).toFixed(2)}</span>` : '';
+                        const nowSec = Math.floor(Date.now() / 1000);
+                        const quarBadge = (rsk.quarantine_until && rsk.quarantine_until > nowSec) ? `<span class="badge bg-warning text-dark">QUARANTINE ${Math.ceil((rsk.quarantine_until - nowSec) / 60)}m</span>` : '';
+                        const cs = rsk.crisis_score || 0;
+                        const csColor = cs >= 80 ? '#ff4b5c' : cs >= 50 ? '#ffa500' : cs >= 40 ? '#ffeb3b' : '#00d578';
+                        const csBadge = `<span class="badge" style="background:${csColor}22;color:${csColor};border:1px solid ${csColor}">Crisis ${cs}</span>`;
+                        const regBadge = rsk.regime ? `<span class="badge bg-dark border border-info">${rsk.regime}</span>` : '';
+                        v3Badges = `<div class="d-flex gap-1 flex-wrap mb-1">${gtfoBadge}${quarBadge}${csBadge}${regBadge}</div>`;
+                    }
+                    statusBadges = `<div class="d-flex gap-1 flex-wrap mb-1">${modeBadge}${stepBadge}${followOn}${haltBadge}<span class="badge bg-dark border border-success">${buys}B</span><span class="badge bg-dark border border-danger">${sells}S</span></div>${riskBadges}${v3Badges}`;
                 }
 
                 if (strategy === 'TRAP') {
                     const stage = botData.entry_stage || 0;
-                    const stageBadge = stage === 0 ? '<span class="badge bg-dark border border-secondary">SCANNING</span>' : stage === 1 ? '<span class="badge bg-warning text-dark">STAGE 1 (25%)</span>' : '<span class="badge bg-success text-dark">STAGE 2 (100%)</span>';
+                    const tpStage = botData.tp_stage || 0;
+                    const stageLabels = {0: 'SCANNING', 1: 'STAGE 1 (10%)', 2: 'STAGE 2 (20%)', 3: 'STAGE 3 (30%)'};
+                    const stageColors = {0: 'bg-dark border border-secondary', 1: 'bg-warning text-dark', 2: 'bg-info text-dark', 3: 'bg-success text-dark'};
+                    const stageBadge = `<span class="badge ${stageColors[stage] || stageColors[0]}">${stageLabels[stage] || 'SCANNING'}</span>`;
+                    const tpBadge = tpStage >= 1 ? '<span class="badge bg-success">T1 HIT</span>' : '';
                     const avgE = botData.avg_entry ? `<span class="badge bg-dark border border-info">Avg $${Number(botData.avg_entry).toLocaleString()}</span>` : '';
-                    statusBadges = `<div class="d-flex gap-1 flex-wrap mb-1">${stageBadge}${avgE}</div>`;
+                    statusBadges = `<div class="d-flex gap-1 flex-wrap mb-1">${stageBadge}${tpBadge}${avgE}</div>`;
                 }
 
                 if (strategy === 'MOMENTUM') {
@@ -1808,7 +2390,23 @@
                     const tierBadge = d.next_tier ? `<span class="badge bg-dark border border-warning">Next: ${d.next_tier}%</span>` : '';
                     const corrBadge = d.corr_count >= 2 ? `<span class="badge bg-danger border border-danger" title="${d.corr_count} other bots entering simultaneously">CORR ${d.corr_count}</span>` : '';
                     const kellyBadge = d.kelly_active ? `<span class="badge bg-dark border border-info" title="Kelly sizing active: ${d.kelly_pct}%">K:${d.kelly_pct}%</span>` : (d.kelly_pct !== null && d.kelly_pct !== undefined ? `<span class="badge bg-dark border border-secondary" title="Kelly suggests ${d.kelly_pct}% but manual override active">K:off</span>` : '');
-                    statusBadges = `<div class="d-flex gap-1 flex-wrap mb-1">${stateBadge}${buysBadge}${avgBadge}${profitBadge}${tierBadge}${corrBadge}${kellyBadge}</div>`;
+                    let researchBadges = '';
+                    if (d.engine === 'research') {
+                        researchBadges += `<span class="badge" style="background-color:#6f42c1" title="Research engine active">RESEARCH</span>`;
+                        const modeColors = { NORMAL: 'bg-secondary', CAUTIOUS: 'bg-warning text-dark', SCALP: 'bg-danger' };
+                        researchBadges += `<span class="badge ${modeColors[d.defense_mode] || 'bg-secondary'}" title="Adaptive defense mode">${d.defense_mode || 'NORMAL'}</span>`;
+                        if (d.crisis_score > 0) {
+                            const scoreColor = d.crisis_score >= 75 ? 'bg-danger' : (d.crisis_score >= 45 ? 'bg-warning text-dark' : 'bg-dark border border-warning');
+                            researchBadges += `<span class="badge ${scoreColor}" title="Crisis score 0-100">CS ${d.crisis_score}</span>`;
+                        }
+                        if (d.wounded_mode) {
+                            researchBadges += `<span class="badge bg-danger" title="Bag frozen after crisis cut">WOUNDED</span>`;
+                        }
+                        if (d.sub_held > 0) {
+                            researchBadges += `<span class="badge bg-info text-dark" title="Sub-cycle recovery position active">SUB-CYCLE</span>`;
+                        }
+                    }
+                    statusBadges = `<div class="d-flex gap-1 flex-wrap mb-1">${stateBadge}${buysBadge}${avgBadge}${profitBadge}${tierBadge}${corrBadge}${kellyBadge}${researchBadges}</div>`;
                 }
 
                 infoEl.innerHTML = `${statusBadges}<div class="d-flex flex-wrap gap-3">
@@ -1858,22 +2456,18 @@
             scannerActive = !scannerActive;
             const btn = document.getElementById('scanner-toggle-btn');
             const panel = document.getElementById('scanner-sub-panel');
-            const controls = document.getElementById('overlay-controls');
 
             if (scannerActive) {
                 btn.classList.remove('btn-outline-info');
                 btn.classList.add('btn-info', 'text-dark');
-                controls.classList.remove('d-none');
                 panel.classList.remove('d-none');
                 await loadScanner();
             } else {
                 btn.classList.remove('btn-info', 'text-dark');
                 btn.classList.add('btn-outline-info');
-                controls.classList.add('d-none');
                 panel.classList.add('d-none');
-                removeAllOverlays();
                 if (rawCandles && mainCandleSeries) {
-                    mainCandleSeries.setData(rawCandles);
+                    mainCandleSeries.setData(colorizeCandles(rawCandles));
                 }
                 scannerData = null;
             }
@@ -1887,26 +2481,9 @@
                 scannerData = await r.json();
                 if (scannerData.error) { console.error('Scanner error:', scannerData.error); return; }
 
-                // Apply volume-colored candles
-                if (scannerData.candles && mainCandleSeries) {
-                    mainCandleSeries.setData(scannerData.candles.map(c => ({
-                        time: c.time, open: c.open, high: c.high, low: c.low, close: c.close,
-                        color: c.color, borderColor: c.color, wickColor: c.color
-                    })));
-                    // Update volume too
-                    if (mainVolumeSeries) {
-                        mainVolumeSeries.setData(scannerData.candles.map(c => ({
-                            time: c.time, value: c.volume,
-                            color: c.close >= c.open ? 'rgba(0,213,120,0.15)' : 'rgba(255,75,92,0.15)'
-                        })));
-                    }
-                    const sc = scannerData.candles;
-                    const barsToShow = Math.min(100, sc.length);
-                    mainChart.timeScale().setVisibleLogicalRange({
-                        from: sc.length - barsToShow,
-                        to: sc.length + 5
-                    });
-                }
+                // NOTE: scanner candles are NOT applied to the main chart — the chart uses
+                // /api/chart_candles (DB-backed, deep history) and colors candles client-side.
+                // Scanner only feeds metrics, confluence, and overlay indicator values below.
 
                 // Re-apply any active overlays with fresh data
                 Object.keys(activeGroups).forEach(g => {
@@ -2001,14 +2578,19 @@
         }
 
         function addOverlayGroup(name) {
-            if (!scannerData || !scannerData.overlays || !mainChart) return;
+            if (!mainChart) return;
             const group = OVERLAY_GROUPS[name];
             if (!group) return;
+            // Prefer deep-history overlays from /api/chart_overlays, fall back to scanner
+            const source = (chartOverlays && Object.keys(chartOverlays).length) ? chartOverlays
+                           : (scannerData && scannerData.overlays) ? scannerData.overlays
+                           : null;
+            if (!source) return;
 
             group.series.forEach(s => {
-                const data = scannerData.overlays[s.key];
+                const data = source[s.key];
                 if (!data || !data.length) return;
-                const line = mainChart.addLineSeries({
+                const line = mainChart.addSeries(LightweightCharts.LineSeries, {
                     color: s.color,
                     lineWidth: s.w || 1,
                     lineStyle: s.dash ? 2 : 0,
@@ -2289,9 +2871,31 @@
         function toggleBotSettings() {
             const strat = document.getElementById('bot-strategy').value;
             document.getElementById('grid-settings').classList.toggle('d-none', strat !== 'GRID');
+            document.getElementById('quad-settings').classList.toggle('d-none', strat !== 'QUAD');
+            const dcaBlock = document.getElementById('dca-settings');
+            if (dcaBlock) dcaBlock.classList.toggle('d-none', strat !== 'DCA');
             const defaultTf = STRATEGY_DEFAULT_TFS[strat] || '15m';
             document.getElementById('bot-timeframe').value = defaultTf;
             if (strat === 'GRID') previewGrid();
+        }
+
+        function toggleDcaResearchVisibility() {
+            const engine = document.getElementById('dca-engine').value;
+            const isResearch = engine === 'research';
+            document.getElementById('dca-research-options').classList.toggle('d-none', !isResearch);
+            toggleDcaAdaptiveVisibility();
+        }
+
+        function toggleDcaAdaptiveVisibility() {
+            const adaptiveOn = document.getElementById('dca-adaptive-defense').value === 'on';
+            document.getElementById('dca-adaptive-sub').classList.toggle('d-none', !adaptiveOn);
+            toggleDcaDynamicDepthVisibility();
+        }
+
+        function toggleDcaDynamicDepthVisibility() {
+            const adaptiveOn = document.getElementById('dca-adaptive-defense').value === 'on';
+            const dynOn = adaptiveOn && document.getElementById('dca-dynamic-depth').value === 'on';
+            document.getElementById('dca-dynamic-depth-sub').classList.toggle('d-none', !dynOn);
         }
 
         let _gridPreviewTimer = null;
@@ -2370,6 +2974,31 @@
                     mode: mode,
                     follow: document.getElementById('grid-follow').checked
                 };
+            }
+
+            if (strategy === 'QUAD') {
+                payload.settings.rotation_window = parseInt(document.getElementById('quad-rot-window').value) || 20;
+            }
+
+            if (strategy === 'DCA') {
+                const engine = document.getElementById('dca-engine').value;
+                payload.settings.dca_engine = engine;
+                if (engine === 'research') {
+                    payload.settings.flat_tp_pct = parseFloat(document.getElementById('dca-flat-tp').value) || 0;
+                    const adaptive = document.getElementById('dca-adaptive-defense').value === 'on';
+                    payload.settings.adaptive_defense = adaptive;
+                    if (adaptive) {
+                        payload.settings.defense_tf = parseInt(document.getElementById('dca-defense-tf').value) || 240;
+                        payload.settings.defense_ema_len = parseInt(document.getElementById('dca-defense-ema-len').value) || 50;
+                        const dynDepth = document.getElementById('dca-dynamic-depth').value === 'on';
+                        payload.settings.dynamic_depth = dynDepth;
+                        if (dynDepth) {
+                            payload.settings.dynamic_depth_window = parseInt(document.getElementById('dca-depth-window').value) || 10;
+                            payload.settings.dynamic_depth_multiplier = parseFloat(document.getElementById('dca-depth-multiplier').value) || 0.85;
+                            payload.settings.dynamic_depth_floor = parseFloat(document.getElementById('dca-depth-floor').value) || -0.30;
+                        }
+                    }
+                }
             }
 
             if (!confirm(`Deploy ${strategy} bot on ${payload.pair} (${timeframe}) with $${amount}? This will lock funds into the bot's sandbox.`)) return;
@@ -3149,7 +3778,7 @@
                 height: 350,
             });
 
-            const areaSeries = chart.addAreaSeries({
+            const areaSeries = chart.addSeries(LightweightCharts.AreaSeries, {
                 topColor: 'rgba(102, 252, 241, 0.4)',
                 bottomColor: 'rgba(102, 252, 241, 0.0)',
                 lineColor: '#66fcf1',
@@ -3161,7 +3790,7 @@
 
             // Bot locked as a second line
             if (equity[0].bot_locked !== undefined) {
-                const botSeries = chart.addLineSeries({
+                const botSeries = chart.addSeries(LightweightCharts.LineSeries, {
                     color: '#FFA500',
                     lineWidth: 1,
                     lineStyle: 2,
@@ -3297,8 +3926,8 @@
             'MOMENTUM': 'Entry freezes ATR. Phase 1: breakeven stop. Phase 2: lock profit at 1x fee. Phase 3: trail from high-water mark.',
             'QUAD': 'Exit when Trigger Stochastic (9-period) crosses above 80. Best for pullback entries in strong uptrends.',
             'QUAD_SUPER': 'Exit when Trigger Stochastic (9-period) crosses above 80. Best for capitulation reversal entries.',
-            'TRAP': 'Take profit at +2.5% above entry. Stop loss at entry minus 1x ATR.',
-            'ORB': 'Exit if price crosses below the opening range midpoint.',
+            'TRAP': 'Velez Elephant Bar. 3-stage 10% pyramiding. T1: 2.5R sell 50% + BE stop. T2: 4.0R full exit. SL: 2x ATR or elephant bar low.',
+            'ORB': '14:00-15:00 UTC range. ATR stop, T1: 1.5R sell 50% + BE stop, T2: 3.0R full. 1.5x ATR trail after T1. 2% risk sizing.',
             'NPR': 'Event-based stop (3% below entry) plus trailing stop from high-water mark.'
         };
 
@@ -3383,6 +4012,377 @@
         setInterval(refreshManualPositions, 15000);
         refreshManualPositions();
         updateStrategyDesc();
+
+        // ==========================================
+        // BACKTESTING
+        // ==========================================
+        const BT_STRATEGY_TF = { QUAD:'15m', MOMENTUM:'5m', SQUEEZE:'15m', VWAP_MR:'5m', ORB:'5m', TRAP:'15m', DCA:'5m', NPR:'2m' };
+        const BT_COMMON_PAIRS = ['BTC-USD','ETH-USD','SOL-USD','XRP-USD','DOGE-USD','ADA-USD','AVAX-USD','LINK-USD','DOT-USD','MATIC-USD','LTC-USD','UNI-USD'];
+        let btChart = null;
+        let btJobId = null;
+        let btPollTimer = null;
+
+        // Build timeframe dropdown: common TFs at top, then every minute 1-1440
+        (function() {
+            const sel = document.getElementById('bt-timeframe');
+            const common = [
+                {v:'1m',l:'1m'},{v:'2m',l:'2m'},{v:'3m',l:'3m'},{v:'5m',l:'5m'},
+                {v:'10m',l:'10m'},{v:'15m',l:'15m'},{v:'30m',l:'30m'},{v:'45m',l:'45m'},
+                {v:'60m',l:'1h'},{v:'120m',l:'2h'},{v:'240m',l:'4h'},
+                {v:'360m',l:'6h'},{v:'480m',l:'8h'},{v:'720m',l:'12h'},{v:'1440m',l:'1d'}
+            ];
+            const commonVals = new Set(common.map(c => c.v));
+
+            const grpCommon = document.createElement('optgroup');
+            grpCommon.label = 'Common';
+            common.forEach(c => {
+                const o = document.createElement('option');
+                o.value = c.v; o.textContent = c.l;
+                if (c.v === '15m') o.selected = true;
+                grpCommon.appendChild(o);
+            });
+            sel.appendChild(grpCommon);
+
+            const grpAll = document.createElement('optgroup');
+            grpAll.label = 'All (minutes)';
+            for (let m = 1; m <= 1440; m++) {
+                if (commonVals.has(m + 'm')) continue;
+                const o = document.createElement('option');
+                o.value = m + 'm'; o.textContent = m + 'm';
+                grpAll.appendChild(o);
+            }
+            sel.appendChild(grpAll);
+        })();
+
+        // Set default dates (3 months back to today)
+        (function() {
+            const now = new Date();
+            const back = new Date(now.getTime() - 90 * 86400000);
+            document.getElementById('bt-end').value = now.toISOString().split('T')[0];
+            document.getElementById('bt-start').value = back.toISOString().split('T')[0];
+        })();
+
+        document.getElementById('backtest-tab').addEventListener('shown.bs.tab', () => { loadBtPairs(); loadBtLatest(); });
+
+        async function loadBtLatest() {
+            // Resume polling if a job was running before refresh
+            const savedJob = localStorage.getItem('bt_job_id');
+            if (savedJob && !btPollTimer) {
+                try {
+                    const sr = await fetch(`/api/backtest/status/${savedJob}`);
+                    const sd = await sr.json();
+                    if (sd.success && sd.data.status === 'running' || sd.data.status === 'fetching') {
+                        btJobId = savedJob;
+                        document.getElementById('bt-run-btn').disabled = true;
+                        document.getElementById('bt-progress-container').classList.remove('d-none');
+                        btPollTimer = setInterval(pollBtStatus, 1500);
+                        return;
+                    }
+                } catch(e) {}
+            }
+            // Auto-load most recent completed result (survives page refresh)
+            if (document.getElementById('bt-results').classList.contains('d-none')) {
+                try {
+                    const res = await fetch('/api/backtest/latest');
+                    const d = await res.json();
+                    if (d.success && d.data) {
+                        renderBtSummary(d.data.summary);
+                        renderBtEquity(d.data.equity_curve);
+                        renderBtTradeLog(d.data.trades);
+                        document.getElementById('bt-summary').classList.remove('d-none');
+                        document.getElementById('bt-results').classList.remove('d-none');
+                    }
+                } catch(e) {}
+            }
+        }
+
+        async function loadBtPairs() {
+            const sel = document.getElementById('bt-pair');
+            if (sel.options.length > 1) return; // already loaded
+            try {
+                const res = await fetch('/api/products');
+                const d = await res.json();
+                const spots = (d.spot || []).map(p => p.id || p.product_id).filter(p => p && p.endsWith('-USD'));
+                // Sort: common pairs first, then alphabetical
+                const common = BT_COMMON_PAIRS.filter(p => spots.includes(p));
+                const rest = spots.filter(p => !BT_COMMON_PAIRS.includes(p)).sort();
+                sel.innerHTML = '';
+                common.forEach(p => { const o = document.createElement('option'); o.value = p; o.text = p; sel.add(o); });
+                if (common.length && rest.length) { const sep = document.createElement('option'); sep.disabled = true; sep.text = '────────────'; sel.add(sep); }
+                rest.forEach(p => { const o = document.createElement('option'); o.value = p; o.text = p; sel.add(o); });
+            } catch(e) { console.error('Failed to load pairs:', e); }
+        }
+
+        function btUpdateDefaults() {
+            const strat = document.getElementById('bt-strategy').value;
+            document.getElementById('bt-timeframe').value = BT_STRATEGY_TF[strat] || '15m';
+            document.getElementById('bt-quad-params').style.display = strat === 'QUAD' ? '' : 'none';
+            document.getElementById('bt-dca-params').style.display = strat === 'DCA' ? '' : 'none';
+            document.getElementById('bt-grid-params').style.display = strat === 'GRID' ? '' : 'none';
+        }
+
+        async function runBacktest() {
+            const pair = document.getElementById('bt-pair').value;
+            const strategy = document.getElementById('bt-strategy').value;
+            const tf = document.getElementById('bt-timeframe').value;
+            const startDate = document.getElementById('bt-start').value;
+            const endDate = document.getElementById('bt-end').value;
+            const capital = parseFloat(document.getElementById('bt-capital').value) || 1000;
+
+            if (!pair || !startDate || !endDate) return alert('Fill in all fields.');
+
+            const params = {};
+            if (strategy === 'QUAD') params.rotation_window = parseInt(document.getElementById('bt-rot-window').value) || 20;
+            if (strategy === 'DCA') {
+                params.buy_pct = parseFloat(document.getElementById('bt-dca-buypct').value) || 5;
+                params.flat_tp_pct = parseFloat(document.getElementById('bt-dca-flattp').value) || 0;
+                params.adaptive_defense = document.getElementById('bt-dca-defense').value === 'on';
+                params.defense_tf = parseInt(document.getElementById('bt-dca-defense-tf').value) || 240;
+                params.defense_ema_len = parseInt(document.getElementById('bt-dca-defense-ema').value) || 50;
+                params.dynamic_depth = document.getElementById('bt-dca-dyn-depth').value === 'on';
+                params.dynamic_depth_multiplier = parseFloat(document.getElementById('bt-dca-dyn-mult').value) || 0.85;
+                params.dynamic_depth_window = parseInt(document.getElementById('bt-dca-dyn-window').value) || 10;
+                params.dynamic_tf_analysis = document.getElementById('bt-dca-dyn-tf').value === 'on';
+                const tfStr = document.getElementById('bt-dca-tf-candidates').value || '60,240,1440,4320';
+                params.tf_candidates = tfStr.split(',').map(s => parseInt(s.trim())).filter(n => n > 0);
+            }
+            if (strategy === 'GRID') {
+                params.step_pct = parseFloat(document.getElementById('bt-grid-step').value) || 0.6;
+                params.mode = document.getElementById('bt-grid-mode').value || 'LONG';
+                params.min_order_usd = parseFloat(document.getElementById('bt-grid-minorder').value) || 5;
+                params.circuit_breaker_pct = parseFloat(document.getElementById('bt-grid-cb').value) || 6;
+                params.dynamic = document.getElementById('bt-grid-dynamic').value === 'on';
+                params.min_step_pct = parseFloat(document.getElementById('bt-grid-minstep').value) || 0.3;
+                params.max_step_pct = parseFloat(document.getElementById('bt-grid-maxstep').value) || 3.0;
+            }
+
+            document.getElementById('bt-run-btn').disabled = true;
+            document.getElementById('bt-progress-container').classList.remove('d-none');
+            document.getElementById('bt-summary').classList.add('d-none');
+            document.getElementById('bt-results').classList.add('d-none');
+            document.getElementById('bt-progress-bar').style.width = '0%';
+            document.getElementById('bt-progress-text').textContent = 'Starting...';
+
+            try {
+                const res = await fetch('/api/backtest/run', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ pair, strategy, timeframe: tf, start_date: startDate, end_date: endDate, capital, params })
+                });
+                const d = await res.json();
+                if (!d.success) { alert(d.error); document.getElementById('bt-run-btn').disabled = false; document.getElementById('bt-progress-container').classList.add('d-none'); return; }
+                btJobId = d.data.job_id;
+                localStorage.setItem('bt_job_id', btJobId);
+                btPollTimer = setInterval(pollBtStatus, 1500);
+            } catch(e) {
+                alert('Failed to start backtest: ' + e);
+                document.getElementById('bt-run-btn').disabled = false;
+                document.getElementById('bt-progress-container').classList.add('d-none');
+            }
+        }
+
+        async function pollBtStatus() {
+            if (!btJobId) return;
+            try {
+                const res = await fetch(`/api/backtest/status/${btJobId}`);
+                const d = await res.json();
+                if (!d.success) return;
+                const s = d.data;
+                document.getElementById('bt-progress-text').textContent = `${s.phase || s.status} ${s.progress}%`;
+                document.getElementById('bt-progress-bar').style.width = s.progress + '%';
+
+                if (s.status === 'complete') {
+                    clearInterval(btPollTimer);
+                    btPollTimer = null;
+                    document.getElementById('bt-run-btn').disabled = false;
+                    document.getElementById('bt-progress-container').classList.add('d-none');
+                    loadBtResults(btJobId);
+                } else if (s.status === 'error') {
+                    clearInterval(btPollTimer);
+                    btPollTimer = null;
+                    document.getElementById('bt-run-btn').disabled = false;
+                    document.getElementById('bt-progress-text').textContent = 'Error: ' + (s.error || 'Unknown');
+                    document.getElementById('bt-progress-bar').style.width = '100%';
+                    document.getElementById('bt-progress-bar').classList.add('bg-danger');
+                    document.getElementById('bt-progress-bar').classList.remove('bg-info');
+                }
+            } catch(e) { console.error('Poll error:', e); }
+        }
+
+        async function loadBtResults(jobId) {
+            try {
+                const res = await fetch(`/api/backtest/result/${jobId}`);
+                const d = await res.json();
+                if (!d.success) return;
+                const r = d.data;
+                renderBtSummary(r.summary);
+                renderBtEquity(r.equity_curve);
+                renderBtTradeLog(r.trades);
+                document.getElementById('bt-summary').classList.remove('d-none');
+                document.getElementById('bt-results').classList.remove('d-none');
+            } catch(e) { console.error('Result load error:', e); }
+        }
+
+        function renderBtSummary(s) {
+            const retColor = s.total_return_usd >= 0 ? '#00d578' : '#ff4b5c';
+            document.getElementById('bt-stat-return').innerHTML = `<span style="color:${retColor}">$${s.total_return_usd.toFixed(2)} (${s.total_return_pct}%)</span>`;
+            document.getElementById('bt-stat-winrate').textContent = s.win_rate + '%';
+            document.getElementById('bt-stat-dd').textContent = '-' + s.max_drawdown_pct + '%';
+            document.getElementById('bt-stat-sharpe').textContent = s.sharpe_ratio;
+            document.getElementById('bt-stat-trades').textContent = (s.cycle_trades || s.total_trades) + ' / ' + (s.risk_events || 0);
+            document.getElementById('bt-stat-pf').textContent = (s.cycle_win_rate || s.win_rate) + '%';
+            const bhColor = s.buy_hold_return_pct >= 0 ? '#00d578' : '#ff4b5c';
+            document.getElementById('bt-stat-bh').innerHTML = `<span style="color:${bhColor}">${s.buy_hold_return_pct}%</span>`;
+            document.getElementById('bt-stat-fees').textContent = '$' + (s.capital_saved_by_cuts || s.total_fees || 0).toFixed(2);
+        }
+
+        function renderBtEquity(equity) {
+            const container = document.getElementById('bt-equity-chart');
+            container.innerHTML = '';
+            if (btChart) { btChart.remove(); btChart = null; }
+            if (!equity || equity.length === 0) return;
+            btChart = LightweightCharts.createChart(container, {
+                layout: { background: { color: '#0b0c10' }, textColor: '#c5c6c7' },
+                grid: { vertLines: { color: '#1a1c23' }, horzLines: { color: '#1a1c23' } },
+                rightPriceScale: { borderColor: '#333' },
+                timeScale: { borderColor: '#333', timeVisible: true },
+                crosshair: { mode: LightweightCharts.CrosshairMode.Magnet },
+                width: container.clientWidth,
+                height: 340,
+            });
+            const series = btChart.addSeries(LightweightCharts.AreaSeries, {
+                topColor: 'rgba(102, 252, 241, 0.4)',
+                bottomColor: 'rgba(102, 252, 241, 0.0)',
+                lineColor: '#66fcf1',
+                lineWidth: 2,
+            });
+            series.setData(equity.map(e => ({ time: e.time, value: e.equity })));
+            btChart.timeScale().fitContent();
+            new ResizeObserver(() => { if (btChart) btChart.applyOptions({ width: container.clientWidth }); }).observe(container);
+        }
+
+        // Store trades globally for chart clicks
+        let _btTrades = [];
+        let _btTradeChart = null;
+
+        function renderBtTradeLog(trades) {
+            _btTrades = trades || [];
+            const tbody = document.getElementById('bt-trade-log');
+            if (!trades || trades.length === 0) { tbody.innerHTML = '<tr><td colspan="8" class="text-muted text-center">No trades</td></tr>'; return; }
+            tbody.innerHTML = trades.map((t, i) => {
+                const pnlColor = t.pnl >= 0 ? '#00d578' : '#ff4b5c';
+                const entryDate = new Date(t.entry_time * 1000).toLocaleString('en-US', {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'});
+                const exitDate = new Date(t.exit_time * 1000).toLocaleString('en-US', {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'});
+                return `<tr>
+                    <td>${i+1}</td>
+                    <td>${entryDate}</td>
+                    <td>${exitDate}</td>
+                    <td>$${t.entry_price.toFixed(2)}</td>
+                    <td>$${t.exit_price.toFixed(2)}</td>
+                    <td style="color:${pnlColor}">$${t.pnl.toFixed(2)}</td>
+                    <td><span class="badge bg-secondary" style="font-size:0.5rem;">${t.exit_reason}</span> <span class="badge bg-dark border border-secondary" style="font-size:0.5rem;">${t.signal_type}</span></td>
+                    <td><a href="#" onclick="showTradeChart(${i});return false;" title="View chart" style="color:#66fcf1;text-decoration:none;"><i class="bi bi-graph-up" style="font-size:0.75rem;"></i></a></td>
+                </tr>`;
+            }).join('');
+        }
+
+        async function showTradeChart(tradeIdx) {
+            const t = _btTrades[tradeIdx];
+            if (!t) return;
+
+            const pair = document.getElementById('bt-pair').value;
+            const tfVal = document.getElementById('bt-timeframe').value;
+            const tfMin = parseInt(tfVal.replace(/[mM]/g, '')) || 5;
+
+            // Always show ~500 candles, centered on the trade midpoint
+            const barSec = tfMin * 60;
+            const tradeMid = Math.floor((t.entry_time + t.exit_time) / 2);
+            const startTs = tradeMid - (250 * barSec);
+            const endTs = tradeMid + (250 * barSec);
+
+            const wrap = document.getElementById('bt-trade-chart-wrap');
+            const container = document.getElementById('bt-trade-chart');
+            const title = document.getElementById('bt-trade-chart-title');
+
+            const pnlStr = t.pnl >= 0 ? `+$${t.pnl.toFixed(2)}` : `-$${Math.abs(t.pnl).toFixed(2)}`;
+            title.textContent = `TRADE #${tradeIdx + 1}: ${t.side || 'LONG'} ${pair} (${pnlStr}) — ${t.exit_reason}`;
+
+            wrap.classList.remove('d-none');
+            container.innerHTML = '<div class="text-center text-muted py-5">Loading candles...</div>';
+
+            try {
+                const res = await fetch(`/api/backtest/candles?pair=${pair}&tf=${tfMin}&start=${startTs}&end=${endTs}`);
+                const d = await res.json();
+                if (!d.success || !d.data.length) {
+                    container.innerHTML = '<div class="text-center text-muted py-5">No candle data available for this range</div>';
+                    return;
+                }
+
+                container.innerHTML = '';
+                if (_btTradeChart) { _btTradeChart.remove(); _btTradeChart = null; }
+
+                _btTradeChart = LightweightCharts.createChart(container, {
+                    width: container.clientWidth,
+                    height: 400,
+                    layout: { background: { type: 'solid', color: '#1f2833' }, textColor: '#adb5bd', fontFamily: 'sans-serif', fontSize: 11 },
+                    grid: { vertLines: { color: '#45a29e22' }, horzLines: { color: '#45a29e22' } },
+                    rightPriceScale: { borderColor: '#45a29e44' },
+                    timeScale: { borderColor: '#45a29e44', timeVisible: true, secondsVisible: false },
+                    crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+                });
+
+                const candleSeries = _btTradeChart.addSeries(LightweightCharts.CandlestickSeries, {
+                    upColor: '#00d578', downColor: '#ff4b5c',
+                    borderUpColor: '#00d578', borderDownColor: '#ff4b5c',
+                    wickUpColor: '#00d578', wickDownColor: '#ff4b5c',
+                });
+                candleSeries.setData(d.data);
+
+                const volSeries = _btTradeChart.addSeries(LightweightCharts.HistogramSeries, {
+                    priceFormat: { type: 'volume' }, priceScaleId: '',
+                });
+                volSeries.priceScale().applyOptions({ scaleMargins: { top: 0.85, bottom: 0 } });
+                volSeries.setData(d.data.map(c => ({
+                    time: c.time,
+                    value: c.volume,
+                    color: c.close >= c.open ? 'rgba(0,213,120,0.15)' : 'rgba(255,75,92,0.15)'
+                })));
+
+                // Entry + exit markers
+                LightweightCharts.createSeriesMarkers(candleSeries, [
+                    {
+                        time: t.entry_time,
+                        position: (t.side || 'LONG') === 'LONG' ? 'belowBar' : 'aboveBar',
+                        color: '#66fcf1',
+                        shape: (t.side || 'LONG') === 'LONG' ? 'arrowUp' : 'arrowDown',
+                        text: 'ENTRY $' + t.entry_price.toFixed(2),
+                    },
+                    {
+                        time: t.exit_time,
+                        position: (t.side || 'LONG') === 'LONG' ? 'aboveBar' : 'belowBar',
+                        color: t.pnl >= 0 ? '#00d578' : '#ff4b5c',
+                        shape: (t.side || 'LONG') === 'LONG' ? 'arrowDown' : 'arrowUp',
+                        text: 'EXIT $' + t.exit_price.toFixed(2),
+                    }
+                ]);
+
+                // Entry/exit price lines
+                candleSeries.createPriceLine({ price: t.entry_price, color: '#66fcf1', lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: 'Entry' });
+                candleSeries.createPriceLine({ price: t.exit_price, color: t.pnl >= 0 ? '#00d578' : '#ff4b5c', lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: 'Exit' });
+
+                _btTradeChart.timeScale().fitContent();
+                new ResizeObserver(() => { if (_btTradeChart) _btTradeChart.applyOptions({ width: container.clientWidth }); }).observe(container);
+
+                // Scroll to chart
+                wrap.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+            } catch(e) {
+                container.innerHTML = `<div class="text-center text-danger py-5">Error: ${e.message}</div>`;
+            }
+        }
+
+        // Reset progress bar color on new run
+        document.getElementById('bt-progress-bar').classList.remove('bg-danger');
+        document.getElementById('bt-progress-bar').classList.add('bg-info');
+
     </script>
 </body>
 </html>

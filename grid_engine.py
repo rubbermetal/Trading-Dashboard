@@ -268,7 +268,13 @@ def grid_check_fills(bot_id, bot, pair):
         log.info(f"[{pair}] Fill detected: {grid['side']} at {grid['price']:.2f}")
 
         if grid['side'] == 'BUY':
-            new_price = grid['price'] + step_size
+            # Dynamic mode: use regime-aware sell target
+            if bot.get('settings', {}).get('dynamic', False):
+                regime = risk.get('regime', 'WIDE_RANGE')
+                velocity = risk.get('recovery_velocity', 0)
+                new_price = compute_dynamic_sell_price(grid['price'], step_size, regime, velocity)
+            else:
+                new_price = grid['price'] + step_size
             # SPACING GUARD: nudge sell price up if too close to existing order
             safe_price = find_safe_price(new_price, active_grids, min_gap, direction='up')
             if safe_price is None:
@@ -637,7 +643,11 @@ def init_risk_state(settings, buy_levels, step_size, chunk_usd, cur_px):
 def activate_trail(bot, fill_price, quantity, level_index, total_levels, step_size, sell_grid=None):
     risk = bot['settings'].setdefault('risk', {})
     trails = risk.setdefault('per_fill_trails', [])
-    base_dist = get_trail_distance(level_index, total_levels, step_size)
+    # Dynamic mode: use ATR-based trail instead of tiered step-based
+    if bot.get('settings', {}).get('dynamic', False) and risk.get('dyn_trail', 0) > 0:
+        base_dist = risk['dyn_trail']
+    else:
+        base_dist = get_trail_distance(level_index, total_levels, step_size)
 
     trail_entry = {
         "fill_id": str(uuid.uuid4())[:8],
@@ -681,11 +691,11 @@ def adjust_trail_multipliers(bot, halt_mode, depth):
         m = 1.0
         if halt_mode == 'FAVORABLE': m *= 1.5
         elif halt_mode == 'ADVERSE': m *= 0.75
-        
+
         if depth >= 6: m *= 0.75
         elif depth >= 4:
             if t.get('level_index', 0) < total_levels * 0.3: m *= 0.75
-            
+
         if velocity >= 2.0 and t.get('level_index', 0) < total_levels * 0.4: m *= 1.25
         t['trail_multiplier'] = round(m, 3)
         t['effective_trail'] = round(t['base_trail_distance'] * m, 6)
@@ -989,6 +999,398 @@ def _paper_grid_execute(bot_id, bot, pair):
         save_bots()
 
 
+# ==========================================
+# GRID V2: DYNAMIC DECISION TREE ENGINE
+# ==========================================
+
+def compute_regime(adx, bb_width, bb_width_avg, direction):
+    """Classify market regime from continuous indicators."""
+    if adx >= 30:
+        return 'STRONG_TREND'
+    elif adx >= 20 and direction == 'FALLING':
+        return 'MILD_DOWNTREND'
+    elif adx >= 20 and direction == 'RISING':
+        return 'MILD_UPTREND'
+    elif bb_width_avg > 0 and bb_width < bb_width_avg:
+        return 'TIGHT_RANGE'
+    else:
+        return 'WIDE_RANGE'
+
+
+def compute_dynamic_step(atr, adx, bb_width, bb_width_avg, direction, price, min_step_pct, max_step_pct, depth=0):
+    """ATR-based step with continuous scaling from ADX and BB width.
+    V3: depth-aware exponential widening in FALLING markets (anti-waterfall)."""
+    if atr <= 0 or price <= 0:
+        return price * min_step_pct / 100.0
+
+    # Trend factor: scales 0.5 → 1.5 as ADX goes 10 → 40
+    trend_factor = max(0.5, min(2.0, 0.5 + (adx / 40.0)))
+
+    # Volatility factor: BB_width relative to its own average
+    vol_ratio = (bb_width / bb_width_avg) if bb_width_avg > 0 else 1.0
+    vol_factor = max(0.5, min(2.0, vol_ratio))
+
+    # Combined: weighted blend
+    step_mult = (trend_factor * 0.6) + (vol_factor * 0.4)
+
+    # Direction bias
+    if direction == 'FALLING':
+        step_mult += 0.25
+    elif direction == 'RISING':
+        step_mult -= 0.1
+
+    step_mult = max(0.3, min(2.5, step_mult))
+
+    step = atr * step_mult
+
+    # V3: Anti-waterfall — widen subsequent buy spacing in falling markets
+    if direction == 'FALLING' and depth > 0:
+        step *= (1.2 ** depth)
+
+    floor = price * min_step_pct / 100.0
+    ceiling = price * max_step_pct / 100.0
+    return max(floor, min(ceiling, step))
+
+
+def compute_dynamic_trail(atr, adx, direction, velocity):
+    """ATR-based trail distance with continuous scaling."""
+    if atr <= 0:
+        return 0
+
+    # Base: inverse of trend strength
+    trail_m = max(0.4, min(1.0, 1.0 - (adx / 80.0)))
+
+    # Direction adjustment
+    if direction == 'RISING':
+        trail_m += 0.3
+    elif direction == 'FALLING':
+        trail_m -= 0.15
+
+    # Velocity adjustment
+    if velocity >= 2.0:
+        trail_m += 0.2
+
+    trail_m = max(0.4, min(1.5, trail_m))
+    return atr * trail_m
+
+
+def compute_kelly_size(adx, direction, vol_ratio, step, trail, allocated_usd, min_order_usd, depth=0):
+    """Kelly position sizing with V3 cluster-risk adjustment.
+    Base fraction reduced from 0.25 to 0.10. Depth penalty: 1/(1+depth*0.5).
+    Result: first dip heavy, tenth dip nibble."""
+    if trail <= 0 or step <= 0 or allocated_usd <= 0:
+        return min_order_usd
+
+    # Continuous win probability
+    win_prob = 0.80 - (adx / 100.0)
+    if direction == 'RISING':
+        win_prob += 0.05
+    elif direction == 'FALLING':
+        win_prob -= 0.10
+    if vol_ratio < 0.8:
+        win_prob += 0.05
+    win_prob = max(0.20, min(0.80, win_prob))
+
+    # Kelly fraction: f* = (bp - q) / b where b = reward/risk, p = win_prob, q = 1-p
+    b = step / trail
+    if b <= 0:
+        return min_order_usd
+    kelly = (b * win_prob - (1 - win_prob)) / b
+    kelly = max(0.0, kelly)
+
+    # V3: cluster-risk penalty — each open fill reduces sizing
+    cluster_penalty = 1.0 / (1.0 + (depth * 0.5))
+
+    # V3: base fraction dropped from 0.25 to 0.10 (less aggressive)
+    fraction = kelly * 0.10 * cluster_penalty
+    order_usd = allocated_usd * fraction
+    return max(min_order_usd, min(order_usd, allocated_usd * 0.10))
+
+
+def compute_grid_crisis_score(depth, unrealized_loss_pct, regime, direction, velocity, loss_history=None):
+    """5-factor crisis scoring for grid (0-120). Higher = more urgent to cut.
+    V3 adds Factor 5: Velocity of Loss (catches flash crashes the 5-min window misses)."""
+    # Factor 1: Inventory depth (max 30)
+    if depth >= 8: f1 = 30
+    elif depth >= 6: f1 = 25
+    elif depth >= 4: f1 = 15
+    elif depth >= 2: f1 = 5
+    else: f1 = 0
+
+    # Factor 2: Unrealized loss % (max 30)
+    if unrealized_loss_pct >= 5.0: f2 = 30
+    elif unrealized_loss_pct >= 3.0: f2 = 20
+    elif unrealized_loss_pct >= 1.0: f2 = 10
+    else: f2 = 0
+
+    # Factor 3: Regime hostility (max 25)
+    if regime == 'STRONG_TREND' and direction == 'FALLING': f3 = 25
+    elif regime == 'MILD_DOWNTREND': f3 = 15
+    elif regime == 'STRONG_TREND' and direction == 'RISING': f3 = 10
+    elif regime == 'WIDE_RANGE': f3 = 5
+    else: f3 = 0  # TIGHT_RANGE
+
+    # Factor 4: Recovery probability (max 15)
+    if velocity == 0 and depth >= 4: f4 = 15
+    elif velocity < 1.0 and depth >= 3: f4 = 10
+    elif velocity < 2.0: f4 = 5
+    else: f4 = 0
+
+    # V3 Factor 5: Velocity of Loss (max 20) — catches flash crashes
+    f5 = 0
+    if loss_history and len(loss_history) >= 2:
+        # Find oldest entry within last 60 seconds
+        now_ts = loss_history[-1][0]
+        recent = [(ts, lp) for ts, lp in loss_history if now_ts - ts <= 60]
+        if len(recent) >= 2:
+            delta = recent[-1][1] - recent[0][1]
+            if delta >= 2.0:
+                f5 = 20
+
+    return f1 + f2 + f3 + f4 + f5
+
+
+def compute_dynamic_sell_price(fill_price, step, regime, velocity):
+    """Dynamic profit target based on regime."""
+    if regime == 'TIGHT_RANGE' and velocity >= 1.0:
+        return fill_price + (1.5 * step)
+    elif regime == 'MILD_UPTREND':
+        return fill_price + (2.0 * step)
+    else:
+        return fill_price + step
+
+
+def compute_bb_indicators(df):
+    """Compute Bollinger Band width and its SMA(50) average."""
+    bb = ta.bbands(df['close'], length=20, std=2)
+    if bb is None:
+        return 0, 0, 0, 0
+    upper_col = [c for c in bb.columns if 'BBU' in c]
+    lower_col = [c for c in bb.columns if 'BBL' in c]
+    if not upper_col or not lower_col:
+        return 0, 0, 0, 0
+    bb_upper = float(bb[upper_col[0]].iloc[-1]) if not pd.isna(bb[upper_col[0]].iloc[-1]) else 0
+    bb_lower = float(bb[lower_col[0]].iloc[-1]) if not pd.isna(bb[lower_col[0]].iloc[-1]) else 0
+    bb_width = bb_upper - bb_lower
+
+    width_series = bb[upper_col[0]] - bb[lower_col[0]]
+    bb_width_avg = float(ta.sma(width_series, 50).iloc[-1]) if len(width_series) >= 50 and not pd.isna(ta.sma(width_series, 50).iloc[-1]) else bb_width
+
+    return bb_upper, bb_lower, bb_width, bb_width_avg
+
+
+# ==========================================
+# GRID V3: GTFO + STICKY STATE + RUNNERS
+# ==========================================
+
+def compute_gtfo_target(weighted_avg, score):
+    """Gravity-adjusted GTFO target. Score 50 = +0.2% buffer; score 79 = 0% buffer (true breakeven)."""
+    gravity_mult = max(0, 1 - (score - 50) / 30)
+    profit_buffer = 0.002 * gravity_mult
+    return weighted_avg * (1 + profit_buffer)
+
+
+def compute_quarantine_minutes(current_atr, atr_sma_50):
+    """Dynamic quarantine: 60 minutes scaled by ATR ratio, clamped [15, 240]."""
+    if atr_sma_50 <= 0:
+        return 60
+    ratio = current_atr / atr_sma_50
+    minutes = 60 * ratio
+    return max(15, min(240, minutes))
+
+
+def compute_weighted_avg(trails):
+    """Compute weighted average entry price across all per-fill trails."""
+    if not trails:
+        return 0
+    total_qty = sum(t.get('quantity', 0) for t in trails)
+    if total_qty == 0:
+        return 0
+    total_cost = sum(t.get('quantity', 0) * t.get('fill_price', 0) for t in trails)
+    return total_cost / total_qty
+
+
+def enter_gtfo_mode(bot, pair, current_px, base_inc, quote_inc, mult, deriv_flag):
+    """Hot-swap order book to GTFO state: cancel all, compute weighted avg, place single exit limit."""
+    settings = bot.get('settings', {})
+    risk = settings.setdefault('risk', {})
+    trails = risk.get('per_fill_trails', [])
+    if not trails:
+        return False
+
+    # 1. Cancel all open orders (atomic)
+    try:
+        cancel_all_pair_orders(pair)
+        time.sleep(0.5)
+    except Exception as e:
+        log.error(f"[{pair}] GTFO cancel failed: {e}")
+    settings['active_grids'] = []
+
+    # 2. Compute weighted average from inventory
+    avg_price = compute_weighted_avg(trails)
+    if avg_price <= 0:
+        log.warning(f"[{pair}] GTFO abort: weighted avg = 0")
+        return False
+
+    # 3. Compute gravity-adjusted target
+    score = risk.get('crisis_score', 50)
+    target = compute_gtfo_target(avg_price, score)
+
+    # 4. Round target DOWN to quote increment (safe-side)
+    quote_inc_f = float(quote_inc) if quote_inc else 0.01
+    target = (int(target / quote_inc_f)) * quote_inc_f
+
+    # 5. Place ONE limit sell for full inventory
+    total_qty = sum(t.get('quantity', 0) for t in trails)
+    str_qty = snap_to_increment(total_qty, base_inc)
+
+    try:
+        oid = str(uuid.uuid4())
+        if current_px >= target:
+            # Already past target — execute market sell immediately
+            client.market_order_sell(client_order_id=oid, product_id=pair, base_size=str_qty)
+            log.info(f"[{pair}] GTFO: market exit at {current_px:.4f} (target {target:.4f} already breached)")
+        else:
+            # Place post-only limit
+            client.limit_order_gtc_sell(
+                client_order_id=oid, product_id=pair,
+                base_size=str_qty, limit_price=str(target), post_only=True
+            )
+            log.info(f"[{pair}] GTFO ENTERED: limit sell {str_qty} @ {target:.4f} (avg={avg_price:.4f}, score={score})")
+
+        risk['is_gtfo_active'] = True
+        risk['gtfo_target_price'] = target
+        risk['gtfo_order_id'] = oid
+        risk['gtfo_high_score_streak'] = 0
+        save_bots()
+        return True
+    except Exception as e:
+        log.error(f"[{pair}] GTFO order placement failed: {e}")
+        return False
+
+
+def run_gtfo_cycle(bot, pair, current_px, current_atr, score, base_inc, quote_inc, mult, deriv_flag):
+    """Per-cycle GTFO management: resync target, check fill, time-decay nibble."""
+    settings = bot.get('settings', {})
+    risk = settings.setdefault('risk', {})
+    trails = risk.get('per_fill_trails', [])
+
+    # Check if inventory is empty (order filled externally or via WS)
+    if not trails or bot.get('asset_held', 0) <= 0:
+        # Exit complete — start quarantine
+        risk['is_gtfo_active'] = False
+        risk['gtfo_target_price'] = 0
+        risk.pop('gtfo_order_id', None)
+        risk['gtfo_high_score_streak'] = 0
+
+        atr_sma_50 = risk.get('atr_sma_50', current_atr)
+        quarantine_min = compute_quarantine_minutes(current_atr, atr_sma_50)
+        risk['quarantine_until'] = int(time.time()) + int(quarantine_min * 60)
+        log.info(f"[{pair}] GTFO COMPLETE. Quarantine: {quarantine_min:.0f} min")
+        save_bots()
+        return
+
+    # Recompute target with current score
+    avg_price = compute_weighted_avg(trails)
+    new_target = compute_gtfo_target(avg_price, score)
+    quote_inc_f = float(quote_inc) if quote_inc else 0.01
+    new_target = (int(new_target / quote_inc_f)) * quote_inc_f
+    old_target = risk.get('gtfo_target_price', 0)
+
+    # Resync if drift > 0.05%
+    if old_target > 0 and abs(new_target - old_target) / old_target > 0.0005:
+        try:
+            cancel_all_pair_orders(pair)
+            time.sleep(0.3)
+            total_qty = sum(t.get('quantity', 0) for t in trails)
+            str_qty = snap_to_increment(total_qty, base_inc)
+            oid = str(uuid.uuid4())
+            if current_px >= new_target:
+                client.market_order_sell(client_order_id=oid, product_id=pair, base_size=str_qty)
+                log.info(f"[{pair}] GTFO market exit at {current_px:.4f} (resynced target breached)")
+            else:
+                client.limit_order_gtc_sell(
+                    client_order_id=oid, product_id=pair,
+                    base_size=str_qty, limit_price=str(new_target), post_only=True
+                )
+                log.info(f"[{pair}] GTFO RESYNC: target {old_target:.4f} -> {new_target:.4f} (score={score})")
+            risk['gtfo_target_price'] = new_target
+            risk['gtfo_order_id'] = oid
+            save_bots()
+        except Exception as e:
+            log.error(f"[{pair}] GTFO resync failed: {e}")
+
+    # Time-decay nibble: if score > 70 for 4+ cycles, sell 10% at market
+    if score > 70:
+        risk['gtfo_high_score_streak'] = risk.get('gtfo_high_score_streak', 0) + 1
+        if risk['gtfo_high_score_streak'] >= 4:
+            try:
+                total_qty = sum(t.get('quantity', 0) for t in trails)
+                nibble_qty = total_qty * 0.10
+                str_qty = snap_to_increment(nibble_qty, base_inc)
+                if float(str_qty) > 0:
+                    cancel_all_pair_orders(pair)
+                    time.sleep(0.3)
+                    oid = str(uuid.uuid4())
+                    client.market_order_sell(client_order_id=oid, product_id=pair, base_size=str_qty)
+                    # Reduce trails proportionally
+                    for t in trails:
+                        t['quantity'] *= 0.90
+                    bot['asset_held'] = max(0, bot.get('asset_held', 0) - nibble_qty)
+                    bot['current_usd'] += current_px * nibble_qty * 0.995
+                    record_trade(bot, compute_weighted_avg(trails), current_px, nibble_qty, 'LONG', 'NIBBLE', pair, mult)
+                    risk['gtfo_high_score_streak'] = 0
+                    log.warning(f"[{pair}] TIME-DECAY NIBBLE: sold 10% ({nibble_qty:.6f}) at {current_px:.4f}")
+                    save_bots()
+            except Exception as e:
+                log.error(f"[{pair}] Nibble failed: {e}")
+    else:
+        risk['gtfo_high_score_streak'] = 0
+
+
+def convert_to_runners(bot, pair, current_atr, top_pct=0.25):
+    """Synthetic Runner pivot: convert top 25% of inventory to wide-trail runners during STRONG_TREND+RISING."""
+    settings = bot.get('settings', {})
+    risk = settings.setdefault('risk', {})
+    trails = risk.get('per_fill_trails', [])
+    if not trails or current_atr <= 0:
+        return
+
+    # Sort by fill_price descending
+    trails_sorted = sorted(trails, key=lambda t: t['fill_price'], reverse=True)
+    n_runners = max(1, int(len(trails_sorted) * top_pct))
+
+    runner_trail = 2.5 * current_atr
+    converted = 0
+    for t in trails_sorted[:n_runners]:
+        if t.get('is_runner'):
+            continue  # already converted
+        # Cancel its grid sell order if any
+        sell_oid = t.get('sell_oid', '')
+        if sell_oid:
+            try:
+                # Find and cancel matching grid order
+                for g in list(settings.get('active_grids', [])):
+                    if g.get('oid') == sell_oid and g.get('side') == 'SELL':
+                        cancel_order_safe(g)
+                        try: settings['active_grids'].remove(g)
+                        except ValueError: pass
+                        break
+            except Exception as e:
+                log.warning(f"[{pair}] Runner cancel failed: {e}")
+        t['sell_oid'] = ''
+        t['sell_cb_oid'] = ''
+        t['effective_trail'] = round(runner_trail, 6)
+        t['base_trail_distance'] = round(runner_trail, 6)
+        t['trail_multiplier'] = 1.0
+        t['is_runner'] = True
+        converted += 1
+
+    if converted:
+        log.info(f"[{pair}] SYNTHETIC RUNNER: converted top {converted} fills to {runner_trail:.4f} ATR-trails")
+        save_bots()
+
+
 def execute_grid_bot(bot_id, bot, pair):
     if bot.get('paper'):
         _paper_grid_execute(bot_id, bot, pair)
@@ -1027,6 +1429,129 @@ def execute_grid_bot(bot_id, bot, pair):
     except (ValueError, TypeError, IndexError) as e:
         log.debug(f"[{pair}] ADX/ATR computation failed: {e}")
         curr_adx, curr_atr = 0.0, 0.0
+
+    # --- Grid v2/v3 dynamic calculations (when dynamic: True) ---
+    is_dynamic = settings.get('dynamic', False)
+    suspend_buys = False  # V3: set when GTFO active, crisis ≥50, or waterfall
+
+    if is_dynamic:
+        bb_upper, bb_lower, bb_width, bb_width_avg = compute_bb_indicators(df)
+        regime = compute_regime(curr_adx, bb_width, bb_width_avg, direction)
+        vol_ratio = (bb_width / bb_width_avg) if bb_width_avg > 0 else 1.0
+        velocity = risk.get('recovery_velocity', 0)
+        depth = len(risk.get('per_fill_trails', []))
+
+        # V3: Compute ATR SMA(50) for dynamic quarantine
+        try:
+            atr_series_full = ta.atr(df['high'], df['low'], df['close'], length=14)
+            atr_sma_50 = float(ta.sma(atr_series_full, 50).iloc[-1]) if len(atr_series_full) >= 50 and not pd.isna(ta.sma(atr_series_full, 50).iloc[-1]) else curr_atr
+        except Exception:
+            atr_sma_50 = curr_atr
+        risk['atr_sma_50'] = atr_sma_50
+
+        # V3: Update loss_history (rolling 120s window) for Velocity-of-Loss
+        unrealized_loss = sum(max(0, (t['fill_price'] - cur_px) * t['quantity']) for t in risk.get('per_fill_trails', []))
+        allocated = bot.get('allocated_usd', 1)
+        unrealized_loss_pct = (unrealized_loss / allocated * 100) if allocated > 0 else 0
+        now_ts = int(time.time())
+        loss_history = risk.get('loss_history', [])
+        loss_history.append((now_ts, unrealized_loss_pct))
+        loss_history = [(t, lp) for t, lp in loss_history if now_ts - t <= 120]
+        risk['loss_history'] = loss_history
+
+        # Crisis scoring (now 5-factor with velocity-of-loss)
+        crisis_score = compute_grid_crisis_score(depth, unrealized_loss_pct, regime, direction, velocity, loss_history)
+
+        min_step_pct = settings.get('min_step_pct', 0.3)
+        max_step_pct = settings.get('max_step_pct', 3.0)
+
+        # V3: depth-aware step (exponential widening on FALLING)
+        dyn_step = compute_dynamic_step(curr_atr, curr_adx, bb_width, bb_width_avg, direction, cur_px,
+                                        min_step_pct, max_step_pct, depth=depth)
+        dyn_trail = compute_dynamic_trail(curr_atr, curr_adx, direction, velocity)
+
+        # V3: depth-aware Kelly (cluster-risk penalty)
+        dyn_order_usd = compute_kelly_size(curr_adx, direction, vol_ratio, dyn_step, dyn_trail,
+                                           bot.get('allocated_usd', 0), settings.get('min_order_usd', 5),
+                                           depth=depth)
+
+        # Store in risk dict for visibility
+        risk['regime'] = regime
+        risk['dyn_step'] = round(dyn_step, 2)
+        risk['dyn_trail'] = round(dyn_trail, 2)
+        risk['dyn_order_usd'] = round(dyn_order_usd, 2)
+        risk['crisis_score'] = crisis_score
+        risk['bb_upper'] = round(bb_upper, 2)
+        risk['bb_lower'] = round(bb_lower, 2)
+        risk['kelly_win_prob'] = round(max(0.20, min(0.80, 0.80 - (curr_adx / 100.0))), 3)
+
+        # Override step_size for all downstream code
+        settings['step_size'] = dyn_step
+
+        deriv_flag_now = is_derivative(pair)
+        mult_now = get_contract_multiplier(pair)
+
+        # ── V3 STICKY STATE GUARD: GTFO mode ──
+        if risk.get('is_gtfo_active'):
+            run_gtfo_cycle(bot, pair, cur_px, curr_atr, crisis_score, base_inc, quote_inc, mult_now, deriv_flag_now)
+            return  # Skip all deploy/redeploy logic while exiting
+
+        # ── V3 QUARANTINE CHECK: don't redeploy until time elapsed AND ADX < 20 ──
+        if risk.get('quarantine_until', 0) > now_ts and curr_adx >= 20:
+            log.debug(f"[{pair}] Quarantined until {risk['quarantine_until']} (ADX={curr_adx:.1f} >= 20)")
+            return
+
+        # ── V3 CRISIS TRIGGER: enter GTFO at score ≥ 50 ──
+        if crisis_score >= 80 and risk.get('per_fill_trails'):
+            # Hard liquidation: 75% emergency dump (existing behavior)
+            trails_to_exit = sorted(risk['per_fill_trails'], key=lambda t: t['fill_price'])
+            n_exit = max(1, int(len(trails_to_exit) * 0.75))
+            for t in trails_to_exit[:n_exit]:
+                try:
+                    oid = str(uuid.uuid4())
+                    str_qty = snap_to_increment(t['quantity'], base_inc)
+                    client.market_order_sell(client_order_id=oid, product_id=pair, base_size=str_qty)
+                    record_trade(bot, t['fill_price'], cur_px, t['quantity'], 'LONG', 'CRISIS_CUT', pair, mult_now)
+                    bot['asset_held'] = max(0, bot.get('asset_held', 0) - t['quantity'])
+                    bot['current_usd'] += cur_px * t['quantity'] * 0.995
+                except Exception as e:
+                    log.error(f"[{pair}] Crisis exit failed: {e}")
+            risk['per_fill_trails'] = trails_to_exit[n_exit:]
+            risk['depth_score'] = len(risk['per_fill_trails'])
+            log.warning(f"[{pair}] CRISIS SCORE {crisis_score}: Hard liquidation, exited {n_exit} fills")
+            save_bots()
+            suspend_buys = True
+        elif crisis_score >= 50 and risk.get('per_fill_trails'):
+            # V3: Enter Whole-Stack GTFO mode
+            entered = enter_gtfo_mode(bot, pair, cur_px, base_inc, quote_inc, mult_now, deriv_flag_now)
+            if entered:
+                return
+            suspend_buys = True
+        elif crisis_score >= 40:
+            # Cancel bottom 50% buys (lighter touch)
+            buy_grids = sorted([g for g in settings.get('active_grids', []) if g.get('side') == 'BUY'], key=lambda g: g['price'])
+            n_cancel = len(buy_grids) // 2
+            for g in buy_grids[:n_cancel]:
+                risk.setdefault('cancelled_buy_levels', []).append(g['price'])
+                settings['active_grids'].remove(g)
+            suspend_buys = True
+
+        # ── V3 WATERFALL CLAUSE: zero-sizing during volatility expansion ──
+        if curr_adx > 35 and bb_lower > 0 and cur_px < bb_lower:
+            suspend_buys = True
+            log.debug(f"[{pair}] Waterfall clause: ADX={curr_adx:.1f} > 35, price below lower BB")
+
+        # ── V3 SYNTHETIC RUNNER: convert top inventory on STRONG_TREND+RISING transition ──
+        last_regime = risk.get('last_regime', '')
+        if regime == 'STRONG_TREND' and direction == 'RISING' and last_regime != 'STRONG_TREND_RISING':
+            convert_to_runners(bot, pair, curr_atr, top_pct=0.25)
+            risk['last_regime'] = 'STRONG_TREND_RISING'
+            suspend_buys = True
+        else:
+            risk['last_regime'] = regime + ('_RISING' if direction == 'RISING' else ('_FALLING' if direction == 'FALLING' else ''))
+
+        # Store suspend_buys flag for downstream deploy logic
+        risk['suspend_buys'] = suspend_buys
 
     active_grids = settings.get('active_grids', [])
     has_grids = active_grids and len(active_grids) > 0
@@ -1232,17 +1757,24 @@ def execute_grid_bot(bot_id, bot, pair):
     deriv_flag = is_derivative(pair)
     mult_val = get_contract_multiplier(pair)
 
-    if risk.get('cancelled_buy_levels'):
+    # V3: respect suspend_buys flag from dynamic block (GTFO/crisis/waterfall)
+    suspend_buys_v3 = risk.get('suspend_buys', False)
+    if risk.get('cancelled_buy_levels') and not suspend_buys_v3:
         evaluate_buy_redeployment(bot, pair, direction, cur_px, step_size, base_inc, quote_inc, deriv_flag, mult_val, chunk_usd)
 
     if has_grids:
-        if settings.get('follow', False):
+        if settings.get('follow', False) and not suspend_buys_v3:
             if depth > 3: log.warning(f"[{pair}] Follow BLOCKED: depth={depth} > 3")
             else: grid_follow(bot_id, bot, pair, cur_px, df)
         return
 
     if curr_adx >= 25:
         log.debug(f"[{pair}] DORMANT: ADX={curr_adx:.1f} >= 25. Waiting to deploy.")
+        return
+
+    # V3: don't deploy fresh grid while crisis/GTFO/waterfall conditions block buys
+    if suspend_buys_v3:
+        log.debug(f"[{pair}] Fresh deploy blocked: suspend_buys (crisis/waterfall/runner)")
         return
 
     orphans_killed = cancel_all_pair_orders(pair)
@@ -1262,6 +1794,19 @@ def execute_grid_bot(bot_id, bot, pair):
         return
 
     step = cur_px * step_pct
+
+    # Dynamic mode: override step, bounds, and chunk size
+    if is_dynamic:
+        step = risk.get('dyn_step', step)
+        # Bollinger-based grid range
+        dyn_bb_upper = risk.get('bb_upper', 0)
+        dyn_bb_lower = risk.get('bb_lower', 0)
+        if dyn_bb_upper > 0 and dyn_bb_lower > 0:
+            lower = dyn_bb_lower - (0.5 * curr_atr)
+            upper = dyn_bb_upper + (0.5 * curr_atr)
+            settings['lower_price'] = lower
+            settings['upper_price'] = upper
+
     new_grids = []
 
     settings['base_inc'] = str(base_inc)
@@ -1310,6 +1855,9 @@ def execute_grid_bot(bot_id, bot, pair):
         log.info(f"[{pair}] Recentered: {lower:.2f} - {upper:.2f}, {total_orders} levels")
 
     chunk_size_usd = bot['current_usd'] / total_orders
+    # Dynamic mode: Kelly-based order sizing
+    if is_dynamic and risk.get('dyn_order_usd', 0) > 0:
+        chunk_size_usd = risk['dyn_order_usd']
 
     max_loss = init_risk_state(settings, buy_levels, step, chunk_size_usd, cur_px)
     log.info(f"[{pair}] Max loss envelope: ${max_loss:.2f} ({max_loss/bot['allocated_usd']*100:.1f}% of capital)")

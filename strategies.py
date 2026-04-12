@@ -1,118 +1,189 @@
+import math
 import pandas as pd
 import pandas_ta as ta
 
-def calculate_quad_rotation(df):
+def calculate_quad_rotation(df, rotation_window=20):
     """
-    Version 1: Strict Pullback (2020 Bull Flag)
-    Requires Macro/Med strength, Price > 20 & 50 EMA, and a Trigger Stoch dip to 20.
+    DTRS Quad Rotation — Complete Unified Strategy
+    Day Trader Rock Star's Quad Rotation: 4 stochastics (9/3, 14/3, 40/4, 60/10).
+
+    Five entry tiers (highest confidence first):
+    1. Strict Pullback — EMA trend + Macro/Med strong + Trigger dip to EMA support
+    2. Super Signal — 3-stage capitulation divergence after quad flush
+    3. Holy Grail — quad oversold + RSI divergence confirmation
+    4. Sequential Rotation — fast->slow stochastic turn cascade
+    5. K/D Cross — trigger K/D crossover in oversold zone
+
+    Shared exit framework: counter-trend protection, sequential bear rotation,
+    K/D bear cross, plus ATR-based hard SL/TP set at entry.
+
+    Returns (signal, reason, meta) where meta contains confidence/ATR for entries.
     """
     if len(df) < 200:
-        return "HOLD", "Not enough data"
+        return "HOLD", "Not enough data", {}
 
-    # Trend Indicators
+    # ── Stochastics: extract both %K (index 0) and %D (index 1) ──
+    stoch_trig = ta.stoch(df['high'], df['low'], df['close'], k=9, d=3, smooth_k=3)
+    stoch_fast = ta.stoch(df['high'], df['low'], df['close'], k=14, d=3, smooth_k=3)
+    stoch_med = ta.stoch(df['high'], df['low'], df['close'], k=40, d=4, smooth_k=4)
+    stoch_macro = ta.stoch(df['high'], df['low'], df['close'], k=60, d=10, smooth_k=10)
+
+    try:
+        df['Stoch_Trig_K'] = stoch_trig.iloc[:, 0]
+        df['Stoch_Trig_D'] = stoch_trig.iloc[:, 1]
+        df['Stoch_Fast_K'] = stoch_fast.iloc[:, 0]
+        df['Stoch_Fast_D'] = stoch_fast.iloc[:, 1]
+        df['Stoch_Med_K'] = stoch_med.iloc[:, 0]
+        df['Stoch_Med_D'] = stoch_med.iloc[:, 1]
+        df['Stoch_Macro_K'] = stoch_macro.iloc[:, 0]
+        df['Stoch_Macro_D'] = stoch_macro.iloc[:, 1]
+    except Exception:
+        return "HOLD", "Math error", {}
+
+    # ── RSI Divergence: RSI(5) - RSI(14) ──
+    df['RSI_5'] = ta.rsi(df['close'], length=5)
+    df['RSI_14'] = ta.rsi(df['close'], length=14)
+    df['RSI_Div'] = df['RSI_5'] - df['RSI_14']
+
+    # ── ATR(14) for SL/TP sizing ──
+    atr_series = ta.atr(df['high'], df['low'], df['close'], length=14)
+    df['ATR_14'] = atr_series
+
+    # ── EMAs for Strict Pullback entry ──
     df['EMA_20'] = ta.ema(df['close'], length=20)
     df['EMA_50'] = ta.ema(df['close'], length=50)
-    df['EMA_200'] = ta.ema(df['close'], length=200)
-    
-    # Stochastic Indicators
-    stoch_macro = ta.stoch(df['high'], df['low'], df['close'], k=60, d=10, smooth_k=10)
-    stoch_med = ta.stoch(df['high'], df['low'], df['close'], k=40, d=4, smooth_k=4)
-    stoch_fast = ta.stoch(df['high'], df['low'], df['close'], k=14, d=3, smooth_k=3)
-    stoch_trig = ta.stoch(df['high'], df['low'], df['close'], k=9, d=3, smooth_k=3)
 
-    try:
-        # STRICT REQUIREMENT: Extracting the Smoothed %D line (index 1)
-        df['Stoch_Macro_D'] = stoch_macro.iloc[:, 1]
-        df['Stoch_Med_D'] = stoch_med.iloc[:, 1]
-        df['Stoch_Fast_D'] = stoch_fast.iloc[:, 1]
-        df['Stoch_Trig_D'] = stoch_trig.iloc[:, 1]
-    except:
-        return "HOLD", "Math error"
-
+    # ── NaN guard ──
     curr = df.iloc[-1]
     prev = df.iloc[-2]
+    if pd.isna(curr['Stoch_Macro_D']) or pd.isna(curr['RSI_Div']) or pd.isna(curr['ATR_14']) or pd.isna(curr['EMA_50']):
+        return "HOLD", "Warming up indicators", {}
 
-    if pd.isna(curr['EMA_50']) or pd.isna(curr['Stoch_Macro_D']):
-        return "HOLD", "Warming up indicators"
+    d1 = curr['Stoch_Trig_D']
+    d2 = curr['Stoch_Fast_D']
+    d3 = curr['Stoch_Med_D']
+    d4 = curr['Stoch_Macro_D']
+    atr_val = curr['ATR_14']
+    rsi_div = curr['RSI_Div']
 
-    # 1. CONTEXTUAL RULES
-    trend_bias = (curr['close'] > curr['EMA_20']) and (curr['close'] > curr['EMA_50'])
-    macro_strength = curr['Stoch_Macro_D'] > 80
-    med_strength = curr['Stoch_Med_D'] > 80 
+    # ── Quad Alignment (Pine lines 75-76) ──
+    all_oversold = d1 < 20 and d2 < 20 and d3 < 20 and d4 < 20
+    all_overbought = d1 > 80 and d2 > 80 and d3 > 80 and d4 > 80
 
-    # 2. ENTRY TRIGGER
-    # Trigger Stoch (9) is oversold
-    trig_oversold = curr['Stoch_Trig_D'] <= 20
-    # Price is touching or very near the 20 EMA (low dips into it or is within 0.5%)
-    ema_touch = curr['low'] <= (curr['EMA_20'] * 1.005)
+    # ── Turn Detection — vectorized booleans (Pine lines 79-86) ──
+    for name in ['Trig', 'Fast', 'Med', 'Macro']:
+        d_col = df[f'Stoch_{name}_D']
+        df[f'turnUp_{name}'] = (d_col < 20) & (d_col > d_col.shift(1)) & (d_col.shift(1) <= d_col.shift(2))
+        df[f'turnDn_{name}'] = (d_col > 80) & (d_col < d_col.shift(1)) & (d_col.shift(1) >= d_col.shift(2))
 
-    if trend_bias and macro_strength and med_strength and trig_oversold and ema_touch:
-        return "BUY", "Strict Pullback: Price touched 20 EMA with Stoch 9 oversold."
+    # ── barssince helper (Pine ta.barssince equivalent) ──
+    def barssince(series, idx):
+        for offset in range(idx + 1):
+            if series.iloc[idx - offset]:
+                return offset
+        return None
 
-    # 3. EXIT LOGIC
-    # Fast Rotation: 9-period Stoch crosses back above 80
-    if prev['Stoch_Trig_D'] < 80 and curr['Stoch_Trig_D'] >= 80:
-        return "SELL", "Target Reached: Trigger Stoch (9) hit 80."
+    last = len(df) - 1
 
-    return "HOLD", "Waiting for pullback setup"
+    # ── Sequential Rotation Detection (Pine lines 91-110) ──
+    # Bullish: all 4 turned up in order (fastest first, slowest last)
+    bs_up = {n: barssince(df[f'turnUp_{n}'], last) for n in ['Trig', 'Fast', 'Med', 'Macro']}
+    seq_bull_trigger = (
+        all(v is not None for v in bs_up.values()) and
+        bs_up['Trig'] > bs_up['Fast'] > bs_up['Med'] > bs_up['Macro'] and
+        bs_up['Macro'] < rotation_window and
+        bool(df['turnUp_Macro'].iloc[-1])
+    )
 
-def calculate_quad_super(df):
-    """
-    Version 2: Super Signal (Quad + Divergence)
-    Looks for a 4-stoch capitulation flush, followed by a price lower-low and stoch higher-low.
-    """
-    if len(df) < 200:
-        return "HOLD", "Not enough data"
+    # Bearish: all 4 turned down in order
+    bs_dn = {n: barssince(df[f'turnDn_{n}'], last) for n in ['Trig', 'Fast', 'Med', 'Macro']}
+    seq_bear_trigger = (
+        all(v is not None for v in bs_dn.values()) and
+        bs_dn['Trig'] > bs_dn['Fast'] > bs_dn['Med'] > bs_dn['Macro'] and
+        bs_dn['Macro'] < rotation_window and
+        bool(df['turnDn_Macro'].iloc[-1])
+    )
 
-    stoch_macro = ta.stoch(df['high'], df['low'], df['close'], k=60, d=10, smooth_k=10)
-    stoch_med = ta.stoch(df['high'], df['low'], df['close'], k=40, d=4, smooth_k=4)
-    stoch_fast = ta.stoch(df['high'], df['low'], df['close'], k=14, d=3, smooth_k=3)
-    stoch_trig = ta.stoch(df['high'], df['low'], df['close'], k=9, d=3, smooth_k=3)
+    # ── Holy Grail (Pine lines 113-114) ──
+    holy_grail_bull = all_oversold and rsi_div > 0
+    holy_grail_bear = all_overbought and rsi_div < 0
 
-    try:
-        # STRICT REQUIREMENT: Extracting the Smoothed %D line (index 1)
-        df['Stoch_Macro_D'] = stoch_macro.iloc[:, 1]
-        df['Stoch_Med_D'] = stoch_med.iloc[:, 1]
-        df['Stoch_Fast_D'] = stoch_fast.iloc[:, 1]
-        df['Stoch_Trig_D'] = stoch_trig.iloc[:, 1]
-    except:
-        return "HOLD", "Math error"
+    # ── Counter-Trend Protection (Pine lines 118-119) ──
+    ct_bull_danger = (d4 < 20 and d4 <= prev['Stoch_Macro_D'] and d1 > 80)
+    ct_bear_danger = (d4 > 80 and d4 >= prev['Stoch_Macro_D'] and d1 < 20)
 
-    curr = df.iloc[-1]
-    prev = df.iloc[-2]
+    # ── K/D Cross — Trigger stochastic (Pine lines 127-128) ──
+    k1_curr, d1_curr = curr['Stoch_Trig_K'], d1
+    k1_prev, d1_prev = prev['Stoch_Trig_K'], prev['Stoch_Trig_D']
+    bull_cross = (k1_prev < d1_prev) and (k1_curr > d1_curr) and (d1_curr < 20)
+    bear_cross = (k1_prev > d1_prev) and (k1_curr < d1_curr) and (d1_curr > 80)
 
-    # EXIT LOGIC (Checked first to ensure we lock profits)
-    # Primary Target: Fast rotation of Trigger Stoch reaching 80
-    if prev['Stoch_Trig_D'] < 80 and curr['Stoch_Trig_D'] >= 80:
-        return "SELL", "Super Signal Exit: Trigger Stoch (9) hit 80."
+    # ── Convergence Band (Pine lines 122-123) — informational ──
+    convergence = (d1 * 1 + d2 * 2 + d3 * 3 + d4 * 4) / 10.0
+    spread = (abs(d1 - convergence) + abs(d2 - convergence) + abs(d3 - convergence) + abs(d4 - convergence)) / 4.0
 
-    # MANDATORY DIVERGENCE LOGIC
-    # Look back over the last 15 candles to find Stage 1 (The Anchor Flush)
-    quad_oversold_idx = None
+    # ══════════════════════════════════════════════════════════
+    # Decision Tree — priority-ordered signal generation
+    # ══════════════════════════════════════════════════════════
+
+    # ── SELL signals (checked first for protection) ──
+    if ct_bull_danger:
+        return "SELL", f"Counter-Trend: Macro stuck <20 ({d4:.1f}) while Trigger >80 ({d1:.1f}). Conv={convergence:.1f}", {"exit_type": "COUNTER_TREND"}
+    if seq_bear_trigger:
+        return "SELL", f"Sequential Bear Rotation: all 4 turned down fast->slow within {rotation_window} bars. Conv={convergence:.1f}", {"exit_type": "SEQ_BEAR"}
+    if bear_cross:
+        return "SELL", f"Trigger K/D Bear Cross: K={k1_curr:.1f} < D={d1_curr:.1f} in overbought. Conv={convergence:.1f}", {"exit_type": "BEAR_KD"}
+
+    # ── BUY signals (priority = confidence order, 5 tiers) ──
+
+    # Tier 1: Strict Pullback — confirmed uptrend + pullback to EMA support
+    strict_pullback = (
+        curr['close'] > curr['EMA_20'] and curr['close'] > curr['EMA_50']
+        and d4 > 80 and d3 > 80 and d1 <= 20
+        and curr['low'] <= curr['EMA_20'] * 1.005
+    )
+    if strict_pullback:
+        return "BUY", f"Strict Pullback: Macro={d4:.0f} Med={d3:.0f} >80, Trigger={d1:.0f} oversold, EMA touch. Conv={convergence:.1f}", {"confidence": 0.90, "atr": atr_val, "signal_type": "STRICT_PULLBACK"}
+
+    # Tier 2: Super Signal — 3-stage capitulation divergence after quad flush
+    quad_flush_idx = None
     for i in range(2, 16):
         row = df.iloc[-i]
-        if (row['Stoch_Macro_D'] < 20 and row['Stoch_Med_D'] < 20 and 
-            row['Stoch_Fast_D'] < 20 and row['Stoch_Trig_D'] < 20):
-            quad_oversold_idx = -i
+        if (row['Stoch_Macro_D'] < 20 and row['Stoch_Med_D'] < 20
+                and row['Stoch_Fast_D'] < 20 and row['Stoch_Trig_D'] < 20):
+            quad_flush_idx = -i
             break
+    if quad_flush_idx is not None:
+        anchor = df.iloc[quad_flush_idx]
+        price_lower_low = curr['low'] < anchor['low'] or curr['close'] < anchor['close']
+        stoch_curling = (d1 > prev['Stoch_Trig_D']) and (d2 > prev['Stoch_Fast_D'])
+        stoch_holding = (d1 > 20) and (d2 > 20)
+        reversal_candle = curr['close'] > curr['open']
+        if price_lower_low and stoch_curling and stoch_holding and reversal_candle:
+            return "BUY", f"Super Signal: Divergence after quad flush ({-quad_flush_idx} bars ago). Conv={convergence:.1f} spread={spread:.1f}", {"confidence": 0.85, "atr": atr_val, "signal_type": "SUPER_SIGNAL"}
 
-    if quad_oversold_idx is not None:
-        anchor_low = df.iloc[quad_oversold_idx]['low']
-        
-        # Stage 2: Price makes a Lower Low
-        if curr['low'] < anchor_low or curr['close'] < df.iloc[quad_oversold_idx]['close']:
-            
-            # Stage 3: Stochastics MUST hold above 20 and curl up (Higher Low)
-            stoch_curling_up = (curr['Stoch_Trig_D'] > prev['Stoch_Trig_D']) and (curr['Stoch_Fast_D'] > prev['Stoch_Fast_D'])
-            stoch_holding = (curr['Stoch_Trig_D'] > 20) and (curr['Stoch_Fast_D'] > 20)
-            
-            # Entry Trigger: Reversal candle confirms the higher low
-            reversal_candle = curr['close'] > curr['open']
-            
-            if stoch_curling_up and stoch_holding and reversal_candle:
-                return "BUY", "SUPER SIGNAL: Divergence confirmed after Quad Flush!"
+    # Tier 3: Holy Grail — quad oversold + RSI divergence
+    if holy_grail_bull:
+        return "BUY", f"Holy Grail: Quad oversold + RSI div +{rsi_div:.1f}. Conv={convergence:.1f} spread={spread:.1f}", {"confidence": 0.80, "atr": atr_val, "signal_type": "HOLY_GRAIL"}
 
-    return "HOLD", "Waiting for Capitulation Divergence"
+    # Tier 4: Sequential Rotation — fast->slow cascade
+    if seq_bull_trigger:
+        return "BUY", f"Sequential Rotation: 4 stochs turned up fast->slow within {rotation_window} bars. Conv={convergence:.1f} spread={spread:.1f}", {"confidence": 0.70, "atr": atr_val, "signal_type": "SEQ_ROTATION"}
+
+    # Tier 5: K/D Cross — timing signal
+    if bull_cross:
+        return "BUY", f"Trigger K/D Bull Cross: K={k1_curr:.1f} > D={d1_curr:.1f} in oversold. Conv={convergence:.1f} spread={spread:.1f}", {"confidence": 0.40, "atr": atr_val, "signal_type": "KD_CROSS"}
+
+    # ── HOLD — informational status ──
+    status_parts = []
+    if all_oversold:
+        status_parts.append("Quad Oversold")
+    if all_overbought:
+        status_parts.append("Quad Overbought")
+    if ct_bear_danger:
+        status_parts.append("Counter-Trend Bear Warning")
+    status_parts.append(f"Conv={convergence:.1f} spread={spread:.1f}")
+    return "HOLD", f"Monitoring: {'; '.join(status_parts)}", {}
 
 def calculate_advanced_grid(df, lower_price, upper_price, grids, current_inventory_pct=0.0):
     """
@@ -158,80 +229,196 @@ def calculate_advanced_grid(df, lower_price, upper_price, grids, current_invento
     # Constraint 1: Maker-Only Execution (instructed via reason string)
     return "HOLD", f"GRID ACTIVE: Deploy Post-Only Maker limits. Spacing >= 1.0% ({actual_step:.2f})"
 
-def calculate_orb(df, pos_side="FLAT"):
+def calculate_orb(df, pos_side="FLAT", entry_price=0.0, orb_data=None, tp_stage=0,
+                  range_start_hour=14, range_duration_min=60, expiry_hours=8):
     """
-    Crypto Opening Range Breakout (ORB) - Updated for 60-Minute Window
-    """
-    if len(df) < 100:  
-        return "HOLD", "Not enough data"
+    Opening Range Breakout (ORB) — Comprehensive overhaul.
 
+    Range Window: configurable (default 14:00-15:00 UTC, US/EU session overlap).
+    Entry Filters: VWAP, EMA(20), RVOL > 1.5, body > 50% of candle range.
+    Range Quality: 0.5x-2.0x ATR (reject noise and extended ranges).
+    Stop Loss: max(1x range_width, 1.5x ATR) from entry.
+    Take Profit: R-multiple — T1=1.5R sell 50% + BE stop, T2=3.0R full exit.
+    Trailing Stop: 1.5x ATR from HWM, activated after T1.
+    Session Timeout: 8 hours from entry.
+    """
+    if len(df) < 100:
+        return "HOLD", "Not enough data", {}
+
+    # --- Indicators ---
     df['EMA_20'] = ta.ema(df['close'], length=20)
+    df['ATR'] = ta.atr(df['high'], df['low'], df['close'], 14)
+    df['VOL_AVG'] = ta.sma(df['volume'], 20)
     df['Typical_Price'] = (df['high'] + df['low'] + df['close']) / 3
     df['VWAP'] = (df['Typical_Price'] * df['volume']).cumsum() / df['volume'].cumsum()
 
     df['datetime'] = pd.to_datetime(df['start'], unit='s', utc=True)
-    current_date = df['datetime'].iloc[-1].date()
-    
-    # 60-Minute Range Calculation (00:00 to 01:00 UTC)
-    opening_range = df[(df['datetime'].dt.date == current_date) & 
-                       (df['datetime'].dt.hour == 0)]
-    
-    # If it's currently 00:XX, we don't have the full range yet
-    if len(opening_range) < 12: 
-        return "HOLD", "Defining 60-minute range (00:00 - 01:00 UTC)"
-
-    range_high = opening_range['high'].max()
-    range_low = opening_range['low'].min()
-    midpoint = (range_high + range_low) / 2
     curr = df.iloc[-1]
+    atr = curr['ATR'] if not pd.isna(curr['ATR']) and curr['ATR'] > 0 else 0
+    vol_avg = curr['VOL_AVG'] if not pd.isna(curr['VOL_AVG']) else 0
 
-    # 1. PRIORITY EXITS
-    if pos_side == 'LONG':
-        if curr['close'] < midpoint:
-            return "EXIT_LONG", "Price fell below 60m ORB Midpoint (Stop Loss)"
-        return "HOLD", "Riding Long Position"
-        
-    elif pos_side == 'SHORT':
-        if curr['close'] > midpoint:
-            return "EXIT_SHORT", "Price rose above 60m ORB Midpoint (Stop Loss)"
-        return "HOLD", "Riding Short Position"
+    if atr <= 0:
+        return "HOLD", "ATR warming up", {}
 
-    # 2. EXPIRATION CHECK: Trades taken within 6 hours of the session start
-    hours_since_open = (df['datetime'].iloc[-1] - opening_range['datetime'].iloc[0]).total_seconds() / 3600
-    if hours_since_open > 6:
-        return "HOLD", "60m ORB Setup Expired (Outside window)"
+    # --- Build Opening Range for configured window ---
+    current_date = curr['datetime'].date()
+    range_end_hour = range_start_hour + (range_duration_min // 60)
+    range_end_minute = range_duration_min % 60
 
-    # 3. ENTRIES: Only evaluated if we are FLAT
-    # Must be after 01:00 UTC
-    if curr['datetime'].hour < 1:
-        return "HOLD", "Waiting for range completion"
+    opening_range = df[
+        (df['datetime'].dt.date == current_date) &
+        (df['datetime'].dt.hour >= range_start_hour) &
+        ((df['datetime'].dt.hour < range_end_hour) |
+         ((df['datetime'].dt.hour == range_end_hour) & (df['datetime'].dt.minute < range_end_minute)))
+    ]
 
-    if curr['close'] > range_high and curr['close'] > curr['VWAP'] and curr['close'] > curr['EMA_20']:
-        return "LONG", f"Breakout Above 60m High ({range_high}). SL at {midpoint}"
+    # Range not ready yet
+    min_candles = max(3, range_duration_min // 5)  # at least 3 candles or duration/5
+    if len(opening_range) < min_candles:
+        return "HOLD", f"Defining range ({range_start_hour}:00-{range_end_hour}:{range_end_minute:02d} UTC, {len(opening_range)}/{min_candles} candles)", {}
 
-    if curr['close'] < range_low and curr['close'] < curr['VWAP'] and curr['close'] < curr['EMA_20']:
-        return "SHORT", f"Breakout Below 60m Low ({range_low}). SL at {midpoint}"
+    range_high = float(opening_range['high'].max())
+    range_low = float(opening_range['low'].min())
+    range_width = range_high - range_low
 
-    return "HOLD", f"Ranging inside 60m Box ({range_low} - {range_high})"
+    # --- EXIT LOGIC (checked first when in position) ---
+    if pos_side in ('LONG', 'SHORT') and entry_price > 0 and orb_data:
+        stop_dist = orb_data.get('stop_distance', atr)
+        entry_ts = orb_data.get('entry_time', 0)
+        R = stop_dist if stop_dist > 0 else atr
 
-def calculate_trap(df, pos_side="FLAT", entry_stage=0, avg_entry=0.0, breakout_data=None):
+        if pos_side == 'LONG':
+            sl_price = entry_price - stop_dist
+            # After T1, stop moves to breakeven
+            if tp_stage >= 1:
+                sl_price = max(sl_price, entry_price)
+
+            # Stop loss
+            if curr['close'] <= sl_price:
+                return "EXIT_LONG", f"STOP LOSS: {curr['close']:.2f} <= {sl_price:.2f}", {}
+
+            pnl = curr['close'] - entry_price
+            r_mult = pnl / R if R > 0 else 0
+
+            # T2: 3.0R — full exit
+            if tp_stage >= 1 and r_mult >= 3.0:
+                return "EXIT_LONG", f"TARGET 2: +{r_mult:.1f}R. Full exit.", {}
+            # T1: 1.5R — partial exit 50%, move stop to BE
+            if tp_stage == 0 and r_mult >= 1.5:
+                return "PARTIAL_EXIT_LONG", f"TARGET 1: +{r_mult:.1f}R. Sell 50%, stop->BE.", {}
+
+        elif pos_side == 'SHORT':
+            sl_price = entry_price + stop_dist
+            if tp_stage >= 1:
+                sl_price = min(sl_price, entry_price)
+
+            if curr['close'] >= sl_price:
+                return "EXIT_SHORT", f"STOP LOSS: {curr['close']:.2f} >= {sl_price:.2f}", {}
+
+            pnl = entry_price - curr['close']
+            r_mult = pnl / R if R > 0 else 0
+
+            if tp_stage >= 1 and r_mult >= 3.0:
+                return "EXIT_SHORT", f"TARGET 2: +{r_mult:.1f}R. Full exit.", {}
+            if tp_stage == 0 and r_mult >= 1.5:
+                return "PARTIAL_EXIT_SHORT", f"TARGET 1: +{r_mult:.1f}R. Cover 50%, stop->BE.", {}
+
+        # Session timeout: 8 hours from entry
+        if entry_ts > 0:
+            hours_in_trade = (int(curr['start']) - entry_ts) / 3600
+            if hours_in_trade > expiry_hours:
+                sig = "EXIT_LONG" if pos_side == 'LONG' else "EXIT_SHORT"
+                return sig, f"SESSION TIMEOUT: {hours_in_trade:.1f}h in trade (max {expiry_hours}h)", {}
+
+        return "HOLD", f"In position, {r_mult:.1f}R" if R > 0 else "In position", {}
+
+    # --- ENTRY LOGIC (FLAT only) ---
+    if pos_side != 'FLAT':
+        return "HOLD", "In position", {}
+
+    # Check if current time is after range completion
+    range_end_ts = opening_range['start'].max() + 60  # 1 min after last range candle
+    curr_ts = int(curr['start'])
+    if curr_ts < range_end_ts:
+        return "HOLD", "Waiting for range completion", {}
+
+    # Expiry check
+    hours_since_range = (curr_ts - range_end_ts) / 3600
+    if hours_since_range > expiry_hours:
+        return "HOLD", f"ORB expired ({hours_since_range:.0f}h > {expiry_hours}h)", {}
+
+    # Range quality filter: 0.5x - 2.0x ATR
+    if range_width < 0.5 * atr:
+        return "HOLD", f"Range too narrow ({range_width:.2f} < 0.5x ATR {0.5*atr:.2f})", {}
+    if range_width > 2.0 * atr:
+        return "HOLD", f"Range too wide ({range_width:.2f} > 2.0x ATR {2.0*atr:.2f})", {}
+
+    # Candle quality checks
+    curr_body = abs(curr['close'] - curr['open'])
+    curr_range = curr['high'] - curr['low']
+    body_quality = curr_body > 0.5 * curr_range if curr_range > 0 else False
+    volume_confirmed = curr['volume'] > (vol_avg * 1.5) if vol_avg > 0 else False
+
+    # Stop distance for position sizing
+    stop_distance = max(range_width, 1.5 * atr)
+
+    orb_meta = {
+        'range_high': range_high,
+        'range_low': range_low,
+        'range_width': range_width,
+        'stop_distance': stop_distance,
+        'atr': float(atr),
+        'entry_time': curr_ts
+    }
+
+    # LONG breakout
+    is_bull = curr['close'] > curr['open']
+    if (is_bull and curr['close'] > range_high and
+            curr['close'] > curr['VWAP'] and curr['close'] > curr['EMA_20']):
+        if not volume_confirmed:
+            return "HOLD", f"Long breakout but volume weak ({curr['volume']:.0f} < 1.5x avg)", {}
+        if not body_quality:
+            return "HOLD", "Long breakout but weak candle body (wick rejection)", {}
+        return "LONG", \
+            f"ORB LONG: Close {curr['close']:.2f} > range {range_high:.2f}. R={stop_distance:.2f}", orb_meta
+
+    # SHORT breakout
+    is_bear = curr['close'] < curr['open']
+    if (is_bear and curr['close'] < range_low and
+            curr['close'] < curr['VWAP'] and curr['close'] < curr['EMA_20']):
+        if not volume_confirmed:
+            return "HOLD", f"Short breakout but volume weak ({curr['volume']:.0f} < 1.5x avg)", {}
+        if not body_quality:
+            return "HOLD", "Short breakout but weak candle body (wick rejection)", {}
+        return "SHORT", \
+            f"ORB SHORT: Close {curr['close']:.2f} < range {range_low:.2f}. R={stop_distance:.2f}", orb_meta
+
+    return "HOLD", f"Ranging ({range_low:.2f} - {range_high:.2f})", {}
+
+def calculate_trap(df, pos_side="FLAT", entry_stage=0, avg_entry=0.0, breakout_data=None, tp_stage=0):
     """
-    TRAP Strategy: Consolidation Squeeze -> Momentum Breakout
-    
-    Entry Logic:
-    1. SMA 20 and SMA 200 must be flat (low slope)
+    TRAP Strategy: Oliver Velez Elephant Bar / Narrow-Band Breakout
+
+    Entry Logic (Velez-aligned):
+    1. SMA 20 and SMA 200 must be flat (narrow-band / consolidation)
     2. SMA 20 and SMA 200 must be converged (within 1.5%)
-    3. Power candle breaks out of zone with body > 1x ATR
-    4. Close beyond zone edge + 0.5x ATR
-    5. Volume > 1.5x average confirms conviction
-    
-    Position Sizing:
-    - Stage 1: 25% on breakout candle
-    - Stage 2: 75% on first pullback (opposite color, body < 1x ATR, < 50% retrace)
-    
-    Exit:
-    - TP: 2.5% from avg entry
-    - SL: 1x ATR from avg entry (direction-aware)
+    3. SMA ordering: SMA20 > SMA200 for long, SMA20 < SMA200 for short
+    4. Elephant bar: body > 1.5x ATR AND > 70th percentile of last 20 bars
+    5. Elephant bar clears 3+ prior opposite-color bars (87% follow-through)
+    6. Close beyond zone edge + 0.5x ATR
+    7. Volume > 1.5x average confirms conviction
+    8. SMA20 post-breakout angle > 30 degrees (arctangent, ATR-normalized)
+
+    Position Sizing (Velez-aligned):
+    - Stage 1: 10% on elephant bar breakout
+    - Stage 2: 10% on first pullback (opposite color, body < 1x ATR, < 50% retrace)
+    - Stage 3: 10% on second pullback (same conditions)
+
+    Exit (Velez-aligned):
+    - SL: 2x ATR or elephant bar low/high (whichever wider)
+    - T1: +2.5R -> sell 50%, move stop to breakeven
+    - T2: +4.0R -> sell remaining
+    - Extended: exit if price > 5% from SMA20
     """
     if len(df) < 210:
         return "HOLD", "Not enough data", {}
@@ -259,24 +446,65 @@ def calculate_trap(df, pos_side="FLAT", entry_stage=0, avg_entry=0.0, breakout_d
     vol_avg = curr['VOL_AVG'] if not pd.isna(curr['VOL_AVG']) else 0
 
     # --- EXIT LOGIC (checked first) ---
+    # Velez: SL = 2x ATR or elephant bar low/high (whichever wider)
+    # Velez: TP via R-multiples (T1=2.5R partial, T2=4.0R full), breakeven stop after T1
     if pos_side in ('LONG', 'SHORT') and avg_entry > 0:
-        if pos_side == 'LONG':
-            pnl_pct = (curr['close'] - avg_entry) / avg_entry
-            sl_price = avg_entry - atr
-            if curr['close'] <= sl_price:
-                return "EXIT_LONG", f"STOP LOSS: Price {curr['close']:.2f} hit ATR stop {sl_price:.2f}", {}
-            if pnl_pct >= 0.025:
-                return "EXIT_LONG", f"TAKE PROFIT: +{pnl_pct*100:.1f}% from entry {avg_entry:.2f}", {}
-        elif pos_side == 'SHORT':
-            pnl_pct = (avg_entry - curr['close']) / avg_entry
-            sl_price = avg_entry + atr
-            if curr['close'] >= sl_price:
-                return "EXIT_SHORT", f"STOP LOSS: Price {curr['close']:.2f} hit ATR stop {sl_price:.2f}", {}
-            if pnl_pct >= 0.025:
-                return "EXIT_SHORT", f"TAKE PROFIT: +{pnl_pct*100:.1f}% from entry {avg_entry:.2f}", {}
+        elephant_low = breakout_data.get('low', 0) if breakout_data else 0
+        elephant_high = breakout_data.get('high', 0) if breakout_data else 0
 
-    # --- STAGE 2: ADD to position on pullback ---
-    if pos_side != 'FLAT' and entry_stage == 1 and breakout_data:
+        if pos_side == 'LONG':
+            atr_stop = avg_entry - (2.0 * atr)
+            elephant_stop = elephant_low if elephant_low > 0 else atr_stop
+            sl_price = min(atr_stop, elephant_stop)
+            # After T1 hit, stop moves to breakeven (Velez)
+            if tp_stage >= 1:
+                sl_price = max(sl_price, avg_entry)
+            R = avg_entry - sl_price if sl_price < avg_entry else atr  # risk per unit
+
+            if curr['close'] <= sl_price:
+                return "EXIT_LONG", f"STOP LOSS: Price {curr['close']:.2f} hit stop {sl_price:.2f} (R={R:.2f})", {}
+
+            if R > 0:
+                pnl = curr['close'] - avg_entry
+                r_multiple = pnl / R
+                # T2: 4.0R -- full exit of remaining position
+                if tp_stage >= 1 and r_multiple >= 4.0:
+                    return "EXIT_LONG", f"TARGET 2: +{r_multiple:.1f}R (${pnl:.2f}/unit). Full exit.", {}
+                # T1: 2.5R -- partial exit (50%), move stop to breakeven
+                if tp_stage == 0 and r_multiple >= 2.5:
+                    return "PARTIAL_EXIT_LONG", f"TARGET 1: +{r_multiple:.1f}R (${pnl:.2f}/unit). Sell 50%%, move stop to BE.", {}
+
+            # Extended: exit if price far from SMA20 (Velez)
+            sma20_dist = (curr['close'] - sma20) / sma20 if sma20 > 0 else 0
+            if sma20_dist > 0.05:
+                return "EXIT_LONG", f"EXTENDED FROM SMA20: {sma20_dist*100:.1f}% above. Taking profit.", {}
+
+        elif pos_side == 'SHORT':
+            atr_stop = avg_entry + (2.0 * atr)
+            elephant_stop = elephant_high if elephant_high > 0 else atr_stop
+            sl_price = max(atr_stop, elephant_stop)
+            # After T1, stop moves to breakeven
+            if tp_stage >= 1:
+                sl_price = min(sl_price, avg_entry)
+            R = sl_price - avg_entry if sl_price > avg_entry else atr
+
+            if curr['close'] >= sl_price:
+                return "EXIT_SHORT", f"STOP LOSS: Price {curr['close']:.2f} hit stop {sl_price:.2f} (R={R:.2f})", {}
+
+            if R > 0:
+                pnl = avg_entry - curr['close']
+                r_multiple = pnl / R
+                if tp_stage >= 1 and r_multiple >= 4.0:
+                    return "EXIT_SHORT", f"TARGET 2: +{r_multiple:.1f}R (${pnl:.2f}/unit). Full exit.", {}
+                if tp_stage == 0 and r_multiple >= 2.5:
+                    return "PARTIAL_EXIT_SHORT", f"TARGET 1: +{r_multiple:.1f}R (${pnl:.2f}/unit). Cover 50%%, move stop to BE.", {}
+
+            sma20_dist = (sma20 - curr['close']) / sma20 if sma20 > 0 else 0
+            if sma20_dist > 0.05:
+                return "EXIT_SHORT", f"EXTENDED FROM SMA20: {sma20_dist*100:.1f}% below. Taking profit.", {}
+
+    # --- ADD to position on pullback (Velez: up to 2 adds, 3 stages total) ---
+    if pos_side != 'FLAT' and entry_stage in (1, 2) and breakout_data:
         bo_close = breakout_data.get('close', 0)
         bo_open = breakout_data.get('open', 0)
         bo_body = abs(bo_close - bo_open)
@@ -324,25 +552,58 @@ def calculate_trap(df, pos_side="FLAT", entry_stage=0, avg_entry=0.0, breakout_d
     if sma_gap > 0.015:
         return "HOLD", f"SMAs not converged (gap: {sma_gap*100:.1f}% > 1.5%)", {}
 
-    # 3. DEFINE THE TRAP ZONE
+    # 3. SMA ORDERING (Velez: SMA20 must be on correct side for direction)
+    sma_long_ok = sma20 > sma200
+    sma_short_ok = sma20 < sma200
+
+    # 4. DEFINE THE TRAP ZONE
     zone_upper = max(sma20, sma200)
     zone_lower = min(sma20, sma200)
     zone_mid = (zone_upper + zone_lower) / 2
 
-    # 4. POWER CANDLE CHECK
+    # 4. ELEPHANT BAR CHECK (Velez: body > 1.5x ATR + > 70th percentile of last 20)
     curr_body = abs(curr['close'] - curr['open'])
     is_bull = curr['close'] > curr['open']
     is_bear = curr['close'] < curr['open']
 
-    body_big = curr_body > atr
+    body_big = curr_body > (1.5 * atr)
+    recent_bodies = abs(df['close'].iloc[-21:-1] - df['open'].iloc[-21:-1])
+    percentile_70 = recent_bodies.quantile(0.70)
+    body_relative_ok = curr_body > percentile_70
     volume_confirmed = curr['volume'] > (vol_avg * 1.5) if vol_avg > 0 else False
 
     if not body_big:
-        return "HOLD", f"No power candle (body {curr_body:.2f} < ATR {atr:.2f})", {}
+        return "HOLD", f"No elephant bar (body {curr_body:.2f} < 1.5x ATR {1.5*atr:.2f})", {}
+    if not body_relative_ok:
+        return "HOLD", f"Body not dominant (body {curr_body:.2f} < 70th pctile {percentile_70:.2f})", {}
     if not volume_confirmed:
         return "HOLD", f"Volume weak ({curr['volume']:.0f} < 1.5x avg {vol_avg:.0f})", {}
 
-    # 5. BREAKOUT DIRECTION
+    # 5. ELEPHANT BAR MUST CLEAR 3+ PRIOR OPPOSITE-COLOR BARS (Velez: 87% follow-through)
+    lookback = df.iloc[-11:-1]
+    if is_bull:
+        bear_bars = lookback[lookback['close'] < lookback['open']]
+        bars_cleared = int((curr['close'] > bear_bars['high']).sum()) if len(bear_bars) > 0 else 0
+        if bars_cleared < 3:
+            return "HOLD", f"Elephant bar only clears {bars_cleared} prior bear bars (need 3+)", {}
+    elif is_bear:
+        bull_bars = lookback[lookback['close'] > lookback['open']]
+        bars_cleared = int((curr['close'] < bull_bars['low']).sum()) if len(bull_bars) > 0 else 0
+        if bars_cleared < 3:
+            return "HOLD", f"Elephant bar only clears {bars_cleared} prior bull bars (need 3+)", {}
+
+    # 6. SMA20 POST-BREAKOUT ANGLE (Velez: arctangent > 30 degrees, ATR-normalized)
+    sma20_5ago = df['SMA_20'].iloc[-6] if len(df) > 6 else df['SMA_20'].iloc[0]
+    sma20_change = sma20 - sma20_5ago
+    normalized_slope = sma20_change / atr if atr > 0 else 0
+    angle_deg = abs(math.degrees(math.atan(normalized_slope)))
+
+    if is_bull and (angle_deg < 30 or sma20_change < 0):
+        return "HOLD", f"SMA20 angle too flat for long ({angle_deg:.0f} deg < 30 deg)", {}
+    if is_bear and (angle_deg < 30 or sma20_change > 0):
+        return "HOLD", f"SMA20 angle too flat for short ({angle_deg:.0f} deg < 30 deg)", {}
+
+    # 7. BREAKOUT DIRECTION
     breakout_threshold_long = zone_upper + (0.5 * atr)
     breakout_threshold_short = zone_lower - (0.5 * atr)
 
@@ -355,11 +616,15 @@ def calculate_trap(df, pos_side="FLAT", entry_stage=0, avg_entry=0.0, breakout_d
     }
 
     if is_bull and curr['close'] > breakout_threshold_long:
+        if not sma_long_ok:
+            return "HOLD", f"Breakout long rejected: SMA20 ({sma20:.2f}) not above SMA200 ({sma200:.2f})", {}
         return "BREAKOUT_LONG", \
             f"TRAP BREAKOUT LONG: Close {curr['close']:.2f} > zone {zone_upper:.2f} + 0.5*ATR. Body={curr_body:.2f}, Vol={curr['volume']:.0f}", \
             bo_data
 
     if is_bear and curr['close'] < breakout_threshold_short:
+        if not sma_short_ok:
+            return "HOLD", f"Breakout short rejected: SMA20 ({sma20:.2f}) not below SMA200 ({sma200:.2f})", {}
         return "BREAKOUT_SHORT", \
             f"TRAP BREAKOUT SHORT: Close {curr['close']:.2f} < zone {zone_lower:.2f} - 0.5*ATR. Body={curr_body:.2f}, Vol={curr['volume']:.0f}", \
             bo_data
@@ -476,7 +741,7 @@ def calculate_momentum(df):
 # ==========================================
 # DCA STRATEGY
 # ==========================================
-def calculate_dca(df, dca_state="SCANNING", last_cross_direction="ABOVE"):
+def calculate_dca(df, dca_state="SCANNING", last_cross_direction="ABOVE", arm_threshold=-0.30):
     """
     DCA: Signal-gated accumulation via dual smoothed ROC cross/curl cycle.
     
@@ -554,9 +819,9 @@ def calculate_dca(df, dca_state="SCANNING", last_cross_direction="ABOVE"):
     # Zero-cross is just a prerequisite — ARM only when depth is reached
     if dca_state == "SCANNING":
         both_below_now = fast_cur < 0 and slow_cur < 0
-        at_depth = fast_cur <= -0.30 and slow_cur <= -0.30
+        at_depth = fast_cur <= arm_threshold and slow_cur <= arm_threshold
         if both_below_now and at_depth:
-            return "ARM", f"Depth threshold reached (Fast={fast_cur:.2f} Slow={slow_cur:.2f}, both <= -0.30)", data
+            return "ARM", f"Depth threshold reached (Fast={fast_cur:.2f} Slow={slow_cur:.2f}, thresh={arm_threshold})", data
         return "HOLD", f"Scanning. Fast={fast_cur:.2f} Slow={slow_cur:.2f}", data
 
     # --- ARMED: target acquired, waiting for curl-up confirmation to fire ---
@@ -595,9 +860,9 @@ def calculate_dca(df, dca_state="SCANNING", last_cross_direction="ABOVE"):
     elif last_cross_direction == "ABOVE":
         # Waiting for depth threshold — not just zero-cross
         both_below_now = fast_cur < 0 and slow_cur < 0
-        at_depth = fast_cur <= -0.30 and slow_cur <= -0.30
+        at_depth = fast_cur <= arm_threshold and slow_cur <= arm_threshold
         if both_below_now and at_depth:
-            return "ARM", f"Re-armed: Depth threshold reached (Fast={fast_cur:.2f} Slow={slow_cur:.2f})", data
+            return "ARM", f"Re-armed: Depth threshold reached (Fast={fast_cur:.2f} Slow={slow_cur:.2f}, thresh={arm_threshold})", data
 
     return "HOLD", f"Accumulating. Fast={fast_cur:.2f} Slow={slow_cur:.2f} Cross={last_cross_direction}", data
 
