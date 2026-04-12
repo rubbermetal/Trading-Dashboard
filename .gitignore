@@ -9,6 +9,7 @@ rebalance_schedule.json
 
 # Runtime data stores (too large for git)
 candles.db
+candles.db-*
 candles.lock
 *.bak
 
