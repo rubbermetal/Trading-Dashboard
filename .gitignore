@@ -7,6 +7,15 @@ screener_config.json
 notify_config.json
 rebalance_schedule.json
 
+# Runtime data stores (too large for git)
+candles.db
+candles.lock
+*.bak
+
+# Runtime directories
+logs/
+cache/
+
 # Development utilities (not part of the application)
 check_adx.py
 patch_*.py
