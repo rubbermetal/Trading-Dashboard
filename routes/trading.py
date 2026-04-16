@@ -1,4 +1,4 @@
-import uuid, time, threading
+import uuid, time, threading, json, os, tempfile
 from decimal import Decimal, ROUND_DOWN
 import pandas as pd
 import pandas_ta as ta
@@ -13,6 +13,97 @@ from notifier import notify_bracket_hit, notify_sniper, notify_twap_complete
 
 trading_bp = Blueprint('trading', __name__)
 
+TRAIL_STATE_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'trailing_stops.json')
+
+def save_trailing_stops():
+    try:
+        tmp_fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(TRAIL_STATE_PATH), prefix='.trail_', suffix='.tmp')
+        with os.fdopen(tmp_fd, 'w') as f:
+            json.dump(TRAILING_STOPS, f, indent=2)
+        os.replace(tmp_path, TRAIL_STATE_PATH)
+    except Exception as e:
+        log.error(f"Trail persist error: {e}")
+
+def load_trailing_stops():
+    try:
+        if os.path.exists(TRAIL_STATE_PATH):
+            with open(TRAIL_STATE_PATH) as f:
+                data = json.load(f)
+            TRAILING_STOPS.update(data)
+            log.info(f"Restored {len(data)} trailing stop(s) from disk: {list(data.keys())}")
+    except Exception as e:
+        log.error(f"Trail load error: {e}")
+
+load_trailing_stops()
+
+REPRICE_AFTER_SEC = 60  # cancel + re-place unfilled maker exit after this many seconds
+
+def _place_maker_exit(pair, side, base_size):
+    """Place a post_only limit at best bid (BUY) / best ask (SELL).
+    Returns (success: bool, oid: str, price: float, str_qty: str, fail_reason: str)."""
+    oid = str(uuid.uuid4())
+    try:
+        product = client.get_product(product_id=pair)
+        quote_inc = str(product.quote_increment)
+        base_inc = str(product.base_increment)
+        book = client.get_product_book(product_id=pair, limit=1)
+        if side == 'SELL':
+            limit_px = float(book.pricebook.asks[0].price)
+        else:
+            limit_px = float(book.pricebook.bids[0].price)
+        str_price = snap_to_increment(limit_px, quote_inc)
+        str_qty = snap_to_increment(float(base_size), base_inc)
+        if float(str_qty) <= 0:
+            return False, oid, 0.0, str_qty, f"size snaps to 0 (base_inc={base_inc})"
+        if side == 'SELL':
+            api_res = client.limit_order_gtc_sell(client_order_id=oid, product_id=pair,
+                                                   base_size=str_qty, limit_price=str_price, post_only=True)
+        else:
+            api_res = client.limit_order_gtc_buy(client_order_id=oid, product_id=pair,
+                                                  base_size=str_qty, limit_price=str_price, post_only=True)
+        success = getattr(api_res, 'success', False) or (isinstance(api_res, dict) and api_res.get('success', False))
+        fail_reason = getattr(api_res, 'failure_reason', '') or (isinstance(api_res, dict) and api_res.get('failure_reason', ''))
+        if success or fail_reason == 'UNKNOWN_FAILURE_REASON':
+            return True, oid, float(str_price), str_qty, ''
+        return False, oid, float(str_price), str_qty, fail_reason or 'unknown'
+    except Exception as e:
+        return False, oid, 0.0, '0', str(e)
+
+
+def _check_order_filled(pair, client_oid):
+    """Returns ('FILLED'|'OPEN'|'CANCELLED'|'GONE', filled_size, avg_fill_price)."""
+    try:
+        filled_res = client.get("/api/v3/brokerage/orders/historical/batch",
+                                 params={"order_status": "FILLED", "product_id": pair, "limit": 20})
+        for o in filled_res.get('orders', []):
+            if o.get('client_order_id') == client_oid:
+                return 'FILLED', float(o.get('filled_size', 0)), float(o.get('average_filled_price', 0))
+        open_res = client.get("/api/v3/brokerage/orders/historical/batch",
+                               params={"order_status": "OPEN", "product_id": pair, "limit": 50})
+        for o in open_res.get('orders', []):
+            if o.get('client_order_id') == client_oid:
+                return 'OPEN', 0.0, 0.0
+        return 'GONE', 0.0, 0.0
+    except Exception as e:
+        log.error(f"[{pair}] Fill check error: {e}")
+        return 'OPEN', 0.0, 0.0
+
+
+def _cancel_by_client_oid(pair, client_oid):
+    try:
+        open_res = client.get("/api/v3/brokerage/orders/historical/batch",
+                               params={"order_status": "OPEN", "product_id": pair, "limit": 50})
+        for o in open_res.get('orders', []):
+            if o.get('client_order_id') == client_oid:
+                real_id = o.get('order_id')
+                if real_id:
+                    client.cancel_orders(order_ids=[real_id])
+                return True
+    except Exception as e:
+        log.error(f"[{pair}] Cancel error: {e}")
+    return False
+
+
 # ==========================================
 # BACKGROUND WATCHERS
 # ==========================================
@@ -23,28 +114,71 @@ def background_watcher():
             # --- Trailing Stops ---
             for pair, data in list(TRAILING_STOPS.items()):
                 try:
+                    side = data.get('side', 'SELL')
+                    exit_side = 'SELL' if side == 'SELL' else 'BUY'
+
+                    # Phase B: already triggered, poll for fill / reprice if stale
+                    if data.get('triggered_oid'):
+                        oid = data['triggered_oid']
+                        status, filled_size, avg_px = _check_order_filled(pair, oid)
+                        if status == 'FILLED':
+                            log.info(f"[{pair}] TRAIL {exit_side} FILLED @ ${avg_px:.4f} (size {filled_size})")
+                            del TRAILING_STOPS[pair]
+                            save_trailing_stops()
+                            continue
+                        age = time.time() - data.get('triggered_at', 0)
+                        reprice_age = time.time() - data.get('last_reprice_at', data.get('triggered_at', 0))
+                        if reprice_age >= REPRICE_AFTER_SEC:
+                            # Cancel existing and re-place at fresh best bid/ask
+                            _cancel_by_client_oid(pair, oid)
+                            ok, new_oid, new_px, qty, reason = _place_maker_exit(pair, exit_side, data['size'])
+                            if ok:
+                                TRAILING_STOPS[pair]['triggered_oid'] = new_oid
+                                TRAILING_STOPS[pair]['last_reprice_at'] = time.time()
+                                save_trailing_stops()
+                                log.info(f"[{pair}] TRAIL {exit_side} repriced @ ${new_px} (unfilled {age:.0f}s)")
+                            else:
+                                log.error(f"[{pair}] TRAIL {exit_side} reprice REJECTED: {reason} — keeping trail armed, will retry")
+                                TRAILING_STOPS[pair].pop('triggered_oid', None)
+                                TRAILING_STOPS[pair].pop('triggered_at', None)
+                                TRAILING_STOPS[pair].pop('last_reprice_at', None)
+                                save_trailing_stops()
+                        continue
+
+                    # Phase A: tracking peak / trough, check for trigger
                     p = client.get_product(product_id=pair)
                     cur_px = float(p.price)
-                    side = data.get('side', 'SELL')
 
                     if side == 'SELL':
-                        # Long trailing stop — tracks highest price, triggers on drop
                         if cur_px > data['highest_price']:
                             TRAILING_STOPS[pair]['highest_price'] = cur_px
+                            save_trailing_stops()
                         trigger_px = data['highest_price'] * (1 - data['trail_pct'])
                         if cur_px <= trigger_px:
-                            client.market_order_sell(client_order_id=str(uuid.uuid4()), product_id=pair, base_size=data['size'])
-                            del TRAILING_STOPS[pair]
-                            log.info(f"[{pair}] TRAIL SELL triggered @ {cur_px:.2f} (peak {data['highest_price']:.2f})")
+                            ok, oid, px, qty, reason = _place_maker_exit(pair, 'SELL', data['size'])
+                            if ok:
+                                TRAILING_STOPS[pair]['triggered_oid'] = oid
+                                TRAILING_STOPS[pair]['triggered_at'] = time.time()
+                                TRAILING_STOPS[pair]['last_reprice_at'] = time.time()
+                                save_trailing_stops()
+                                log.info(f"[{pair}] TRAIL SELL triggered @ ${cur_px:.4f} (peak ${data['highest_price']:.4f}) — maker limit {qty}@${px}")
+                            else:
+                                log.error(f"[{pair}] TRAIL SELL place REJECTED: {reason} — will retry next cycle")
                     else:
-                        # Short trailing stop — tracks lowest price, triggers on rise
                         if cur_px < data.get('lowest_price', cur_px):
                             TRAILING_STOPS[pair]['lowest_price'] = cur_px
+                            save_trailing_stops()
                         trigger_px = data.get('lowest_price', cur_px) * (1 + data['trail_pct'])
                         if cur_px >= trigger_px:
-                            client.market_order_buy(client_order_id=str(uuid.uuid4()), product_id=pair, quote_size=str(float(data['size']) * cur_px))
-                            del TRAILING_STOPS[pair]
-                            log.info(f"[{pair}] TRAIL BUY triggered @ {cur_px:.2f} (trough {data.get('lowest_price', 0):.2f})")
+                            ok, oid, px, qty, reason = _place_maker_exit(pair, 'BUY', data['size'])
+                            if ok:
+                                TRAILING_STOPS[pair]['triggered_oid'] = oid
+                                TRAILING_STOPS[pair]['triggered_at'] = time.time()
+                                TRAILING_STOPS[pair]['last_reprice_at'] = time.time()
+                                save_trailing_stops()
+                                log.info(f"[{pair}] TRAIL BUY triggered @ ${cur_px:.4f} (trough ${data.get('lowest_price', 0):.4f}) — maker limit {qty}@${px}")
+                            else:
+                                log.error(f"[{pair}] TRAIL BUY place REJECTED: {reason} — will retry next cycle")
                 except Exception as e:
                     log.error(f"[{pair}] Trail check error: {e}")
 
@@ -139,35 +273,79 @@ def background_watcher():
             # --- Bracket Orders (software OCO) ---
             for pair, bkt in list(BRACKET_ORDERS.items()):
                 try:
+                    side = bkt.get('side', 'BUY')  # side of the original entry
+                    exit_side = 'SELL' if side == 'BUY' else 'BUY'
+
+                    # Phase B: already triggered, poll for fill / reprice if stale
+                    if bkt.get('triggered_oid'):
+                        oid = bkt['triggered_oid']
+                        status, filled_size, avg_px = _check_order_filled(pair, oid)
+                        if status == 'FILLED':
+                            pnl = (avg_px - bkt['entry_price']) * float(bkt['size']) if side == 'BUY' else (bkt['entry_price'] - avg_px) * float(bkt['size'])
+                            log.info(f"[{pair}] Bracket {bkt.get('hit','?')} FILLED @ ${avg_px:.4f} | entry ${bkt['entry_price']:.4f} | PnL ${pnl:.2f}")
+                            notify_bracket_hit(pair, bkt.get('hit','?'), avg_px, pnl)
+                            del BRACKET_ORDERS[pair]
+                            continue
+                        reprice_age = time.time() - bkt.get('last_reprice_at', bkt.get('triggered_at', 0))
+                        if reprice_age >= REPRICE_AFTER_SEC:
+                            _cancel_by_client_oid(pair, oid)
+                            ok, new_oid, new_px, qty, reason = _place_maker_exit(pair, exit_side, bkt['size'])
+                            if ok:
+                                bkt['triggered_oid'] = new_oid
+                                bkt['last_reprice_at'] = time.time()
+                                log.info(f"[{pair}] Bracket {bkt.get('hit','?')} {exit_side} repriced @ ${new_px}")
+                            else:
+                                log.error(f"[{pair}] Bracket reprice REJECTED: {reason} — rearming for next trigger")
+                                bkt.pop('triggered_oid', None)
+                                bkt.pop('triggered_at', None)
+                                bkt.pop('last_reprice_at', None)
+                                bkt.pop('hit', None)
+                        continue
+
+                    # Phase A: scan for TP/SL hit
                     p = client.get_product(product_id=pair)
                     cur_px = float(p.price)
-                    side = bkt.get('side', 'BUY')  # side of the original entry
                     hit = None
-
                     if side == 'BUY':
-                        # Long bracket: TP above, SL below
                         if bkt.get('tp_price') and cur_px >= bkt['tp_price']:
                             hit = 'TP'
                         elif bkt.get('sl_price') and cur_px <= bkt['sl_price']:
                             hit = 'SL'
                     else:
-                        # Short bracket: TP below, SL above
                         if bkt.get('tp_price') and cur_px <= bkt['tp_price']:
                             hit = 'TP'
                         elif bkt.get('sl_price') and cur_px >= bkt['sl_price']:
                             hit = 'SL'
 
-                    if hit:
-                        exit_side = 'SELL' if side == 'BUY' else 'BUY'
+                    if hit == 'SL':
+                        # Stop-loss: market order for guaranteed fill (panic exit)
                         oid = str(uuid.uuid4())
-                        if exit_side == 'SELL':
-                            client.market_order_sell(client_order_id=oid, product_id=pair, base_size=bkt['size'])
+                        try:
+                            if exit_side == 'SELL':
+                                api_res = client.market_order_sell(client_order_id=oid, product_id=pair, base_size=bkt['size'])
+                            else:
+                                api_res = client.market_order_buy(client_order_id=oid, product_id=pair, quote_size=str(round(float(bkt['size']) * cur_px, 2)))
+                            success = getattr(api_res, 'success', False) or (isinstance(api_res, dict) and api_res.get('success', False))
+                            fail_reason = getattr(api_res, 'failure_reason', '') or (isinstance(api_res, dict) and api_res.get('failure_reason', ''))
+                            if success or fail_reason == 'UNKNOWN_FAILURE_REASON':
+                                pnl = (cur_px - bkt['entry_price']) * float(bkt['size']) if side == 'BUY' else (bkt['entry_price'] - cur_px) * float(bkt['size'])
+                                log.info(f"[{pair}] Bracket SL market-exited @ ${cur_px:.4f} | entry ${bkt['entry_price']:.4f} | PnL ${pnl:.2f}")
+                                notify_bracket_hit(pair, 'SL', cur_px, pnl)
+                                del BRACKET_ORDERS[pair]
+                            else:
+                                log.error(f"[{pair}] Bracket SL market REJECTED: {fail_reason} — will retry next cycle")
+                        except Exception as e:
+                            log.error(f"[{pair}] Bracket SL market error: {e}")
+                    elif hit == 'TP':
+                        ok, oid, px, qty, reason = _place_maker_exit(pair, exit_side, bkt['size'])
+                        if ok:
+                            bkt['triggered_oid'] = oid
+                            bkt['triggered_at'] = time.time()
+                            bkt['last_reprice_at'] = time.time()
+                            bkt['hit'] = hit
+                            log.info(f"[{pair}] Bracket TP triggered @ ${cur_px:.4f} — maker limit {qty}@${px}")
                         else:
-                            client.market_order_buy(client_order_id=oid, product_id=pair, quote_size=str(float(bkt['size']) * cur_px))
-                        pnl = (cur_px - bkt['entry_price']) * float(bkt['size']) if side == 'BUY' else (bkt['entry_price'] - cur_px) * float(bkt['size'])
-                        log.info(f"[{pair}] Bracket {hit} hit @ {cur_px:.2f} | entry {bkt['entry_price']:.2f} | PnL ${pnl:.2f}")
-                        notify_bracket_hit(pair, hit, cur_px, pnl)
-                        del BRACKET_ORDERS[pair]
+                            log.error(f"[{pair}] Bracket TP place REJECTED: {reason} — will retry next cycle")
                 except Exception as e:
                     log.error(f"[{pair}] Bracket check error: {e}")
 
@@ -329,6 +507,7 @@ def set_trail():
             entry['lowest_price'] = cur_px
 
         TRAILING_STOPS[pair] = entry
+        save_trailing_stops()
         return jsonify(success=True, message=f"Trailing stop ({d['pct']}%) activated for {pair}")
     except Exception as e:
         return jsonify(success=False, error=str(e))
@@ -381,6 +560,7 @@ def cancel_protection():
 
     if ptype == 'TRAIL' and pair in TRAILING_STOPS:
         del TRAILING_STOPS[pair]
+        save_trailing_stops()
         return jsonify(success=True, message=f"Trailing stop cancelled for {pair}")
     elif ptype == 'BRACKET' and pair in BRACKET_ORDERS:
         del BRACKET_ORDERS[pair]

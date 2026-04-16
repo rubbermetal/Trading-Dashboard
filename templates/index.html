@@ -207,6 +207,7 @@
                                 <button class="btn btn-sm btn-outline-success osc-btn" data-osc="roc" onclick="toggleOscillator('roc', this)">ROC</button>
                                 <button class="btn btn-sm btn-outline-primary osc-btn" data-osc="macd" onclick="toggleOscillator('macd', this)">MACD</button>
                                 <button class="btn btn-sm btn-outline-danger osc-btn" data-osc="stoch" onclick="toggleOscillator('stoch', this)">STOCH</button>
+                                <button class="btn btn-sm btn-outline-success osc-btn" data-osc="vsma" onclick="toggleOscillator('vsma', this)">VSMA</button>
                             </div>
                             <div id="tv_chart_container" style="flex:1 1 auto; width:100%; min-height:320px;"></div>
                             <!-- SCANNER SUB-PANEL (inside chart card) -->
@@ -1276,6 +1277,14 @@
                     { key: 'stoch_d', color: '#FF4B5C', w: 1 }
                 ],
                 refLines: [20, 80]
+            },
+            vsma: {
+                label: 'VolSMA 5/25',
+                series: [
+                    { key: 'vsma_fast', color: '#2ECC71', w: 1 },
+                    { key: 'vsma_slow', color: '#E74C3C', w: 1 }
+                ],
+                refLines: [0]
             }
         };
         const OSC_PANE_HEIGHT = 140;  // px per oscillator sub-pane
@@ -1446,12 +1455,25 @@
             if (btn) { btn.classList.add('active'); btn.style.opacity = '1'; }
         }
 
-        function buildVolumeData(candles) {
-            return candles.map(c => ({
-                time: c.time,
-                value: c.volume,
-                color: c.close >= c.open ? CHART_COLORS.volUp : CHART_COLORS.volDown
-            }));
+        function buildVolumeData(candles, window) {
+            const N = window || 20;
+            const out = new Array(candles.length);
+            for (let i = 0; i < candles.length; i++) {
+                const c = candles[i];
+                let sum = 0, cnt = 0;
+                for (let j = Math.max(0, i - N + 1); j <= i; j++) {
+                    sum += candles[j].volume; cnt++;
+                }
+                const avgVol = cnt > 0 ? sum / cnt : 0;
+                const mult = avgVol > 0 ? c.volume / avgVol : 0;
+                const isBull = c.close >= c.open;
+                out[i] = {
+                    time: c.time,
+                    value: c.volume,
+                    color: volColorForMult(isBull, mult)
+                };
+            }
+            return out;
         }
 
         // Volume-multiple → candle color. Matches the original server-side palette
@@ -1699,7 +1721,7 @@
                         mainVolumeSeries.update({
                             time: latest.time,
                             value: latest.volume,
-                            color: latest.close >= latest.open ? CHART_COLORS.volUp : CHART_COLORS.volDown
+                            color: colored.color
                         });
                     }
                     activePairPrice = latest.close;

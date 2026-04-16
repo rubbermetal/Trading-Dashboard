@@ -1937,12 +1937,18 @@ def _execute_dca_research(bot_id, bot, pair):
             except Exception as e:
                 log.error(f"[{pair}] Research cancel buy error: {e}")
 
+            retries += 1
             if retries >= 3:
                 bot['dca_state'] = 'ACCUMULATING' if (held > 0 or sub_held > 0) else 'SCANNING'
                 bot.pop('pending_buy_oid', None)
                 bot.pop('pending_buy_time', None)
                 bot.pop('buy_retries', None)
-                save_bots()
+                log.warning(f"[{pair}] Research buy retry limit reached — resetting to {bot['dca_state']}")
+            else:
+                bot['buy_retries'] = retries
+                bot['pending_buy_time'] = time.time()
+                log.debug(f"[{pair}] Research buy stale — cancelled, retry {retries}/3 on next cycle")
+            save_bots()
             return
 
     # ══════════════════════════════════════════

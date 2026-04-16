@@ -249,6 +249,7 @@ def get_chart_indicators(pair, granularity):
         c = df['close']
         h = df['high']
         l = df['low']
+        v = df['volume']
         times = df['start'].tolist()
 
         def to_series(series):
@@ -304,6 +305,13 @@ def get_chart_indicators(pair, granularity):
                 if d_col: out['stoch_d'] = to_series(stoch_df[d_col])
             except Exception as e:
                 log.warning(f"[{pair}] STOCH compute failed: {e}")
+
+        if 'vsma' in wanted:
+            try:
+                out['vsma_fast'] = to_series(v.rolling(window=5, min_periods=5).mean())
+                out['vsma_slow'] = to_series(v.rolling(window=25, min_periods=25).mean())
+            except Exception as e:
+                log.warning(f"[{pair}] VSMA compute failed: {e}")
 
         return jsonify(out)
     except Exception as e:

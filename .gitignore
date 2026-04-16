@@ -2,6 +2,7 @@
 .env
 bots.json
 stats.json
+trailing_stops.json
 equity.db
 screener_config.json
 notify_config.json
