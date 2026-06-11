@@ -1370,6 +1370,7 @@ def _run_grid_backtest(pair, timeframe, df, capital, params, progress_cb):
             sb_iter = range(sb_start, sb_end) if sb_end > sb_start else range(0)
             sb_highs = subbars['highs']
             sb_lows = subbars['lows']
+            sb_opens = subbars['opens']
             sb_closes = subbars['closes']
             sb_starts = subbars['starts']
             sb_first_idx = sb_start
@@ -1378,6 +1379,7 @@ def _run_grid_backtest(pair, timeframe, df, capital, params, progress_cb):
             sb_iter = [0]
             sb_highs = [bar_high]
             sb_lows = [bar_low]
+            sb_opens = [float(row['open'])]
             sb_closes = [close_px]
             sb_starts = [bar_time]
             sb_first_idx = 0
@@ -1396,8 +1398,7 @@ def _run_grid_backtest(pair, timeframe, df, capital, params, progress_cb):
                 trigger = t['hwm'] - t['effective_trail']
                 if sub_low <= trigger:
                     # Gap-through + slippage: market sell in live, not a fill at trigger
-                    sub_open_g = float(sb_opens[sb_idx]) if 'sb_opens' in dir() else trigger
-                    exit_px = min(trigger, sub_open_g) * (1 - SLIPPAGE_PCT)
+                    exit_px = min(trigger, float(sb_opens[sb_idx])) * (1 - SLIPPAGE_PCT)
                     fee = _exit_fee(exit_px, t['qty'])
                     pnl = (exit_px - t['fill_price']) * t['qty'] - fee
                     cash += exit_px * t['qty'] - fee
