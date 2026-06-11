@@ -952,7 +952,9 @@ def manage_runner_exits(bot, pair, cur_px):
             for j, g in enumerate(list(active_grids)):
                 if ((t['sell_oid'] and g.get('oid') == t['sell_oid']) or
                     (t.get('sell_cb_oid') and g.get('cb_oid') == t.get('sell_cb_oid'))):
-                    cancel_order_safe(g)
+                    if not cancel_order_safe(g):
+                        log.warning(f"[{pair}] RUNNER convert: cancel failed (likely filled) — keeping tracked")
+                        break
                     active_grids.remove(g)
                     t['sell_oid'] = ''
                     t['sell_cb_oid'] = ''
@@ -994,24 +996,49 @@ def check_trailing_stops(bot, cur_px, pair):
     for t in triggered:
         qty = t['quantity']
         effective = t.get('effective_trail', t.get('base_trail_distance', 0))
+        if time.time() - t.get('last_exit_attempt', 0) < 30:
+            continue  # rate-limit retries after a failed sell
+        t['last_exit_attempt'] = time.time()
         log.info(f"[{pair}] TRAILING STOP: fill@{t['fill_price']:.2f} "
               f"HWM={t['high_water_mark']:.2f} trail={effective:.2f} exit@{cur_px:.2f}")
         try:
-            oid = str(uuid.uuid4())
-            str_qty = snap_to_increment(qty, base_inc)
-            client.market_order_sell(client_order_id=oid, product_id=pair, base_size=str_qty)
+            if bot.get('paper'):
+                record_trade(bot, t['fill_price'], cur_px, qty, 'LONG', 'TRAILING_STOP', pair, mult)
+                bot['asset_held'] = max(0.0, bot.get('asset_held', 0) - qty)
+                bot['current_usd'] += qty * cur_px * 0.995
+                for g in list(active_grids):
+                    if ((t.get('sell_oid') and g.get('oid') == t['sell_oid']) or
+                        (t.get('sell_cb_oid') and g.get('cb_oid') == t['sell_cb_oid'])):
+                        active_grids.remove(g)
+                        break
+                trails.remove(t)
+                continue
 
-            record_trade(bot, t['fill_price'], cur_px, qty, 'LONG', 'TRAILING_STOP', pair, mult)
-            bot['asset_held'] -= qty
-            bot['current_usd'] += qty * cur_px * 0.995
-
-            # Cancel the corresponding grid sell order
+            # Cancel the resting grid sell FIRST and verify; if it filled in the race
+            # window the inventory is already gone — market-selling again double-sells.
+            cancelled_ok = True
             for g in list(active_grids):
                 if ((t.get('sell_oid') and g.get('oid') == t['sell_oid']) or
                     (t.get('sell_cb_oid') and g.get('cb_oid') == t['sell_cb_oid'])):
-                    cancel_order_safe(g)
-                    active_grids.remove(g)
+                    if cancel_order_safe(g):
+                        active_grids.remove(g)
+                    else:
+                        cancelled_ok = False
+                        log.warning(f"[{pair}] Trail stop: grid sell cancel failed (likely filled) — skipping market sell")
                     break
+            if not cancelled_ok:
+                continue
+
+            oid = str(uuid.uuid4())
+            str_qty = snap_to_increment(qty, base_inc)
+            res = client.market_order_sell(client_order_id=oid, product_id=pair, base_size=str_qty)
+            if not order_success(res):
+                log.error(f"[{pair}] Trail stop sell rejected: {order_error(res)} — will retry")
+                continue
+
+            record_trade(bot, t['fill_price'], cur_px, qty, 'LONG', 'TRAILING_STOP', pair, mult)
+            bot['asset_held'] = max(0.0, bot.get('asset_held', 0) - qty)
+            bot['current_usd'] += qty * cur_px * 0.995
         except Exception as e:
             log.error(f"[{pair}] Trail stop sell failed: {e}")
             continue
@@ -1086,8 +1113,12 @@ def _paper_grid_execute(bot_id, bot, pair):
             changes = True
             log.info(f"[{pair}] Paper BUY filled @ ${g['price']:.4f} -> SELL @ ${sell_px:.4f}")
         elif g['side'] == 'SELL' and cur_px >= g['price']:
-            # Simulate sell fill
-            qty = g.get('qty', chunk_usd / g['price'])
+            # Simulate sell fill — never sell more than tracked holdings (pre-seeded
+            # sell levels without qty previously credited cash for phantom inventory)
+            qty = min(g.get('qty', chunk_usd / g['price']), bot.get('asset_held', 0))
+            if qty <= 0:
+                g['filled'] = True
+                continue
             proceeds = qty * g['price']
             fee = proceeds * sim_fee_rate
             bot['asset_held'] = max(0, bot.get('asset_held', 0) - qty)
@@ -1203,7 +1234,8 @@ def compute_kelly_size(adx, direction, vol_ratio, step, trail, allocated_usd, mi
     if b <= 0:
         return min_order_usd
     kelly = (b * win_prob - (1 - win_prob)) / b
-    kelly = max(0.0, kelly)
+    if kelly <= 0:
+        return 0.0  # negative edge: skip placement (was min_order_usd, i.e. trade anyway)
 
     # V3: cluster-risk penalty — each open fill reduces sizing
     cluster_penalty = 1.0 / (1.0 + (depth * 0.5))
@@ -1354,20 +1386,41 @@ def enter_gtfo_mode(bot, pair, current_px, base_inc, quote_inc, mult, deriv_flag
     try:
         oid = str(uuid.uuid4())
         if current_px >= target:
-            # Already past target — execute market sell immediately
-            client.market_order_sell(client_order_id=oid, product_id=pair, base_size=str_qty)
-            log.info(f"[{pair}] GTFO: market exit at {current_px:.4f} (target {target:.4f} already breached)")
-        else:
-            # Place post-only limit
-            client.limit_order_gtc_sell(
-                client_order_id=oid, product_id=pair,
-                base_size=str_qty, limit_price=str(target), post_only=True
-            )
-            log.info(f"[{pair}] GTFO ENTERED: limit sell {str_qty} @ {target:.4f} (avg={avg_price:.4f}, score={score})")
+            # Already past target — execute market sell immediately, WITH accounting
+            res = client.market_order_sell(client_order_id=oid, product_id=pair, base_size=str_qty)
+            if not order_success(res):
+                log.error(f"[{pair}] GTFO market sell rejected: {order_error(res)}")
+                return False
+            fill_px, fill_qty, fill_fee = poll_market_fill(oid, pair)
+            exit_px = fill_px if fill_px else current_px
+            exit_qty = fill_qty if fill_qty else float(str_qty)
+            fee = fill_fee if fill_fee is not None else exit_px * exit_qty * 0.0025
+            record_trade(bot, avg_price, exit_px, exit_qty, 'LONG', 'GTFO', pair, mult, actual_fee=fee)
+            bot['asset_held'] = max(0.0, bot.get('asset_held', 0) - exit_qty)
+            bot['current_usd'] += (exit_qty * exit_px * mult) - fee
+            risk['per_fill_trails'] = []
+            risk['is_gtfo_active'] = True  # run_gtfo_cycle completes quarantine next cycle
+            risk['gtfo_target_price'] = 0
+            risk['gtfo_high_score_streak'] = 0
+            save_bots()
+            log.info(f"[{pair}] GTFO: market exit at {exit_px:.4f} (target {target:.4f} already breached)")
+            return True
+        # Place post-only limit (snap, not raw float math — off-increment rejections)
+        str_target = snap_to_increment(target, quote_inc)
+        res = client.limit_order_gtc_sell(
+            client_order_id=oid, product_id=pair,
+            base_size=str_qty, limit_price=str_target, post_only=True
+        )
+        if not order_success(res):
+            log.error(f"[{pair}] GTFO limit sell rejected: {order_error(res)}")
+            return False
+        log.info(f"[{pair}] GTFO ENTERED: limit sell {str_qty} @ {str_target} (avg={avg_price:.4f}, score={score})")
 
         risk['is_gtfo_active'] = True
-        risk['gtfo_target_price'] = target
+        risk['gtfo_target_price'] = float(str_target)
         risk['gtfo_order_id'] = oid
+        risk['gtfo_order_qty'] = float(str_qty)
+        risk['gtfo_avg_entry'] = avg_price
         risk['gtfo_high_score_streak'] = 0
         save_bots()
         return True
@@ -1381,6 +1434,35 @@ def run_gtfo_cycle(bot, pair, current_px, current_atr, score, base_inc, quote_in
     settings = bot.get('settings', {})
     risk = settings.setdefault('risk', {})
     trails = risk.get('per_fill_trails', [])
+
+    # GRID-C2: the GTFO exit order is tracked only here (active_grids is empty and
+    # the WS handler skips GTFO fills), so ITS fill must be accounted here or the
+    # bot re-sells inventory it no longer holds.
+    gtfo_oid = risk.get('gtfo_order_id')
+    if gtfo_oid:
+        try:
+            order_data = client.get("/api/v3/brokerage/orders/historical/batch",
+                                    params={"product_id": pair, "limit": 50})
+            for o in order_data.get('orders', []):
+                if o.get('client_order_id') == gtfo_oid and o.get('status') == 'FILLED':
+                    fsz = float(o.get('filled_size', 0) or 0)
+                    fpx = float(o.get('average_filled_price', current_px) or current_px)
+                    fee = extract_fee(o)
+                    if fee is None:
+                        fee = fpx * fsz * mult * 0.0006
+                    if fsz > 0:
+                        entry = risk.get('gtfo_avg_entry') or compute_weighted_avg(trails) or fpx
+                        record_trade(bot, entry, fpx, fsz, 'LONG', 'GTFO', pair, mult, actual_fee=fee)
+                        bot['asset_held'] = max(0.0, bot.get('asset_held', 0) - fsz)
+                        bot['current_usd'] += (fsz * fpx * mult) - fee
+                        risk['per_fill_trails'] = []
+                        risk.pop('gtfo_order_id', None)
+                        trails = []
+                        log.info(f"[{pair}] GTFO exit FILLED: {fsz} @ {fpx:.4f}")
+                        save_bots()
+                    break
+        except Exception as e:
+            log.error(f"[{pair}] GTFO fill check error: {e}")
 
     # Check if inventory is empty (order filled externally or via WS)
     if not trails or bot.get('asset_held', 0) <= 0:
@@ -1409,20 +1491,43 @@ def run_gtfo_cycle(bot, pair, current_px, current_atr, score, base_inc, quote_in
         try:
             cancel_all_pair_orders(pair)
             time.sleep(0.3)
-            total_qty = sum(t.get('quantity', 0) for t in trails)
+            # Never sell more than the bot's tracked holdings (a filled GTFO order
+            # previously left phantom inventory here and re-sold it every resync)
+            total_qty = min(sum(t.get('quantity', 0) for t in trails),
+                            max(0.0, bot.get('asset_held', 0)))
             str_qty = snap_to_increment(total_qty, base_inc)
+            if float(str_qty) <= 0:
+                return
             oid = str(uuid.uuid4())
             if current_px >= new_target:
-                client.market_order_sell(client_order_id=oid, product_id=pair, base_size=str_qty)
-                log.info(f"[{pair}] GTFO market exit at {current_px:.4f} (resynced target breached)")
+                res = client.market_order_sell(client_order_id=oid, product_id=pair, base_size=str_qty)
+                if not order_success(res):
+                    log.error(f"[{pair}] GTFO resync market sell rejected: {order_error(res)}")
+                    return
+                fill_px, fill_qty, fill_fee = poll_market_fill(oid, pair)
+                exit_px = fill_px if fill_px else current_px
+                exit_qty = fill_qty if fill_qty else float(str_qty)
+                fee = fill_fee if fill_fee is not None else exit_px * exit_qty * 0.0025
+                entry = risk.get('gtfo_avg_entry') or compute_weighted_avg(trails) or exit_px
+                record_trade(bot, entry, exit_px, exit_qty, 'LONG', 'GTFO', pair, mult, actual_fee=fee)
+                bot['asset_held'] = max(0.0, bot.get('asset_held', 0) - exit_qty)
+                bot['current_usd'] += (exit_qty * exit_px * mult) - fee
+                risk['per_fill_trails'] = []
+                risk.pop('gtfo_order_id', None)
+                log.info(f"[{pair}] GTFO market exit at {exit_px:.4f} (resynced target breached)")
             else:
-                client.limit_order_gtc_sell(
+                str_target = snap_to_increment(new_target, quote_inc)
+                res = client.limit_order_gtc_sell(
                     client_order_id=oid, product_id=pair,
-                    base_size=str_qty, limit_price=str(new_target), post_only=True
+                    base_size=str_qty, limit_price=str_target, post_only=True
                 )
+                if not order_success(res):
+                    log.error(f"[{pair}] GTFO resync limit rejected: {order_error(res)}")
+                    return
                 log.info(f"[{pair}] GTFO RESYNC: target {old_target:.4f} -> {new_target:.4f} (score={score})")
-            risk['gtfo_target_price'] = new_target
-            risk['gtfo_order_id'] = oid
+                risk['gtfo_target_price'] = float(str_target)
+                risk['gtfo_order_id'] = oid
+                risk['gtfo_order_qty'] = float(str_qty)
             save_bots()
         except Exception as e:
             log.error(f"[{pair}] GTFO resync failed: {e}")
@@ -1479,7 +1584,9 @@ def convert_to_runners(bot, pair, current_atr, top_pct=0.25):
                 # Find and cancel matching grid order
                 for g in list(settings.get('active_grids', [])):
                     if g.get('oid') == sell_oid and g.get('side') == 'SELL':
-                        cancel_order_safe(g)
+                        if not cancel_order_safe(g):
+                            log.warning(f"[{pair}] Runner: sell cancel failed (likely filled) — keeping tracked")
+                            break
                         try: settings['active_grids'].remove(g)
                         except ValueError: pass
                         break
@@ -1569,7 +1676,9 @@ def execute_grid_bot(bot_id, bot, pair):
         # Crisis scoring (now 5-factor with velocity-of-loss)
         crisis_score = compute_grid_crisis_score(depth, unrealized_loss_pct, regime, direction, velocity, loss_history)
 
-        min_step_pct = settings.get('min_step_pct', 0.3)
+        # Dynamic step floor must at least cover round-trip maker fees + margin —
+        # a 0.3% flip at 0.25%/side maker fees is a guaranteed net loss.
+        min_step_pct = max(settings.get('min_step_pct', 0.3), get_fee_floor_pct(settings))
         max_step_pct = settings.get('max_step_pct', 3.0)
 
         # V3: depth-aware step (exponential widening on FALLING)
@@ -1604,28 +1713,40 @@ def execute_grid_bot(bot_id, bot, pair):
             return  # Skip all deploy/redeploy logic while exiting
 
         # ── V3 QUARANTINE CHECK: don't redeploy until time elapsed AND ADX < 20 ──
-        if risk.get('quarantine_until', 0) > now_ts and curr_adx >= 20:
-            log.debug(f"[{pair}] Quarantined until {risk['quarantine_until']} (ADX={curr_adx:.1f} >= 20)")
-            return
+        # (previously `until > now AND adx >= 20`, which let any ADX dip bypass the
+        # time quarantine entirely — redeploying straight back into the decline)
+        q_until = risk.get('quarantine_until', 0)
+        if q_until > 0:
+            if now_ts < q_until or curr_adx >= 20:
+                log.debug(f"[{pair}] Quarantined until {q_until} (ADX={curr_adx:.1f}, need <20 after expiry)")
+                return
+            risk['quarantine_until'] = 0  # both conditions met — quarantine lifted
 
         # ── V3 CRISIS TRIGGER: enter GTFO at score ≥ 50 ──
         if crisis_score >= 80 and risk.get('per_fill_trails'):
-            # Hard liquidation: 75% emergency dump (existing behavior)
-            trails_to_exit = sorted(risk['per_fill_trails'], key=lambda t: t['fill_price'])
+            # Hard liquidation: 75% emergency dump. Sort DESCENDING — exit the
+            # highest (deepest-underwater) entries first; ascending kept the worst
+            # 25% and maximized remaining drawdown.
+            trails_to_exit = sorted(risk['per_fill_trails'], key=lambda t: t['fill_price'], reverse=True)
             n_exit = max(1, int(len(trails_to_exit) * 0.75))
+            exited = []
             for t in trails_to_exit[:n_exit]:
                 try:
                     oid = str(uuid.uuid4())
                     str_qty = snap_to_increment(t['quantity'], base_inc)
-                    client.market_order_sell(client_order_id=oid, product_id=pair, base_size=str_qty)
+                    res = client.market_order_sell(client_order_id=oid, product_id=pair, base_size=str_qty)
+                    if not order_success(res):
+                        log.error(f"[{pair}] Crisis exit rejected: {order_error(res)} — keeping trail")
+                        continue
                     record_trade(bot, t['fill_price'], cur_px, t['quantity'], 'LONG', 'CRISIS_CUT', pair, mult_now)
                     bot['asset_held'] = max(0, bot.get('asset_held', 0) - t['quantity'])
                     bot['current_usd'] += cur_px * t['quantity'] * 0.995
+                    exited.append(t)
                 except Exception as e:
                     log.error(f"[{pair}] Crisis exit failed: {e}")
-            risk['per_fill_trails'] = trails_to_exit[n_exit:]
+            risk['per_fill_trails'] = [t for t in risk['per_fill_trails'] if t not in exited]
             risk['depth_score'] = len(risk['per_fill_trails'])
-            log.warning(f"[{pair}] CRISIS SCORE {crisis_score}: Hard liquidation, exited {n_exit} fills")
+            log.warning(f"[{pair}] CRISIS SCORE {crisis_score}: Hard liquidation, exited {len(exited)} fills")
             save_bots()
             suspend_buys = True
         elif crisis_score >= 50 and risk.get('per_fill_trails'):
@@ -1635,12 +1756,17 @@ def execute_grid_bot(bot_id, bot, pair):
                 return
             suspend_buys = True
         elif crisis_score >= 40:
-            # Cancel bottom 50% buys (lighter touch)
+            # Cancel bottom 50% buys (lighter touch). The cancel must be VERIFIED on
+            # the exchange first — previously the orders were only dropped from
+            # tracking and kept filling in the crash with nobody accounting for them.
             buy_grids = sorted([g for g in settings.get('active_grids', []) if g.get('side') == 'BUY'], key=lambda g: g['price'])
             n_cancel = len(buy_grids) // 2
             for g in buy_grids[:n_cancel]:
-                risk.setdefault('cancelled_buy_levels', []).append(g['price'])
-                settings['active_grids'].remove(g)
+                if cancel_order_safe(g):
+                    risk.setdefault('cancelled_buy_levels', []).append(g['price'])
+                    settings['active_grids'].remove(g)
+                else:
+                    log.warning(f"[{pair}] Crisis buy-cancel failed at {g['price']:.2f} (likely filled) — keeping tracked for fill processing")
             suspend_buys = True
 
         # ── V3 WATERFALL CLAUSE: zero-sizing during volatility expansion ──
@@ -1962,12 +2088,23 @@ def execute_grid_bot(bot_id, bot, pair):
         log.info(f"[{pair}] Recentered: {lower:.2f} - {upper:.2f}, {total_orders} levels")
 
     chunk_size_usd = bot['current_usd'] / total_orders
-    # Dynamic mode: Kelly-based order sizing
+    # Dynamic mode: Kelly-based order sizing — capped so the SUM across all levels
+    # can never exceed available capital (10%/order x 15 levels = 150% before)
     if is_dynamic and risk.get('dyn_order_usd', 0) > 0:
-        chunk_size_usd = risk['dyn_order_usd']
+        chunk_size_usd = min(risk['dyn_order_usd'], bot['current_usd'] / total_orders)
+
+    # GRID-H5: warn when the configured step can't cover round-trip maker fees
+    fee_floor = get_fee_floor_pct(settings)
+    step_pct_actual = (step / cur_px) * 100 if cur_px > 0 else 0
+    if step_pct_actual > 0 and step_pct_actual < fee_floor:
+        log.warning(f"[{pair}] Grid step {step_pct_actual:.2f}% is BELOW the fee floor "
+                    f"{fee_floor:.2f}% (2x maker fee + margin) — every flip loses money. "
+                    f"Set settings['maker_fee_pct'] to your real fee tier or widen the step.")
 
     max_loss = init_risk_state(settings, buy_levels, step, chunk_size_usd, cur_px)
-    log.info(f"[{pair}] Max loss envelope: ${max_loss:.2f} ({max_loss/bot['allocated_usd']*100:.1f}% of capital)")
+    alloc = bot.get('allocated_usd', 0) or 0
+    pct_str = f" ({max_loss/alloc*100:.1f}% of capital)" if alloc > 0 else ""
+    log.info(f"[{pair}] Max loss envelope: ${max_loss:.2f}{pct_str}")
 
     for idx, price in enumerate(buy_levels):
         g = place_grid_buy(pair, price, chunk_size_usd, base_inc, quote_inc, deriv_flag, mult)
@@ -1986,15 +2123,32 @@ def execute_grid_bot(bot_id, bot, pair):
             if total_sell_cost <= bot['current_usd'] * 0.95:
                 try:
                     buy_oid = str(uuid.uuid4())
-                    client.market_order_buy(client_order_id=buy_oid, product_id=pair, quote_size=str(round(total_sell_cost * 0.99, 2)))
-                    bot['asset_held'] += total_sell_qty
-                    bot['current_usd'] -= total_sell_cost
-                    log.info(f"[{pair}] Market bought {total_sell_qty:.6f} inventory for sell grid")
+                    res = client.market_order_buy(client_order_id=buy_oid, product_id=pair, quote_size=str(round(total_sell_cost * 0.99, 2)))
+                    if not order_success(res):
+                        log.error(f"[{pair}] Inventory buy rejected: {order_error(res)} — skipping sell side")
+                        raise RuntimeError('seed buy rejected')
+                    fill_px, fill_qty, fill_fee = poll_market_fill(buy_oid, pair)
+                    seed_px = fill_px if fill_px else cur_px
+                    seed_qty = fill_qty if fill_qty else total_sell_qty
+                    seed_fee = fill_fee if fill_fee is not None else total_sell_cost * 0.0025
+                    bot['asset_held'] += seed_qty
+                    bot['current_usd'] -= (seed_qty * seed_px + seed_fee)
+                    log.info(f"[{pair}] Market bought {seed_qty:.6f} inventory for sell grid @ {seed_px:.4f}")
                     time.sleep(1)
+                    risk_state = settings.setdefault('risk', {})
+                    total_buy_levels = risk_state.get('total_buy_levels', len(buy_levels) or 10)
+                    per_level_qty = seed_qty / len(sell_levels) if sell_levels else 0
                     for price in sell_levels:
                         qty = float(chunk_size_usd * 0.99) / price
                         g = place_grid_sell(pair, price, qty, base_inc, quote_inc, deriv_flag, mult)
-                        if g: new_grids.append(g)
+                        if g:
+                            g['entry_price'] = seed_px  # honest flip PnL for seed inventory
+                            new_grids.append(g)
+                            # GRID-H4: seed inventory must be trailed and visible to the
+                            # circuit breaker like every other held fill
+                            activate_trail(bot, seed_px, per_level_qty, 0, total_buy_levels, step, sell_grid=g)
+                except RuntimeError:
+                    pass
                 except Exception as e:
                     log.error(f"[{pair}] Inventory buy failed: {e}")
             else:
