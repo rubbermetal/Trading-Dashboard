@@ -4,13 +4,15 @@ import json
 import time
 import uuid
 import threading
+from collections import deque
 from coinbase.websocket import WSClient
 
 from shared import ACTIVE_BOTS, client
 from bot_utils import (
     is_derivative, get_contract_multiplier,
     record_trade, save_bots, snap_to_increment,
-    extract_fee, poll_market_fill
+    extract_fee, poll_market_fill,
+    order_success, order_error, get_exit_lock
 )
 
 from grid_engine import (
@@ -19,12 +21,23 @@ from grid_engine import (
     cancel_order_safe, has_order_nearby, find_safe_price
 )
 
-from bot_executors import momentum_get_stop_price, npr_get_stop_and_trail
+from bot_executors import momentum_get_stop_price, npr_get_stop_and_trail, _start_protected_exit
 from logger import get_logger
 
 log = get_logger('ws_engine')
 
 _processed_fill_oids = set()
+_processed_fill_order = deque()  # insertion order for bounded eviction
+
+def _remember_fill_oid(oid):
+    """Dedupe with bounded eviction. Wholesale clear() reopened the double-processing
+    window for seconds-old fills (Coinbase replays order snapshots on reconnect)."""
+    if oid in _processed_fill_oids:
+        return
+    _processed_fill_oids.add(oid)
+    _processed_fill_order.append(oid)
+    while len(_processed_fill_order) > 2000:
+        _processed_fill_oids.discard(_processed_fill_order.popleft())
 
 # FIX #4: Track subscribed pairs so we can resubscribe when new bots are added
 _subscribed_pairs = set()
@@ -95,26 +108,57 @@ def process_price_tick(pair, cur_px):
         for t in triggered:
             qty = t['quantity']
             effective = t.get('effective_trail', t.get('base_trail_distance', 0))
+            # Rate-limit retries: a failed sell must not be re-fired on every tick
+            if time.time() - t.get('last_exit_attempt', 0) < 30:
+                continue
+            t['last_exit_attempt'] = time.time()
             log.warning(f"[{pair}] TRAIL STOP HIT: HWM={t['high_water_mark']:.2f} trail={effective:.2f} exit@{cur_px:.2f}")
             try:
+                if bot.get('paper'):
+                    # Paper bots never place real orders
+                    actual_exit = cur_px
+                    actual_fee = cur_px * qty * mult * 0.004
+                    record_trade(bot, t['fill_price'], actual_exit, qty, 'LONG', 'TRAILING_STOP', pair, mult, actual_fee=actual_fee)
+                    bot['asset_held'] = max(0.0, bot.get('asset_held', 0) - qty)
+                    bot['current_usd'] += (qty * actual_exit * mult) - actual_fee
+                    for g in list(active_grids):
+                        if ((t.get('sell_oid') and g.get('oid') == t['sell_oid']) or
+                            (t.get('sell_cb_oid') and g.get('cb_oid') == t['sell_cb_oid'])):
+                            active_grids.remove(g)
+                            break
+                    trails.remove(t)
+                    changes_made = True
+                    continue
+
+                # Cancel the resting grid sell FIRST and verify — if it filled in the
+                # race window, skip the market sell (inventory is already gone)
+                cancelled_ok = True
+                for g in list(active_grids):
+                    if ((t.get('sell_oid') and g.get('oid') == t['sell_oid']) or
+                        (t.get('sell_cb_oid') and g.get('cb_oid') == t['sell_cb_oid'])):
+                        if cancel_order_safe(g):
+                            active_grids.remove(g)
+                        else:
+                            cancelled_ok = False
+                            log.warning(f"[{pair}] Trail: grid sell cancel failed (likely filled) — skipping market sell, fill handler will account")
+                        break
+                if not cancelled_ok:
+                    continue
+
                 oid = str(uuid.uuid4())
                 str_qty = snap_to_increment(qty, base_inc)
-                client.market_order_sell(client_order_id=oid, product_id=pair, base_size=str_qty)
+                res = client.market_order_sell(client_order_id=oid, product_id=pair, base_size=str_qty)
+                if not order_success(res):
+                    log.error(f"[{pair}] Trail sell rejected: {order_error(res)} — will retry")
+                    continue
 
                 fill_px, fill_sz, fill_fee = poll_market_fill(oid, pair, retries=2, delay=0.5)
                 actual_exit = fill_px if fill_px else cur_px
                 actual_fee = fill_fee if fill_fee is not None else (actual_exit * qty * mult * 0.0025)
 
                 record_trade(bot, t['fill_price'], actual_exit, qty, 'LONG', 'TRAILING_STOP', pair, mult, actual_fee=actual_fee)
-                bot['asset_held'] -= qty
+                bot['asset_held'] = max(0.0, bot.get('asset_held', 0) - qty)
                 bot['current_usd'] += (qty * actual_exit * mult) - actual_fee
-
-                for g in list(active_grids):
-                    if ((t.get('sell_oid') and g.get('oid') == t['sell_oid']) or
-                        (t.get('sell_cb_oid') and g.get('cb_oid') == t['sell_cb_oid'])):
-                        cancel_order_safe(g)
-                        active_grids.remove(g)
-                        break
 
             except Exception as e:
                 log.error(f"[{pair}] Trail sell failed: {e}")
@@ -150,19 +194,33 @@ def process_price_tick(pair, cur_px):
             mult = get_contract_multiplier(pair)
             log.warning(f"[{pair}] MOMENTUM Phase {phase} STOP HIT: price {cur_px:.2f} <= stop {stop_px:.2f}")
 
+            exit_lock = get_exit_lock(bot_id)
+            if not exit_lock.acquire(blocking=False):
+                continue  # REST executor is already exiting this position
             try:
-                oid = str(uuid.uuid4())
-                str_qty = snap_to_increment(held, bot.get('base_inc', bot.get('settings', {}).get('base_inc', '0.00000001')))
-                client.market_order_sell(client_order_id=oid, product_id=pair, base_size=str_qty)
+                if bot.get('position_side') != 'LONG' or bot.get('asset_held', 0) <= 0:
+                    continue
+                if bot.get('paper'):
+                    actual_exit = cur_px
+                    actual_fee = cur_px * held * mult * 0.004
+                    log.info(f"[{pair}] PAPER MOMENTUM EXIT ({exit_reason}): {held} at ${cur_px:.4f}")
+                else:
+                    oid = str(uuid.uuid4())
+                    str_qty = snap_to_increment(held, bot.get('base_inc', bot.get('settings', {}).get('base_inc', '0.00000001')))
+                    res = client.market_order_sell(client_order_id=oid, product_id=pair, base_size=str_qty)
+                    if not order_success(res):
+                        log.error(f"[{pair}] MOMENTUM stop sell rejected: {order_error(res)} — position unchanged, will retry")
+                        continue
 
-                fill_px, fill_sz, fill_fee = poll_market_fill(oid, pair, retries=2, delay=0.5)
-                actual_exit = fill_px if fill_px else cur_px
-                actual_fee = fill_fee if fill_fee is not None else (actual_exit * held * mult * 0.0025)
+                    fill_px, fill_sz, fill_fee = poll_market_fill(oid, pair, retries=2, delay=0.5)
+                    actual_exit = fill_px if fill_px else cur_px
+                    actual_fee = fill_fee if fill_fee is not None else (actual_exit * held * mult * 0.0025)
 
                 record_trade(bot, bot['entry_price'], actual_exit, held, 'LONG', exit_reason, pair, mult, actual_fee=actual_fee)
 
                 profit = (actual_exit - bot['entry_price']) * held * mult
-                bot['current_usd'] = bot['allocated_usd'] + profit - actual_fee
+                # Additive cash ledger: credit gross proceeds - fee (entry deducted cost+fee)
+                bot['current_usd'] += (held * actual_exit * mult) - actual_fee
                 bot['asset_held'] = 0.0
                 bot['position_side'] = 'FLAT'
                 for key in ['entry_atr', 'high_water_mark', 'stop_phase', 'fee_estimate',
@@ -172,6 +230,8 @@ def process_price_tick(pair, cur_px):
                 log.info(f"[{pair}] MOMENTUM EXIT ({exit_reason}): PnL ${profit:.2f}")
             except Exception as e:
                 log.error(f"[{pair}] MOMENTUM sell failed: {e}")
+            finally:
+                exit_lock.release()
 
     # ==========================================
     # VWAP_MR / SQUEEZE BOTS: ATR trailing stop (WS path)
@@ -194,13 +254,26 @@ def process_price_tick(pair, cur_px):
         if cur_px <= stop_px:
             mult = get_contract_multiplier(pair)
             log.warning(f"[{pair}] {strat} TRAIL STOP: price {cur_px:.2f} <= stop {stop_px:.2f}")
+            exit_lock = get_exit_lock(bot_id)
+            if not exit_lock.acquire(blocking=False):
+                continue  # REST executor is already exiting this position
             try:
-                oid = str(uuid.uuid4())
-                str_qty = snap_to_increment(held, bot.get('base_inc', bot.get('settings', {}).get('base_inc', '0.00000001')))
-                client.market_order_sell(client_order_id=oid, product_id=pair, base_size=str_qty)
-                fill_px, fill_sz, fill_fee = poll_market_fill(oid, pair, retries=2, delay=0.5)
-                actual_exit = fill_px if fill_px else cur_px
-                actual_fee = fill_fee if fill_fee is not None else (actual_exit * held * mult * 0.0025)
+                if bot.get('position_side') != 'LONG' or bot.get('asset_held', 0) <= 0:
+                    continue
+                if bot.get('paper'):
+                    actual_exit = cur_px
+                    actual_fee = cur_px * held * mult * 0.004
+                    log.info(f"[{pair}] PAPER {strat} EXIT (TRAILING_STOP): {held} at ${cur_px:.4f}")
+                else:
+                    oid = str(uuid.uuid4())
+                    str_qty = snap_to_increment(held, bot.get('base_inc', bot.get('settings', {}).get('base_inc', '0.00000001')))
+                    res = client.market_order_sell(client_order_id=oid, product_id=pair, base_size=str_qty)
+                    if not order_success(res):
+                        log.error(f"[{pair}] {strat} trail sell rejected: {order_error(res)} — position unchanged, will retry")
+                        continue
+                    fill_px, fill_sz, fill_fee = poll_market_fill(oid, pair, retries=2, delay=0.5)
+                    actual_exit = fill_px if fill_px else cur_px
+                    actual_fee = fill_fee if fill_fee is not None else (actual_exit * held * mult * 0.0025)
                 record_trade(bot, bot['entry_price'], actual_exit, held, 'LONG', 'TRAILING_STOP', pair, mult, actual_fee=actual_fee)
                 profit = (actual_exit - bot['entry_price']) * held * mult
                 bot['current_usd'] += (held * actual_exit * mult) - actual_fee
@@ -212,6 +285,8 @@ def process_price_tick(pair, cur_px):
                 log.info(f"[{pair}] {strat} EXIT (TRAILING_STOP): PnL ${profit:.2f}")
             except Exception as e:
                 log.error(f"[{pair}] {strat} trail sell failed: {e}")
+            finally:
+                exit_lock.release()
 
     # ==========================================
     # NPR BOTS: Event stop + trailing stop
@@ -220,41 +295,58 @@ def process_price_tick(pair, cur_px):
         if bot.get('strategy') != 'NPR' or bot.get('status') != 'RUNNING': continue
         if bot.get('pair') != pair or bot.get('npr_state') != 'IN_POSITION': continue
         if bot.get('position_side') == 'FLAT': continue
+        if bot.get('pending_exit'): continue  # maker exit already resting; REST cycle resolves it
         should_exit, exit_reason = npr_get_stop_and_trail(bot, cur_px)
         if should_exit:
             side = bot['position_side']
             held, entry_px = bot.get('asset_held', 0), bot.get('entry_price', cur_px)
             mult = get_contract_multiplier(pair)
+            exit_lock = get_exit_lock(bot_id)
+            if not exit_lock.acquire(blocking=False):
+                continue  # REST executor is already exiting this position
             try:
+                if bot.get('position_side') == 'FLAT' or bot.get('pending_exit'):
+                    continue
+                if bot.get('paper'):
+                    actual_exit = cur_px
+                    actual_fee = cur_px * held * mult * 0.004
+                    pnl = (actual_exit - entry_px) * held * mult if side == 'LONG' else (entry_px - actual_exit) * held * mult
+                    record_trade(bot, entry_px, actual_exit, held, side, exit_reason, pair, mult, actual_fee=actual_fee)
+                    if pnl < 0: bot['daily_loss'] = bot.get('daily_loss', 0) + abs(pnl)
+                    bot['current_usd'] += (held * entry_px * mult) + pnl - actual_fee
+                    bot['asset_held'] = 0.0; bot['position_side'] = 'FLAT'; bot['npr_state'] = 'SCANNING'
+                    for k in ['event_stop','event_type','event_direction','event_bar_data','high_water_mark','low_water_mark','trail_distance','partial_filled','atr_at_entry']:
+                        bot.pop(k, None)
+                    changes_made = True
+                    log.info(f"[{pair}] PAPER NPR EXIT ({exit_reason}): PnL ${pnl:.2f}")
+                    continue
+
                 p_info = client.get_product(product_id=pair)
                 qi = str(getattr(p_info, 'quote_increment', '0.01'))
                 bi = str(getattr(p_info, 'base_increment', '0.00000001'))
-                exit_oid = str(uuid.uuid4())
-                if side == 'LONG':
-                    sp = snap_to_increment(cur_px - float(qi), qi)
-                    sq = snap_to_increment(held, bi)
-                    client.limit_order_gtc_sell(client_order_id=exit_oid, product_id=pair, base_size=sq, limit_price=sp, post_only=True)
-                else:
-                    sp = snap_to_increment(cur_px + float(qi), qi)
-                    sq = snap_to_increment(held, bi)
-                    client.limit_order_gtc_buy(client_order_id=exit_oid, product_id=pair, base_size=sq, limit_price=sp, post_only=True)
-
-                fill_px, fill_sz, fill_fee = poll_market_fill(exit_oid, pair, retries=2, delay=0.5)
-                actual_exit = fill_px if fill_px else cur_px
-                actual_fee = fill_fee if fill_fee is not None else (actual_exit * held * mult * 0.0025)
-
-                pnl = (actual_exit - entry_px) * held * mult if side == 'LONG' else (entry_px - actual_exit) * held * mult
-                record_trade(bot, entry_px, actual_exit, held, side, exit_reason, pair, mult, actual_fee=actual_fee)
-                if pnl < 0: bot['daily_loss'] = bot.get('daily_loss', 0) + abs(pnl)
-                gross_proceeds = held * actual_exit * mult
-                bot['current_usd'] += gross_proceeds - actual_fee
-                bot['asset_held'] = 0.0; bot['position_side'] = 'FLAT'; bot['npr_state'] = 'SCANNING'
-                for k in ['event_stop','event_type','event_direction','event_bar_data','high_water_mark','low_water_mark','trail_distance','partial_filled','atr_at_entry']:
-                    bot.pop(k, None)
-                changes_made = True
-                log.info(f"[{pair}] NPR EXIT ({exit_reason}): PnL ${pnl:.2f}")
+                # Maker-first protected exit: joins the book post-only (fee saving) and
+                # records bot['pending_exit'] — the REST executor confirms the fill and
+                # does the accounting, or falls back to market after the timeout.
+                # State is NEVER flipped to FLAT on an unverified order anymore.
+                result = _start_protected_exit(bot, pair, side, held, exit_reason, cur_px, qi, bi, mult)
+                if result == 'PENDING':
+                    changes_made = True
+                elif result is not None:
+                    actual_exit, actual_fee = result
+                    pnl = (actual_exit - entry_px) * held * mult if side == 'LONG' else (entry_px - actual_exit) * held * mult
+                    record_trade(bot, entry_px, actual_exit, held, side, exit_reason, pair, mult, actual_fee=actual_fee)
+                    if pnl < 0: bot['daily_loss'] = bot.get('daily_loss', 0) + abs(pnl)
+                    bot['current_usd'] += (held * entry_px * mult) + pnl - actual_fee
+                    bot['asset_held'] = 0.0; bot['position_side'] = 'FLAT'; bot['npr_state'] = 'SCANNING'
+                    for k in ['event_stop','event_type','event_direction','event_bar_data','high_water_mark','low_water_mark','trail_distance','partial_filled','atr_at_entry','pending_exit']:
+                        bot.pop(k, None)
+                    changes_made = True
+                    log.info(f"[{pair}] NPR EXIT ({exit_reason}): PnL ${pnl:.2f}")
+                # result None: nothing placed; position intact, stop re-fires next tick/cycle
             except Exception as e:
                 log.error(f"[{pair}] NPR exit failed: {e}")
+            finally:
+                exit_lock.release()
 
     # ==========================================
     # DCA BOTS: Live profit % update (display only, no stop execution)
@@ -288,11 +380,9 @@ def process_grid_fill(order_id, filled_size, filled_value, status, pair):
         for i, grid in enumerate(active_grids):
             matched = (grid.get('oid') == order_id) or (grid.get('cb_oid') == order_id)
             if matched and status == 'FILLED':
-                _processed_fill_oids.add(order_id)
-                if grid.get('oid'): _processed_fill_oids.add(grid['oid'])
-                if grid.get('cb_oid'): _processed_fill_oids.add(grid['cb_oid'])
-                if len(_processed_fill_oids) > 500:
-                    _processed_fill_oids.clear()
+                _remember_fill_oid(order_id)
+                if grid.get('oid'): _remember_fill_oid(grid['oid'])
+                if grid.get('cb_oid'): _remember_fill_oid(grid['cb_oid'])
                 changes_made = True
 
                 base_inc = settings.get('base_inc', '0.00000001')
@@ -341,6 +431,7 @@ def process_grid_fill(order_id, filled_size, filled_value, status, pair):
                     new_grid = place_grid_sell(pair, new_price, filled_size, base_inc, quote_inc, deriv_flag, mult)
 
                     if new_grid:
+                        new_grid['entry_price'] = grid['price']  # actual buy price for flip PnL
                         active_grids[i] = new_grid
                         bot['asset_held'] += float(filled_size)
                         bot['current_usd'] -= float(filled_value)
@@ -355,7 +446,9 @@ def process_grid_fill(order_id, filled_size, filled_value, status, pair):
                     activate_trail(bot, grid['price'], float(filled_size), level_idx, total_levels, step_size, sell_grid=new_grid if new_grid else None)
 
                 elif grid['side'] == 'SELL':
-                    buy_price = grid['price'] - step_size
+                    # Use the stored actual buy price when available (dynamic sells sit
+                    # 1.5-2 steps above the fill; price-minus-step fabricates the PnL)
+                    buy_price = grid.get('entry_price', grid['price'] - step_size)
                     sell_price = grid['price']
                     record_trade(bot, buy_price, sell_price, filled_size, 'LONG', 'GRID_FLIP', pair, mult)
                     deactivate_trail_by_sell(bot, sell_oid=grid.get('oid'), sell_cb_oid=grid.get('cb_oid'))

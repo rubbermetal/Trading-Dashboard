@@ -114,6 +114,135 @@ def get_base_increment(bot, pair):
     return bi
 
 
+EXIT_PENDING_TIMEOUT_SEC = 60  # cancel + market-fallback an unfilled maker exit after this
+
+
+def _market_exit(bot, pair, side, qty, base_inc, mult, cur_px, reason):
+    """Market exit with success check + fill poll. Returns (ok, exit_px, fee)."""
+    oid = str(uuid.uuid4())
+    str_qty = snap_to_increment(qty, base_inc)
+    if float(str_qty) <= 0:
+        return False, 0.0, 0.0
+    try:
+        if side == 'LONG':
+            res = client.market_order_sell(client_order_id=oid, product_id=pair, base_size=str_qty)
+        else:
+            res = client.market_order_buy(client_order_id=oid, product_id=pair, base_size=str_qty)
+    except Exception as e:
+        log.error(f"[{pair}] Market exit ({reason}) failed: {e}")
+        return False, 0.0, 0.0
+    if not order_success(res):
+        log.error(f"[{pair}] Market exit ({reason}) rejected: {order_error(res)}")
+        return False, 0.0, 0.0
+    fill_px, fill_sz, fill_fee = poll_market_fill(oid, pair)
+    exit_px = fill_px if fill_px else cur_px
+    fee = fill_fee if fill_fee is not None else exit_px * float(str_qty) * mult * 0.0025
+    return True, exit_px, fee
+
+
+def _start_protected_exit(bot, pair, side, qty, reason, cur_px, quote_inc, base_inc, mult):
+    """EXEC-C1: maker-first protected exit. Joins (never crosses) the book with a
+    post-only limit to keep maker fees; verifies placement. On post-only rejection
+    falls back to a market exit immediately.
+    Returns: 'PENDING' (maker exit resting, bot['pending_exit'] recorded),
+             (exit_px, fee) on an immediate market-fallback fill,
+             None when nothing could be placed (position left intact)."""
+    oid = str(uuid.uuid4())
+    str_qty = snap_to_increment(qty, base_inc)
+    if float(str_qty) <= 0:
+        return None
+    try:
+        book = client.get_product_book(product_id=pair, limit=1)
+        best_bid = float(book.pricebook.bids[0].price)
+        best_ask = float(book.pricebook.asks[0].price)
+    except Exception:
+        tick = float(quote_inc)
+        best_bid, best_ask = cur_px - tick, cur_px + tick
+    try:
+        if side == 'LONG':
+            # Sell at the ask: maker, first in line to fill on the next uptick
+            str_price = snap_to_increment(best_ask, quote_inc)
+            res = client.limit_order_gtc_sell(client_order_id=oid, product_id=pair,
+                                              base_size=str_qty, limit_price=str_price, post_only=True)
+        else:
+            str_price = snap_to_increment(best_bid, quote_inc)
+            res = client.limit_order_gtc_buy(client_order_id=oid, product_id=pair,
+                                             base_size=str_qty, limit_price=str_price, post_only=True)
+    except Exception as e:
+        log.error(f"[{pair}] Maker exit ({reason}) failed: {e}")
+        res = None
+    if order_success(res):
+        bot['pending_exit'] = {'oid': oid, 'qty': float(str_qty), 'reason': reason,
+                               'placed_at': time.time(), 'limit_px': float(str_price), 'side': side}
+        log.info(f"[{pair}] Maker exit ({reason}) placed: {str_qty} @ ${str_price} — awaiting fill")
+        return 'PENDING'
+    log.warning(f"[{pair}] Maker exit ({reason}) rejected ({order_error(res)}) — falling back to market")
+    ok, exit_px, fee = _market_exit(bot, pair, side, qty, base_inc, mult, cur_px, reason)
+    if not ok:
+        return None
+    return (exit_px, fee)
+
+
+def _resolve_pending_exit(bot, pair, mult, base_inc, cur_px):
+    """Checks a previously placed maker exit (bot['pending_exit']).
+    Returns: 'WAIT' while resting within timeout;
+             (exit_px, fee, qty) once the position is fully out (fill and/or
+             market fallback for the remainder) — pending_exit popped;
+             'FAILED' when the exit could not complete — pending_exit popped,
+             position state intact so the stop re-fires next cycle."""
+    pe = bot.get('pending_exit') or {}
+    oid, qty, side = pe.get('oid'), pe.get('qty', 0), pe.get('side', 'LONG')
+    reason = pe.get('reason', 'EVENT_STOP')
+    order = _lookup_order(oid, pair)
+    status = (order or {}).get('status', '')
+    filled_sz = float((order or {}).get('filled_size', 0) or 0)
+    avg_px = float((order or {}).get('average_filled_price', 0) or 0)
+    fee_so_far = extract_fee(order) if order else None
+
+    if status == 'FILLED' and filled_sz > 0:
+        bot.pop('pending_exit', None)
+        fee = fee_so_far if fee_so_far is not None else avg_px * filled_sz * mult * 0.0006
+        return (avg_px if avg_px else cur_px, fee, filled_sz)
+
+    age = time.time() - pe.get('placed_at', 0)
+    if status in ('OPEN', '') and age < EXIT_PENDING_TIMEOUT_SEC:
+        return 'WAIT'
+
+    # Timed out (or order vanished): cancel whatever rests, market the remainder
+    if status in ('OPEN', ''):
+        try:
+            real_id = (order or {}).get('order_id')
+            if real_id:
+                client.cancel_orders(order_ids=[real_id])
+                time.sleep(1)
+                order = _lookup_order(oid, pair) or order
+                filled_sz = float((order or {}).get('filled_size', 0) or 0)
+                avg_px = float((order or {}).get('average_filled_price', 0) or 0)
+                fee_so_far = extract_fee(order) if order else fee_so_far
+        except Exception as e:
+            log.error(f"[{pair}] Pending exit cancel error: {e}")
+
+    remainder = max(0.0, qty - filled_sz)
+    if remainder * cur_px * mult < 0.01:  # fully (or near-fully) filled before cancel
+        bot.pop('pending_exit', None)
+        fee = fee_so_far if fee_so_far is not None else avg_px * filled_sz * mult * 0.0006
+        return (avg_px if avg_px else cur_px, fee, filled_sz if filled_sz > 0 else qty)
+
+    ok, mkt_px, mkt_fee = _market_exit(bot, pair, side, remainder, base_inc, mult, cur_px, f"{reason}/fallback")
+    bot.pop('pending_exit', None)
+    if not ok:
+        if filled_sz > 0:
+            # Partial maker fill happened; account it, leave the rest for the next cycle
+            fee = fee_so_far if fee_so_far is not None else avg_px * filled_sz * mult * 0.0006
+            return (avg_px if avg_px else cur_px, fee, filled_sz)
+        log.error(f"[{pair}] Protected exit FAILED entirely — position intact, will retry")
+        return 'FAILED'
+    total_qty = filled_sz + remainder
+    maker_fee = fee_so_far if fee_so_far is not None else (avg_px * filled_sz * mult * 0.0006 if filled_sz else 0.0)
+    w_px = ((avg_px * filled_sz) + (mkt_px * remainder)) / total_qty if total_qty > 0 else mkt_px
+    return (w_px, maker_fee + mkt_fee, total_qty)
+
+
 # ==========================================
 # STRATEGY EXECUTORS (NON-GRID)
 # ==========================================
@@ -381,7 +510,10 @@ def execute_orb(bot_id, bot, pair):
                 log.info(f"[{pair}] PAPER ORB EXIT SHORT ({exit_reason}): {held} at ${current_px:.4f}")
             else:
                 oid = str(uuid.uuid4())
-                client.market_order_buy(client_order_id=oid, product_id=pair, base_size=str(held))
+                res = client.market_order_buy(client_order_id=oid, product_id=pair, base_size=str(held))
+                if not order_success(res):
+                    log.error(f"[{pair}] ORB short exit rejected: {order_error(res)} — position unchanged, will retry")
+                    return
                 fill_px, fill_sz, fill_fee = poll_market_fill(oid, pair)
                 actual_exit = fill_px if fill_px else current_px
                 actual_fee = fill_fee if fill_fee is not None else (actual_exit * held * mult * 0.0025)
@@ -389,7 +521,8 @@ def execute_orb(bot_id, bot, pair):
             record_trade(bot, bot['entry_price'], actual_exit, held, 'SHORT', exit_reason, pair, mult, actual_fee=actual_fee)
 
             profit = (bot['entry_price'] - actual_exit) * held * mult
-            bot['current_usd'] = bot['allocated_usd'] + profit - actual_fee
+            # Additive cash ledger: credit entry notional + PnL - fee (entry deducted cost)
+            bot['current_usd'] += (held * bot['entry_price'] * mult) + profit - actual_fee
             bot['asset_held'] = 0.0
             bot['position_side'] = 'FLAT'
             bot.pop('orb_data', None)
@@ -413,7 +546,14 @@ def _quad_exit(bot, pair, current_px, mult, exit_reason, reason):
             log.info(f"[{pair}] QUAD PAPER SELL: {held} at ${current_px:.2f} ({exit_reason})")
         else:
             oid = str(uuid.uuid4())
-            client.market_order_sell(client_order_id=oid, product_id=pair, base_size=str(held))
+            str_qty = snap_to_increment(held, get_base_increment(bot, pair)) if not is_derivative(pair) else str(held)
+            held = float(str_qty)
+            if held <= 0:
+                return
+            res = client.market_order_sell(client_order_id=oid, product_id=pair, base_size=str_qty)
+            if not order_success(res):
+                log.error(f"[{pair}] QUAD exit sell rejected: {order_error(res)} — position unchanged, will retry")
+                return
             fill_px, fill_sz, fill_fee = poll_market_fill(oid, pair)
             actual_exit = fill_px if fill_px else current_px
             actual_fee = fill_fee if fill_fee is not None else (actual_exit * held * mult * 0.0025)
@@ -452,7 +592,9 @@ def execute_quad(bot_id, bot, pair):
     parsed = [{'start': int(c['start']), 'open': float(c['open']), 'high': float(c['high']), 'low': float(c['low']), 'close': float(c['close'])} for c in candles]
     df = pd.DataFrame(parsed).sort_values('start').reset_index(drop=True)
 
-    current_px = float(df.iloc[-1]['close'])
+    current_px = float(df.iloc[-1]['close'])  # live price proxy (may be forming bar) for stop checks
+    df = _drop_forming_candle(df, tf_sec)
+    if len(df) < 200: return
     deriv_flag = is_derivative(pair)
     mult = get_contract_multiplier(pair)
 
@@ -521,9 +663,16 @@ def execute_quad(bot_id, bot, pair):
             else:
                 oid = str(uuid.uuid4())
                 if deriv_flag:
-                    client.market_order_buy(client_order_id=oid, product_id=pair, base_size=str(qty))
+                    res = client.market_order_buy(client_order_id=oid, product_id=pair, base_size=str(qty))
                 else:
-                    client.market_order_buy(client_order_id=oid, product_id=pair, quote_size=str(allocation_usd))
+                    res = client.market_order_buy(client_order_id=oid, product_id=pair, quote_size=str(round(allocation_usd, 2)))
+                if not order_success(res):
+                    log.error(f"[{pair}] QUAD entry buy rejected: {order_error(res)}")
+                    return
+                fill_px, fill_sz, fill_fee = poll_market_fill(oid, pair)
+                if fill_px and fill_sz:
+                    current_px, qty = fill_px, fill_sz
+                    allocation_usd = fill_px * fill_sz * mult + (fill_fee or 0)
 
             sl_mult = _QUAD_SL_MULT.get(signal_type, 2.0)
             tp_mult = _QUAD_TP_MULT.get(signal_type, 3.0)
@@ -564,13 +713,16 @@ def execute_trap(bot_id, bot, pair):
                'low': float(c['low']), 'close': float(c['close']), 'volume': float(c.get('volume', 0))}
               for c in candles]
     df = pd.DataFrame(parsed).sort_values('start').reset_index(drop=True)
+    trap_live_px = float(df.iloc[-1]['close'])
+    df = _drop_forming_candle(df, tf_sec)
+    if len(df) < 200: return
 
     pos_side = bot.get('position_side', 'FLAT')
     entry_stage = bot.get('entry_stage', 0)
     avg_entry = bot.get('avg_entry', 0.0)
     breakout_data = bot.get('breakout_data', None)
     tp_stage = bot.get('tp_stage', 0)
-    current_px = float(df.iloc[-1]['close'])
+    current_px = trap_live_px  # live price (forming bar) for fills/stops; signals use closed bars
 
     deriv_flag = is_derivative(pair)
     mult = get_contract_multiplier(pair)
@@ -697,10 +849,14 @@ def execute_trap(bot_id, bot, pair):
             oid = str(uuid.uuid4())
             held = abs(bot['asset_held'])
             sell_qty = round(held * 0.5, 6) if not deriv_flag else max(1, int(held * 0.5))
-            if deriv_flag:
-                client.market_order_sell(client_order_id=oid, product_id=pair, base_size=str(sell_qty))
-            else:
-                client.market_order_sell(client_order_id=oid, product_id=pair, base_size=str(sell_qty))
+            str_qty = str(sell_qty) if deriv_flag else snap_to_increment(sell_qty, get_base_increment(bot, pair))
+            sell_qty = float(str_qty)
+            if sell_qty <= 0:
+                return
+            res = client.market_order_sell(client_order_id=oid, product_id=pair, base_size=str_qty)
+            if not order_success(res):
+                log.error(f"[{pair}] TRAP partial exit rejected: {order_error(res)} — position unchanged")
+                return
 
             fill_px, fill_sz, fill_fee = poll_market_fill(oid, pair)
             actual_exit = fill_px if fill_px else current_px
@@ -709,7 +865,8 @@ def execute_trap(bot_id, bot, pair):
             record_trade(bot, bot['avg_entry'], actual_exit, sell_qty, 'LONG', 'TARGET_1', pair, mult, actual_fee=actual_fee)
 
             profit = (actual_exit - bot['avg_entry']) * sell_qty * mult
-            bot['current_usd'] += profit - actual_fee
+            # Additive cash ledger: credit cost basis + PnL - fee
+            bot['current_usd'] += (sell_qty * bot['avg_entry'] * mult) + profit - actual_fee
             bot['asset_held'] -= sell_qty
             bot['tp_stage'] = 1
             save_bots()
@@ -722,7 +879,10 @@ def execute_trap(bot_id, bot, pair):
             oid = str(uuid.uuid4())
             held = abs(bot['asset_held'])
             cover_qty = max(1, int(held * 0.5))
-            client.market_order_buy(client_order_id=oid, product_id=pair, base_size=str(cover_qty))
+            res = client.market_order_buy(client_order_id=oid, product_id=pair, base_size=str(cover_qty))
+            if not order_success(res):
+                log.error(f"[{pair}] TRAP partial cover rejected: {order_error(res)} — position unchanged")
+                return
 
             fill_px, fill_sz, fill_fee = poll_market_fill(oid, pair)
             actual_exit = fill_px if fill_px else current_px
@@ -731,7 +891,8 @@ def execute_trap(bot_id, bot, pair):
             record_trade(bot, bot['avg_entry'], actual_exit, cover_qty, 'SHORT', 'TARGET_1', pair, mult, actual_fee=actual_fee)
 
             profit = (bot['avg_entry'] - actual_exit) * cover_qty * mult
-            bot['current_usd'] += profit - actual_fee
+            # Additive cash ledger: credit cost basis + PnL - fee
+            bot['current_usd'] += (cover_qty * bot['avg_entry'] * mult) + profit - actual_fee
             bot['asset_held'] += cover_qty
             bot['tp_stage'] = 1
             save_bots()
@@ -745,7 +906,14 @@ def execute_trap(bot_id, bot, pair):
         try:
             oid = str(uuid.uuid4())
             held = abs(bot['asset_held'])
-            client.market_order_sell(client_order_id=oid, product_id=pair, base_size=str(held))
+            str_qty = str(held) if deriv_flag else snap_to_increment(held, get_base_increment(bot, pair))
+            held = float(str_qty)
+            if held <= 0:
+                return
+            res = client.market_order_sell(client_order_id=oid, product_id=pair, base_size=str_qty)
+            if not order_success(res):
+                log.error(f"[{pair}] TRAP exit sell rejected: {order_error(res)} — position unchanged, will retry")
+                return
 
             fill_px, fill_sz, fill_fee = poll_market_fill(oid, pair)
             actual_exit = fill_px if fill_px else current_px
@@ -754,7 +922,8 @@ def execute_trap(bot_id, bot, pair):
             record_trade(bot, bot['avg_entry'], actual_exit, held, 'LONG', exit_reason, pair, mult, actual_fee=actual_fee)
 
             profit = (actual_exit - bot['avg_entry']) * held * mult
-            bot['current_usd'] = bot['allocated_usd'] + profit - actual_fee
+            # Additive cash ledger: credit cost basis + PnL - fee
+            bot['current_usd'] += (held * bot['avg_entry'] * mult) + profit - actual_fee
             bot['asset_held'] = 0.0
             bot['position_side'] = 'FLAT'
             bot['entry_stage'] = 0
@@ -771,7 +940,10 @@ def execute_trap(bot_id, bot, pair):
         try:
             oid = str(uuid.uuid4())
             held = abs(bot['asset_held'])
-            client.market_order_buy(client_order_id=oid, product_id=pair, base_size=str(held))
+            res = client.market_order_buy(client_order_id=oid, product_id=pair, base_size=str(held))
+            if not order_success(res):
+                log.error(f"[{pair}] TRAP exit cover rejected: {order_error(res)} — position unchanged, will retry")
+                return
 
             fill_px, fill_sz, fill_fee = poll_market_fill(oid, pair)
             actual_exit = fill_px if fill_px else current_px
@@ -780,7 +952,8 @@ def execute_trap(bot_id, bot, pair):
             record_trade(bot, bot['avg_entry'], actual_exit, held, 'SHORT', exit_reason, pair, mult, actual_fee=actual_fee)
 
             profit = (bot['avg_entry'] - actual_exit) * held * mult
-            bot['current_usd'] = bot['allocated_usd'] + profit - actual_fee
+            # Additive cash ledger: credit cost basis + PnL - fee
+            bot['current_usd'] += (held * bot['avg_entry'] * mult) + profit - actual_fee
             bot['asset_held'] = 0.0
             bot['position_side'] = 'FLAT'
             bot['entry_stage'] = 0
@@ -867,6 +1040,8 @@ def execute_momentum(bot_id, bot, pair):
                'low': float(c['low']), 'close': float(c['close']), 'volume': float(c.get('volume', 0))}
               for c in candles]
     df = pd.DataFrame(parsed).sort_values('start').reset_index(drop=True)
+    df = _drop_forming_candle(df, tf_sec)
+    if len(df) < 200: return
 
     pos_side = bot.get('position_side', 'FLAT')
     deriv_flag = is_derivative(pair)
@@ -899,7 +1074,10 @@ def execute_momentum(bot_id, bot, pair):
                 else:
                     oid = str(uuid.uuid4())
                     str_qty = snap_to_increment(held, base_inc)
-                    client.market_order_sell(client_order_id=oid, product_id=pair, base_size=str_qty)
+                    res = client.market_order_sell(client_order_id=oid, product_id=pair, base_size=str_qty)
+                    if not order_success(res):
+                        log.error(f"[{pair}] MOMENTUM stop sell rejected: {order_error(res)} — position unchanged, will retry")
+                        return
 
                     fill_px, fill_sz, fill_fee = poll_market_fill(oid, pair)
                     actual_exit = fill_px if fill_px else cur_px
@@ -908,7 +1086,8 @@ def execute_momentum(bot_id, bot, pair):
                 record_trade(bot, bot['entry_price'], actual_exit, held, 'LONG', exit_reason, pair, mult, actual_fee=actual_fee)
 
                 profit = (actual_exit - bot['entry_price']) * held * mult
-                bot['current_usd'] = bot['allocated_usd'] + profit - actual_fee
+                # Additive cash ledger: credit gross proceeds - fee (entry deducted cost+fee)
+                bot['current_usd'] += (held * actual_exit * mult) - actual_fee
                 bot['asset_held'] = 0.0
                 bot['position_side'] = 'FLAT'
                 # Clear momentum state
@@ -935,7 +1114,7 @@ def execute_momentum(bot_id, bot, pair):
         # Check if order filled
         try:
             order_data = client.get("/api/v3/brokerage/orders/historical/batch", params={
-                "order_status": "FILLED", "product_id": pair, "limit": 10
+                "order_status": "FILLED", "product_id": pair, "limit": 50
             })
             filled = False
             mom_order_obj = None
@@ -1504,6 +1683,8 @@ def _execute_dca_legacy(bot_id, bot, pair):
                'low': float(c['low']), 'close': float(c['close']), 'volume': float(c.get('volume', 0))}
               for c in candles]
     df = pd.DataFrame(parsed).sort_values('start').reset_index(drop=True)
+    df = _drop_forming_candle(df, tf_sec)
+    if len(df) < 200: return
 
     # Cache product info
     bot['base_min_size'] = base_min
@@ -1531,13 +1712,25 @@ def _execute_dca_legacy(bot_id, bot, pair):
         # CIRCUIT BREAKER: hard exit at -25% drawdown
         if drawdown_pct >= 25 and dca_state not in ('CIRCUIT_BREAK', 'PAUSED'):
             log.warning(f"[{pair}] CIRCUIT BREAKER: {drawdown_pct:.1f}% drawdown — liquidating position")
+            if time.time() - bot.get('cb_last_attempt', 0) < 30:
+                return  # rate-limit retries; don't hammer the API every 15s cycle
+            bot['cb_last_attempt'] = time.time()
             try:
-                oid = str(uuid.uuid4())
-                str_qty = snap_to_increment(held, base_inc)
-                client.market_order_sell(client_order_id=oid, product_id=pair, base_size=str_qty)
-                fill_px, fill_sz, fill_fee = poll_market_fill(oid, pair, retries=2, delay=0.5)
-                actual_exit = fill_px if fill_px else cur_px
-                actual_fee = fill_fee if fill_fee is not None else (actual_exit * held * mult * 0.0025)
+                if bot.get('paper'):
+                    # Paper bots must never place real orders (previously this path did)
+                    actual_exit = cur_px
+                    actual_fee = cur_px * held * mult * 0.004
+                    log.info(f"[{pair}] PAPER CIRCUIT BREAKER: simulated sell {held} at ${cur_px:.4f}")
+                else:
+                    oid = str(uuid.uuid4())
+                    str_qty = snap_to_increment(held, base_inc)
+                    res = client.market_order_sell(client_order_id=oid, product_id=pair, base_size=str_qty)
+                    if not order_success(res):
+                        log.error(f"[{pair}] Circuit breaker sell rejected: {order_error(res)} — will retry")
+                        return
+                    fill_px, fill_sz, fill_fee = poll_market_fill(oid, pair, retries=3, delay=1.0)
+                    actual_exit = fill_px if fill_px else cur_px
+                    actual_fee = fill_fee if fill_fee is not None else (actual_exit * held * mult * 0.0025)
                 record_trade(bot, avg_entry, actual_exit, held, 'LONG', 'CIRCUIT_BREAK', pair, mult, actual_fee=actual_fee)
                 bot['current_usd'] += (held * actual_exit * mult) - actual_fee
                 bot['asset_held'] = 0.0
@@ -1579,7 +1772,7 @@ def _execute_dca_legacy(bot_id, bot, pair):
 
         try:
             order_data = client.get("/api/v3/brokerage/orders/historical/batch", params={
-                "order_status": "FILLED", "product_id": pair, "limit": 10
+                "order_status": "FILLED", "product_id": pair, "limit": 50
             })
             filled = False
             buy_order_obj = None
@@ -1935,6 +2128,8 @@ def _execute_dca_research(bot_id, bot, pair):
                'low': float(c['low']), 'close': float(c['close']), 'volume': float(c.get('volume', 0))}
               for c in candles]
     df = pd.DataFrame(parsed).sort_values('start').reset_index(drop=True)
+    df = _drop_forming_candle(df, tf_sec)
+    if len(df) < 200: return
 
     # Cache product info
     bot['base_min_size'] = base_min
@@ -1996,7 +2191,7 @@ def _execute_dca_research(bot_id, bot, pair):
         retries = bot.get('buy_retries', 0)
         try:
             order_data = client.get("/api/v3/brokerage/orders/historical/batch", params={
-                "order_status": "FILLED", "product_id": pair, "limit": 10
+                "order_status": "FILLED", "product_id": pair, "limit": 50
             })
             filled = False
             buy_order_obj = None
@@ -2498,6 +2693,8 @@ def execute_npr(bot_id, bot, pair):
                'low': float(c['low']), 'close': float(c['close']), 'volume': float(c.get('volume', 0))}
               for c in candles]
     df = pd.DataFrame(parsed).sort_values('start').reset_index(drop=True)
+    df = _drop_forming_candle(df, tf_sec)
+    if len(df) < 200: return
 
     mult = get_contract_multiplier(pair)
     npr_state = bot.get('npr_state', 'SCANNING')
@@ -2529,49 +2726,67 @@ def execute_npr(bot_id, bot, pair):
         atr = bot.get('atr_at_entry', 1.0)
         partial = bot.get('partial_filled', False)
 
-        should_exit, exit_reason = npr_get_stop_and_trail(bot, cur_px)
-        if should_exit:
-            try:
-                held = bot['asset_held']
-                if bot.get('paper'):
-                    actual_exit = cur_px
-                    actual_fee = cur_px * held * mult * 0.004
-                    log.info(f"[{pair}] PAPER NPR EXIT {side} ({exit_reason}): {held} at ${cur_px:.4f}")
-                else:
-                    if side == 'LONG':
-                        str_price = snap_to_increment(cur_px - float(quote_inc), quote_inc)
-                        str_qty = snap_to_increment(held, base_inc)
-                        oid = str(uuid.uuid4())
-                        client.limit_order_gtc_sell(client_order_id=oid, product_id=pair,
-                                                    base_size=str_qty, limit_price=str_price, post_only=True)
-                    else:
-                        str_price = snap_to_increment(cur_px + float(quote_inc), quote_inc)
-                        str_qty = snap_to_increment(held, base_inc)
-                        oid = str(uuid.uuid4())
-                        client.limit_order_gtc_buy(client_order_id=oid, product_id=pair,
-                                                   base_size=str_qty, limit_price=str_price, post_only=True)
-
-                    fill_px, fill_sz, fill_fee = poll_market_fill(oid, pair)
-                    actual_exit = fill_px if fill_px else cur_px
-                    actual_fee = fill_fee if fill_fee is not None else (actual_exit * held * mult * 0.0025)
-
-                pnl = (actual_exit - entry_px) * held * mult if side == 'LONG' else (entry_px - actual_exit) * held * mult
-                record_trade(bot, entry_px, actual_exit, held, side, exit_reason, pair, mult, actual_fee=actual_fee)
-                if pnl < 0:
-                    bot['daily_loss'] = bot.get('daily_loss', 0) + abs(pnl)
-                gross_proceeds = held * actual_exit * mult
-                bot['current_usd'] += gross_proceeds - actual_fee
+        def _finalize_exit(actual_exit, actual_fee, qty_out, exit_reason):
+            pnl = (actual_exit - entry_px) * qty_out * mult if side == 'LONG' else (entry_px - actual_exit) * qty_out * mult
+            record_trade(bot, entry_px, actual_exit, qty_out, side, exit_reason, pair, mult, actual_fee=actual_fee)
+            if pnl < 0:
+                bot['daily_loss'] = bot.get('daily_loss', 0) + abs(pnl)
+            # Additive cash ledger (entry deducted notional+fee): credit entry notional + PnL - fee.
+            # For LONG this equals gross proceeds - fee; works for SHORT margin convention too.
+            bot['current_usd'] += (qty_out * entry_px * mult) + pnl - actual_fee
+            remaining = max(0.0, bot.get('asset_held', 0) - qty_out)
+            bot['asset_held'] = remaining
+            if remaining * actual_exit * mult < 0.01:
                 bot['asset_held'] = 0.0
                 bot['position_side'] = 'FLAT'
                 bot['npr_state'] = 'SCANNING'
                 for key in ['event_stop', 'event_type', 'event_direction', 'event_bar_data',
                             'high_water_mark', 'low_water_mark', 'trail_distance', 'partial_filled',
-                            'atr_at_entry', 'pending_order_oid', 'pending_order_time']:
+                            'atr_at_entry', 'pending_order_oid', 'pending_order_time', 'pending_exit']:
                     bot.pop(key, None)
-                save_bots()
-                log.info(f"[{pair}] EXIT ({exit_reason}): PnL ${pnl:.2f}")
+            save_bots()
+            log.info(f"[{pair}] EXIT ({exit_reason}): PnL ${pnl:.2f}")
+
+        # Resolve a maker exit placed earlier (by this loop or the WS thread) FIRST
+        if bot.get('pending_exit'):
+            pe_reason = bot['pending_exit'].get('reason', 'EVENT_STOP')
+            outcome = _resolve_pending_exit(bot, pair, mult, base_inc, cur_px)
+            if outcome == 'WAIT':
+                return
+            if outcome != 'FAILED':
+                actual_exit, actual_fee, qty_out = outcome
+                _finalize_exit(actual_exit, actual_fee, qty_out, pe_reason)
+                return
+            save_bots()
+            return  # exit failed; state intact, stop re-fires next cycle
+
+        should_exit, exit_reason = npr_get_stop_and_trail(bot, cur_px)
+        if should_exit:
+            exit_lock = get_exit_lock(bot_id)
+            if not exit_lock.acquire(blocking=False):
+                return  # WS thread is already exiting this position
+            try:
+                if bot.get('position_side') == 'FLAT' or bot.get('pending_exit'):
+                    return
+                held = bot['asset_held']
+                if bot.get('paper'):
+                    actual_fee = cur_px * held * mult * 0.004
+                    log.info(f"[{pair}] PAPER NPR EXIT {side} ({exit_reason}): {held} at ${cur_px:.4f}")
+                    _finalize_exit(cur_px, actual_fee, held, exit_reason)
+                    return
+                result = _start_protected_exit(bot, pair, side, held, exit_reason,
+                                               cur_px, quote_inc, base_inc, mult)
+                if result == 'PENDING':
+                    save_bots()
+                    return
+                if result is None:
+                    return  # nothing placed; position intact, retry next cycle
+                actual_exit, actual_fee = result
+                _finalize_exit(actual_exit, actual_fee, held, exit_reason)
             except Exception as e:
                 log.error(f"[{pair}] Exit order failed: {e}")
+            finally:
+                exit_lock.release()
             return
 
         # Activate trailing after breakeven + 0.25 ATR
@@ -2608,14 +2823,16 @@ def execute_npr(bot_id, bot, pair):
 
         try:
             order_data = client.get("/api/v3/brokerage/orders/historical/batch", params={
-                "order_status": "FILLED", "product_id": pair, "limit": 10
+                "order_status": "FILLED", "product_id": pair, "limit": 50
             })
             filled = False
+            entry_fee = None
             for o in order_data.get('orders', []):
                 if o.get('client_order_id') == pending_oid:
                     filled = True
                     filled_size = float(o.get('filled_size', 0))
                     avg_fill_px = float(o.get('average_filled_price', cur_px))
+                    entry_fee = extract_fee(o)
                     break
         except Exception as e:
             log.error(f"[{pair}] Fill check error: {e}")
@@ -2626,6 +2843,11 @@ def execute_npr(bot_id, bot, pair):
             bot['position_side'] = 'LONG' if direction == 'BULL' else 'SHORT'
             bot['entry_price'] = avg_fill_px
             bot['asset_held'] = filled_size
+            # Cash ledger: deduct entry notional + fee (was previously never deducted,
+            # inflating current_usd by the full position size every round trip)
+            gross_cost = filled_size * avg_fill_px * mult
+            fee = entry_fee if entry_fee is not None else gross_cost * 0.0006
+            bot['current_usd'] -= (gross_cost + fee)
             bot['npr_state'] = 'IN_POSITION'
             bot['high_water_mark'] = avg_fill_px
             bot['low_water_mark'] = avg_fill_px
@@ -2811,9 +3033,13 @@ def execute_vwap_mr(bot_id, bot, pair):
     if len(candles) < 100:
         return
 
-    parsed = [{'open': float(c['open']), 'high': float(c['high']), 'low': float(c['low']),
-               'close': float(c['close']), 'volume': float(c.get('volume', 0))} for c in candles]
-    df = pd.DataFrame(parsed).sort_values(by=pd.RangeIndex(len(parsed))).reset_index(drop=True)
+    parsed = [{'start': int(c['start']), 'open': float(c['open']), 'high': float(c['high']),
+               'low': float(c['low']), 'close': float(c['close']), 'volume': float(c.get('volume', 0))} for c in candles]
+    # Coinbase returns candles newest-first; indicators need ascending time order
+    df = pd.DataFrame(parsed).sort_values('start').reset_index(drop=True)
+    df = _drop_forming_candle(df, tf_sec)
+    if len(df) < 100:
+        return
 
     signal, reason, atr_val = calculate_vwap_mr(df)
     mult = get_contract_multiplier(pair)
@@ -2848,7 +3074,10 @@ def execute_vwap_mr(bot_id, bot, pair):
         try:
             oid = str(uuid.uuid4())
             str_qty = snap_to_increment(held, base_inc)
-            client.market_order_sell(client_order_id=oid, product_id=pair, base_size=str_qty)
+            res = client.market_order_sell(client_order_id=oid, product_id=pair, base_size=str_qty)
+            if not order_success(res):
+                log.error(f"[{pair}] Exit sell rejected: {order_error(res)} — position unchanged, will retry")
+                return
             fill_px, fill_sz, fill_fee = poll_market_fill(oid, pair)
             actual_exit = fill_px if fill_px else cur_px
             actual_fee = fill_fee if fill_fee is not None else actual_exit * held * mult * 0.0025
@@ -2861,7 +3090,7 @@ def execute_vwap_mr(bot_id, bot, pair):
                 bot.pop(k, None)
             save_bots()
             log.info(f"[{pair}] VWAP_MR EXIT: PnL ${profit:.2f} ({reason})")
-            notify_bot_exit(pair, 'VWAP_MR', actual_exit, profit)
+            notify_bot_exit(pair, 'VWAP_MR', actual_exit, profit, 'VWAP_TOUCH')
         except Exception as e:
             log.error(f"[{pair}] VWAP_MR sell failed: {e}")
 
@@ -2876,7 +3105,10 @@ def execute_vwap_mr(bot_id, bot, pair):
             try:
                 oid = str(uuid.uuid4())
                 str_qty = snap_to_increment(held, base_inc)
-                client.market_order_sell(client_order_id=oid, product_id=pair, base_size=str_qty)
+                res = client.market_order_sell(client_order_id=oid, product_id=pair, base_size=str_qty)
+                if not order_success(res):
+                    log.error(f"[{pair}] Trailing stop sell rejected: {order_error(res)} — position unchanged, will retry")
+                    return
                 fill_px, fill_sz, fill_fee = poll_market_fill(oid, pair)
                 actual_exit = fill_px if fill_px else cur_px
                 actual_fee = fill_fee if fill_fee is not None else actual_exit * held * mult * 0.0025
@@ -2889,7 +3121,7 @@ def execute_vwap_mr(bot_id, bot, pair):
                     bot.pop(k, None)
                 save_bots()
                 log.warning(f"[{pair}] VWAP_MR TRAILING STOP: PnL ${profit:.2f}")
-                notify_bot_exit(pair, 'VWAP_MR', actual_exit, profit)
+                notify_bot_exit(pair, 'VWAP_MR', actual_exit, profit, 'TRAILING_STOP')
             except Exception as e:
                 log.error(f"[{pair}] VWAP_MR stop sell failed: {e}")
 
@@ -2918,9 +3150,13 @@ def execute_squeeze(bot_id, bot, pair):
     if len(candles) < 210:
         return
 
-    parsed = [{'open': float(c['open']), 'high': float(c['high']), 'low': float(c['low']),
-               'close': float(c['close']), 'volume': float(c.get('volume', 0))} for c in candles]
-    df = pd.DataFrame(parsed).sort_values(by=pd.RangeIndex(len(parsed))).reset_index(drop=True)
+    parsed = [{'start': int(c['start']), 'open': float(c['open']), 'high': float(c['high']),
+               'low': float(c['low']), 'close': float(c['close']), 'volume': float(c.get('volume', 0))} for c in candles]
+    # Coinbase returns candles newest-first; indicators need ascending time order
+    df = pd.DataFrame(parsed).sort_values('start').reset_index(drop=True)
+    df = _drop_forming_candle(df, tf_sec)
+    if len(df) < 100:
+        return
 
     signal, reason, atr_val = calculate_squeeze(df)
     mult = get_contract_multiplier(pair)
@@ -2955,7 +3191,10 @@ def execute_squeeze(bot_id, bot, pair):
         try:
             oid = str(uuid.uuid4())
             str_qty = snap_to_increment(held, base_inc)
-            client.market_order_sell(client_order_id=oid, product_id=pair, base_size=str_qty)
+            res = client.market_order_sell(client_order_id=oid, product_id=pair, base_size=str_qty)
+            if not order_success(res):
+                log.error(f"[{pair}] Exit sell rejected: {order_error(res)} — position unchanged, will retry")
+                return
             fill_px, fill_sz, fill_fee = poll_market_fill(oid, pair)
             actual_exit = fill_px if fill_px else cur_px
             actual_fee = fill_fee if fill_fee is not None else actual_exit * held * mult * 0.0025
@@ -2968,7 +3207,7 @@ def execute_squeeze(bot_id, bot, pair):
                 bot.pop(k, None)
             save_bots()
             log.info(f"[{pair}] SQUEEZE EXIT: PnL ${profit:.2f} ({reason})")
-            notify_bot_exit(pair, 'SQUEEZE', actual_exit, profit)
+            notify_bot_exit(pair, 'SQUEEZE', actual_exit, profit, 'MOMENTUM_REVERSAL')
         except Exception as e:
             log.error(f"[{pair}] SQUEEZE sell failed: {e}")
 
@@ -2983,7 +3222,10 @@ def execute_squeeze(bot_id, bot, pair):
             try:
                 oid = str(uuid.uuid4())
                 str_qty = snap_to_increment(held, base_inc)
-                client.market_order_sell(client_order_id=oid, product_id=pair, base_size=str_qty)
+                res = client.market_order_sell(client_order_id=oid, product_id=pair, base_size=str_qty)
+                if not order_success(res):
+                    log.error(f"[{pair}] Trailing stop sell rejected: {order_error(res)} — position unchanged, will retry")
+                    return
                 fill_px, fill_sz, fill_fee = poll_market_fill(oid, pair)
                 actual_exit = fill_px if fill_px else cur_px
                 actual_fee = fill_fee if fill_fee is not None else actual_exit * held * mult * 0.0025
@@ -2996,6 +3238,6 @@ def execute_squeeze(bot_id, bot, pair):
                     bot.pop(k, None)
                 save_bots()
                 log.warning(f"[{pair}] SQUEEZE TRAILING STOP: PnL ${profit:.2f}")
-                notify_bot_exit(pair, 'SQUEEZE', actual_exit, profit)
+                notify_bot_exit(pair, 'SQUEEZE', actual_exit, profit, 'TRAILING_STOP')
             except Exception as e:
                 log.error(f"[{pair}] SQUEEZE stop sell failed: {e}")
