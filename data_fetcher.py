@@ -118,7 +118,9 @@ def get_candles(pair, tf_key, start_ts, end_ts, progress_cb=None):
         if new_candles:
             new_df = pd.DataFrame(new_candles)
             combined = pd.concat([cached, new_df], ignore_index=True)
-            combined = combined.drop_duplicates(subset='start').sort_values('start').reset_index(drop=True)
+            # keep='last': the refetch deliberately overlaps the cache tail — the
+            # fresh row must win over a possibly-partial cached candle
+            combined = combined.drop_duplicates(subset='start', keep='last').sort_values('start').reset_index(drop=True)
             _save_cache(pair, tf_key, combined)
         else:
             combined = cached

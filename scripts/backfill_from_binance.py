@@ -7,6 +7,13 @@ and inserts into the local candles.db (same schema as Coinbase data).
 
 Only fills gaps before the earliest existing Coinbase data per pair.
 Uses file lock to prevent conflicts with the cron updater.
+
+!! DATA-QUALITY CAVEAT !!
+Binance prices are USDT-quoted; Coinbase prices are USD-quoted, and the venues
+differ. The USDT/USD basis has reached multiple percent during depegs, so every
+splice seam between Binance and Coinbase rows introduces an artificial price
+jump — fake volatility and fake grid/DCA fills in any backtest crossing the
+seam. Treat backtests over spliced ranges as approximate. Requires --confirm.
 """
 
 import csv
@@ -140,6 +147,15 @@ def backfill_pair(conn, cb_pair, binance_symbol):
 
 
 def main():
+    if '--confirm' not in sys.argv:
+        print("=" * 70)
+        print("WARNING: this splices Binance USDT-quoted candles into the Coinbase")
+        print("USD-quoted series. USDT/USD basis (multi-percent during depegs) and")
+        print("venue differences create artificial jumps at every seam — backtests")
+        print("crossing spliced ranges will show fake volatility and fake fills.")
+        print("Re-run with --confirm to proceed.")
+        print("=" * 70)
+        return
     print("=== Binance Backfill ===")
     print(f"DB: {DB_PATH}")
     print(f"Target start: {datetime.utcfromtimestamp(TARGET_START).strftime('%Y-%m-%d')}")

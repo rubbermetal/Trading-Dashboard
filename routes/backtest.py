@@ -38,20 +38,20 @@ def _cleanup_old_jobs():
     now = time.time()
     for jid in list(_BACKTEST_JOBS.keys()):
         j = _BACKTEST_JOBS[jid]
-        # Kill jobs older than 1 hour
-        if now - j['created_at'] > 3600:
-            _BACKTEST_JOBS.pop(jid, None)
-            continue
         # Detect dead threads — if status is running but thread is dead, mark as error
         thread = j.get('thread')
         if j['status'] in ('fetching', 'running'):
             if thread and not thread.is_alive():
                 j['status'] = 'error'
                 j['error'] = 'Thread died unexpectedly (service restart or crash)'
-            # Timeout: if running for more than 60 minutes, kill it
-            elif now - j['created_at'] > 3600:
+            # Timeout: mark RUNNING jobs failed after 20 minutes
+            # (previously unreachable: an earlier >1h check popped the job first)
+            elif now - j['created_at'] > 1200:
                 j['status'] = 'error'
                 j['error'] = 'Timed out after 20 minutes'
+        # Evict finished/errored jobs after 1 hour
+        if now - j['created_at'] > 3600 and j['status'] not in ('fetching', 'running'):
+            _BACKTEST_JOBS.pop(jid, None)
 
 
 def _run_job(job_id, pair, strategy, tf_key, tf_minutes, start_ts, end_ts, capital, params):
@@ -115,14 +115,24 @@ def _run_job(job_id, pair, strategy, tf_key, tf_minutes, start_ts, end_ts, capit
 
 @backtest_bp.route('/api/backtest/run', methods=['POST'])
 def start_backtest():
-    _cleanup_old_jobs()
+    with _BACKTEST_LOCK:
+        _cleanup_old_jobs()
 
-    # Check for actually-alive running job (cleanup catches dead threads)
-    running = [j for j in _BACKTEST_JOBS.values()
-               if j['status'] in ('fetching', 'running') and j.get('thread') and j['thread'].is_alive()]
-    if running:
-        elapsed = int(time.time() - running[0]['created_at'])
-        return jsonify(success=False, error=f'A backtest is running ({elapsed}s elapsed, {running[0]["progress"]}% done). Wait for it to complete.'), 429
+        # Check for actually-alive running job (cleanup catches dead threads).
+        # Held under the lock so two simultaneous POSTs can't both pass.
+        running = [j for j in _BACKTEST_JOBS.values()
+                   if j['status'] in ('queued', 'fetching', 'running')
+                   and (j.get('thread') is None or j['thread'].is_alive())]
+        if running:
+            elapsed = int(time.time() - running[0]['created_at'])
+            return jsonify(success=False, error=f'A backtest is running ({elapsed}s elapsed, {running[0]["progress"]}% done). Wait for it to complete.'), 429
+
+        # Reserve the slot immediately; filled in below after validation
+        _slot_id = f"bt_{uuid.uuid4().hex[:8]}"
+        _BACKTEST_JOBS[_slot_id] = {
+            'status': 'queued', 'phase': 'Validating...', 'progress': 0,
+            'result': None, 'error': None, 'created_at': time.time(), 'thread': None
+        }
 
     data = request.get_json()
     pair = data.get('pair', '').upper()
@@ -134,38 +144,37 @@ def start_backtest():
     params = data.get('params', {})
 
     if not pair or '-' not in pair:
+        _BACKTEST_JOBS.pop(_slot_id, None)
         return jsonify(success=False, error='Invalid pair'), 400
     if strategy not in SUPPORTED_STRATEGIES:
+        _BACKTEST_JOBS.pop(_slot_id, None)
         return jsonify(success=False, error=f'Unsupported strategy: {strategy}'), 400
     # Parse timeframe: accept TF_MAP keys ("15m") or raw minutes ("7m", "120m")
     try:
         tf_minutes = int(tf_key.rstrip('mM'))
     except (ValueError, AttributeError):
+        _BACKTEST_JOBS.pop(_slot_id, None)
         return jsonify(success=False, error=f'Invalid timeframe: {tf_key}'), 400
     if tf_minutes < 1 or tf_minutes > 1440:
+        _BACKTEST_JOBS.pop(_slot_id, None)
         return jsonify(success=False, error=f'Timeframe must be 1-1440 minutes, got {tf_minutes}'), 400
     if capital < 10:
+        _BACKTEST_JOBS.pop(_slot_id, None)
         return jsonify(success=False, error='Minimum capital is $10'), 400
 
     try:
         start_ts = int(datetime.strptime(start_date, '%Y-%m-%d').replace(tzinfo=timezone.utc).timestamp())
         end_ts = int(datetime.strptime(end_date, '%Y-%m-%d').replace(tzinfo=timezone.utc).timestamp()) + 86399
     except (ValueError, TypeError):
+        _BACKTEST_JOBS.pop(_slot_id, None)
         return jsonify(success=False, error='Invalid date format. Use YYYY-MM-DD.'), 400
 
     if end_ts <= start_ts:
+        _BACKTEST_JOBS.pop(_slot_id, None)
         return jsonify(success=False, error='End date must be after start date'), 400
 
-    job_id = f"bt_{uuid.uuid4().hex[:8]}"
-    _BACKTEST_JOBS[job_id] = {
-        'status': 'queued',
-        'phase': 'Starting...',
-        'progress': 0,
-        'result': None,
-        'error': None,
-        'created_at': time.time(),
-        'thread': None
-    }
+    job_id = _slot_id
+    _BACKTEST_JOBS[job_id]['phase'] = 'Starting...'
 
     t = threading.Thread(target=_run_job, args=(job_id, pair, strategy, tf_key, tf_minutes, start_ts, end_ts, capital, params), daemon=True)
     _BACKTEST_JOBS[job_id]['thread'] = t

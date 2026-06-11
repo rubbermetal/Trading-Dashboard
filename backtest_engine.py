@@ -841,7 +841,7 @@ def _run_dca_backtest(pair, timeframe, df, capital, params, progress_cb):
     final_px = float(current_df.iloc[-1]['close'])
     final_time = int(current_df.iloc[-1]['start'])
     if bag_held > 0:
-        fee = _maker_fee(final_px, bag_held)
+        fee = _exit_fee(final_px, bag_held)  # end-of-data close = market
         pnl = (final_px - bag_avg) * bag_held - fee
         cash += final_px * bag_held - fee
         cycle_trades.append({
@@ -853,7 +853,7 @@ def _run_dca_backtest(pair, timeframe, df, capital, params, progress_cb):
             'trade_type': 'cycle_trade'
         })
     if sub_held > 0:
-        fee = _maker_fee(final_px, sub_held)
+        fee = _exit_fee(final_px, sub_held)  # end-of-data close = market
         pnl = (final_px - sub_avg) * sub_held - fee
         cash += final_px * sub_held - fee
         cycle_trades.append({
@@ -1016,6 +1016,7 @@ def _run_grid_backtest(pair, timeframe, df, capital, params, progress_cb):
     # V3 state
     is_gtfo_active = False
     gtfo_target_price = 0
+    gtfo_armed_bar = -1
     gtfo_high_score_streak = 0
     quarantine_until = 0
     loss_history = []  # [(bar_time, loss_pct), ...] rolling 120s
@@ -1079,7 +1080,8 @@ def _run_grid_backtest(pair, timeframe, df, capital, params, progress_cb):
 
     # --- Helper: recovery velocity ---
     def get_velocity(bar_time):
-        recent = [ts for ts in recovery_timestamps if bar_time - ts < 300]
+        recovery_window = max(300, 10 * tf_min * 60)  # spec: 10 candles of the test TF
+        recent = [ts for ts in recovery_timestamps if bar_time - ts < recovery_window]
         return float(len(recent))
 
     # --- Helper: spacing guard ---
@@ -1106,12 +1108,17 @@ def _run_grid_backtest(pair, timeframe, df, capital, params, progress_cb):
         bar_high = float(row['high'])
         bar_low = float(row['low'])
         close_px = float(row['close'])
-        atr = float(atr_series.iloc[bar_idx]) if not pd.isna(atr_series.iloc[bar_idx]) else close_px * 0.01
-        adx = float(adx_col.iloc[bar_idx]) if not pd.isna(adx_col.iloc[bar_idx]) else 0.0
+        # LOOKAHEAD FIX (BT-H1): all gating/sizing inputs (ATR/ADX/BB/regime/crisis)
+        # come from the PREVIOUS bar — the live engine acts after a candle closes,
+        # so decisions governing THIS bar's sub-bars can't use this bar's close.
+        sig_idx = bar_idx - 1
+        sig_close = float(df.iloc[sig_idx]['close'])
+        atr = float(atr_series.iloc[sig_idx]) if not pd.isna(atr_series.iloc[sig_idx]) else sig_close * 0.01
+        adx = float(adx_col.iloc[sig_idx]) if not pd.isna(adx_col.iloc[sig_idx]) else 0.0
 
-        step_usd = close_px * step_pct
+        step_usd = sig_close * step_pct
         depth = len(trails)
-        direction = get_direction(bar_idx)
+        direction = get_direction(sig_idx)
         velocity = get_velocity(bar_time)
         suspend_buys = False
 
@@ -1120,40 +1127,46 @@ def _run_grid_backtest(pair, timeframe, df, capital, params, progress_cb):
         regime = 'WIDE_RANGE'
         crisis = 0
         if is_dynamic:
-            bb_w = float(bb_width_series.iloc[bar_idx]) if not pd.isna(bb_width_series.iloc[bar_idx]) else 0
-            bb_wa = float(bb_width_avg_series.iloc[bar_idx]) if not pd.isna(bb_width_avg_series.iloc[bar_idx]) else bb_w
+            bb_w = float(bb_width_series.iloc[sig_idx]) if not pd.isna(bb_width_series.iloc[sig_idx]) else 0
+            bb_wa = float(bb_width_avg_series.iloc[sig_idx]) if not pd.isna(bb_width_avg_series.iloc[sig_idx]) else bb_w
             vol_ratio = (bb_w / bb_wa) if bb_wa > 0 else 1.0
             regime = compute_regime(adx, bb_w, bb_wa, direction)
 
             # V3: depth-aware step and Kelly
-            step_usd = compute_dynamic_step(atr, adx, bb_w, bb_wa, direction, close_px,
+            step_usd = compute_dynamic_step(atr, adx, bb_w, bb_wa, direction, sig_close,
                                             min_step_pct, max_step_pct, depth=depth)
             dyn_trail_dist = compute_dynamic_trail(atr, adx, direction, velocity)
             chunk_usd = compute_kelly_size(adx, direction, vol_ratio, step_usd, dyn_trail_dist,
                                            capital, min_order_usd, depth=depth)
 
             # Dynamic grid bounds from BB
-            if bb_upper_col is not None and not pd.isna(bb_upper_col.iloc[bar_idx]):
-                upper_price = float(bb_upper_col.iloc[bar_idx]) + (0.5 * atr)
-                lower_price = float(bb_lower_col.iloc[bar_idx]) - (0.5 * atr)
+            if bb_upper_col is not None and not pd.isna(bb_upper_col.iloc[sig_idx]):
+                upper_price = float(bb_upper_col.iloc[sig_idx]) + (0.5 * atr)
+                lower_price = float(bb_lower_col.iloc[sig_idx]) - (0.5 * atr)
 
-            # V3: Update loss_history (rolling 120s window)
-            unrealized_loss = sum(max(0, (t['fill_price'] - close_px) * t['qty']) for t in trails)
+            # V3: Update loss_history (rolling window) — prev close, same rationale
+            unrealized_loss = sum(max(0, (t['fill_price'] - sig_close) * t['qty']) for t in trails)
             u_loss_pct = (unrealized_loss / capital * 100) if capital > 0 else 0
             loss_history.append((bar_time, u_loss_pct))
-            loss_history = [(t, lp) for t, lp in loss_history if bar_time - t <= 120]
+            loss_window = max(120, 2 * tf_min * 60)  # collapse to <=1 bar on 5m+ otherwise
+            loss_history = [(t, lp) for t, lp in loss_history if bar_time - t <= loss_window]
 
             # V3: 5-factor crisis score with velocity-of-loss
             crisis = compute_grid_crisis_score(depth, u_loss_pct, regime, direction, velocity, loss_history)
 
             # ── V3 STICKY GTFO MODE ──
             if is_gtfo_active and trails:
-                # Run GTFO cycle: resync target, check fill, time-decay nibble
+                # Run GTFO cycle: resync target, check fill, time-decay nibble.
+                # The fill test uses the PREVIOUS bar's target (this bar's crisis
+                # score derives from its close — same-bar fill was lookahead).
+                prior_target = gtfo_target_price
                 avg_price = sum(t['qty'] * t['fill_price'] for t in trails) / sum(t['qty'] for t in trails)
                 new_target = compute_gtfo_target(avg_price, crisis)
 
-                # Check if any bar high reached the GTFO target → fill
-                if bar_high >= new_target:
+                gtfo_fillable = prior_target > 0 and bar_idx > gtfo_armed_bar and bar_high >= prior_target
+                if gtfo_fillable:
+                    new_target = prior_target  # fill at the resting order's price
+                if gtfo_fillable:
                     # Full stack exit at target
                     total_qty = sum(t['qty'] for t in trails)
                     total_cost = sum(t['qty'] * t['fill_price'] for t in trails)
@@ -1186,10 +1199,11 @@ def _run_grid_backtest(pair, timeframe, df, capital, params, progress_cb):
                         if gtfo_high_score_streak >= 4:
                             total_qty = sum(t['qty'] for t in trails)
                             nibble_qty = total_qty * 0.10
-                            fee = _maker_fee(close_px, nibble_qty)
+                            nib_px = close_px * (1 - SLIPPAGE_PCT)
+                            fee = _exit_fee(nib_px, nibble_qty)  # market sell in live
                             avg_for_pnl = avg_price
-                            pnl = (close_px - avg_for_pnl) * nibble_qty - fee
-                            cash += close_px * nibble_qty - fee
+                            pnl = (nib_px - avg_for_pnl) * nibble_qty - fee
+                            cash += nib_px * nibble_qty - fee
                             for t in trails:
                                 t['qty'] *= 0.90
                             total_asset = max(0, total_asset - nibble_qty)
@@ -1222,9 +1236,10 @@ def _run_grid_backtest(pair, timeframe, df, capital, params, progress_cb):
                 n_exit = max(1, int(len(trails) * 0.75))
                 sorted_trails = sorted(trails, key=lambda t: t['fill_price'])
                 for t in sorted_trails[:n_exit]:
-                    fee = _maker_fee(close_px, t['qty'])
-                    pnl = (close_px - t['fill_price']) * t['qty'] - fee
-                    cash += close_px * t['qty'] - fee
+                    cut_px = close_px * (1 - SLIPPAGE_PCT)  # market sell in live
+                    fee = _exit_fee(cut_px, t['qty'])
+                    pnl = (cut_px - t['fill_price']) * t['qty'] - fee
+                    cash += cut_px * t['qty'] - fee
                     total_asset -= t['qty']
                     trades.append({
                         'entry_time': int(df.iloc[t['fill_bar']]['start']),
@@ -1244,8 +1259,10 @@ def _run_grid_backtest(pair, timeframe, df, capital, params, progress_cb):
                 buy_levels = []
                 cancelled_buy_levels = []
                 gtfo_high_score_streak = 0
-                # If price already at/above target on this bar, fill immediately
-                if bar_high >= gtfo_target_price:
+                gtfo_armed_bar = bar_idx
+                # Fill only from the NEXT bar: the target derives from THIS bar's
+                # close-based crisis score, so its own high is lookahead.
+                if False and bar_high >= gtfo_target_price:
                     total_qty = sum(t['qty'] for t in trails)
                     total_cost = sum(t['qty'] * t['fill_price'] for t in trails)
                     fee = _maker_fee(gtfo_target_price, total_qty)
@@ -1307,13 +1324,14 @@ def _run_grid_backtest(pair, timeframe, df, capital, params, progress_cb):
             total_loss = sum(max(0, (t['fill_price'] - close_px) * t['qty']) for t in trails)
             if capital > 0 and total_loss / capital >= circuit_breaker_pct:
                 for t in trails:
-                    fee = _maker_fee(close_px, t['qty'])
-                    pnl = (close_px - t['fill_price']) * t['qty'] - fee
-                    cash += close_px * t['qty'] - fee
+                    cb_px = close_px * (1 - SLIPPAGE_PCT)  # market sell in live
+                    fee = _exit_fee(cb_px, t['qty'])
+                    pnl = (cb_px - t['fill_price']) * t['qty'] - fee
+                    cash += cb_px * t['qty'] - fee
                     trades.append({
                         'entry_time': int(df.iloc[t['fill_bar']]['start']),
                         'exit_time': bar_time, 'side': 'LONG',
-                        'entry_price': t['fill_price'], 'exit_price': close_px,
+                        'entry_price': t['fill_price'], 'exit_price': cb_px,
                         'size': t['qty'], 'pnl': round(pnl, 4), 'fee': round(fee, 4),
                         'exit_reason': 'CIRCUIT_BREAKER', 'signal_type': 'GRID'
                     })
@@ -1371,14 +1389,16 @@ def _run_grid_backtest(pair, timeframe, df, capital, params, progress_cb):
             sub_time = int(sb_starts[sb_idx])
 
             # ── Per-fill trailing stops (intrabar) ──
+            # Test against the trigger from the PREVIOUS hwm first, then ratchet:
+            # lifting the stop with the same bar's high assumed high-before-low.
             surviving_trails = []
             for t in trails:
-                if sub_high > t['hwm']:
-                    t['hwm'] = sub_high
                 trigger = t['hwm'] - t['effective_trail']
                 if sub_low <= trigger:
-                    exit_px = trigger  # trail triggers at the trigger price (worst-case for user)
-                    fee = _maker_fee(exit_px, t['qty'])
+                    # Gap-through + slippage: market sell in live, not a fill at trigger
+                    sub_open_g = float(sb_opens[sb_idx]) if 'sb_opens' in dir() else trigger
+                    exit_px = min(trigger, sub_open_g) * (1 - SLIPPAGE_PCT)
+                    fee = _exit_fee(exit_px, t['qty'])
                     pnl = (exit_px - t['fill_price']) * t['qty'] - fee
                     cash += exit_px * t['qty'] - fee
                     total_asset -= t['qty']
@@ -1391,6 +1411,8 @@ def _run_grid_backtest(pair, timeframe, df, capital, params, progress_cb):
                     })
                     pending_sells.pop(t['fill_price'], None)
                 else:
+                    if sub_high > t['hwm']:
+                        t['hwm'] = sub_high
                     surviving_trails.append(t)
             trails = surviving_trails
             depth = len(trails)
@@ -1526,7 +1548,7 @@ def _run_grid_backtest(pair, timeframe, df, capital, params, progress_cb):
     final_px = float(df.iloc[-1]['close'])
     final_time = int(df.iloc[-1]['start'])
     for t in trails:
-        fee = _maker_fee(final_px, t['qty'])
+        fee = _exit_fee(final_px, t['qty'])  # end-of-data close = market
         pnl = (final_px - t['fill_price']) * t['qty'] - fee
         cash += final_px * t['qty'] - fee
         trades.append({
@@ -1655,6 +1677,7 @@ def run_backtest(pair, strategy, timeframe, df, capital, params=None, progress_c
         close_px = float(bar['close'])
         high_px = float(bar['high'])
         low_px = float(bar['low'])
+        open_px = float(bar['open'])
         bar_time = int(bar['start'])
 
         # Progress
@@ -1672,26 +1695,30 @@ def run_backtest(pair, strategy, timeframe, df, capital, params=None, progress_c
                 sb_iter = range(sb_start, sb_end)
                 sb_highs = subbars['highs']
                 sb_lows = subbars['lows']
+                sb_opens = subbars['opens']
                 sb_starts = subbars['starts']
             else:
                 sb_iter = [0]
                 sb_highs = [high_px]
                 sb_lows = [low_px]
+                sb_opens = [open_px]
                 sb_starts = [bar_time]
 
             for sb_idx in sb_iter:
                 sub_high = float(sb_highs[sb_idx])
                 sub_low = float(sb_lows[sb_idx])
+                sub_open = float(sb_opens[sb_idx])
                 sub_time = int(sb_starts[sb_idx])
 
-                # Update high water mark with sub-bar high
-                if sub_high > high_water_mark:
-                    high_water_mark = sub_high
+                # NOTE: the high-water mark is ratcheted at the END of the sub-bar
+                # (after the stop test) — using the same bar's high to lift the stop
+                # its own low then hits assumed high-before-low and inflated exits.
 
                 # ── Per-strategy trailing stop recomputation (matches live executors) ──
                 if strategy == 'MOMENTUM' and entry_atr > 0 and asset_held > 0:
-                    # 3-phase stop: phase based on PnL vs fee_estimate
-                    pnl_now = (sub_high - entry_price) * asset_held
+                    # 3-phase stop: phase from the sub-bar OPEN (known before the bar
+                    # trades; the high assumed the peak arrived before the stop test)
+                    pnl_now = (sub_open - entry_price) * asset_held
                     if pnl_now >= momentum_fee_est * 2:
                         # Phase 3: 0.75x ATR trail, floor at entry + fee_per_unit
                         momentum_phase = 3
@@ -1740,9 +1767,12 @@ def run_backtest(pair, strategy, timeframe, df, capital, params=None, progress_c
                         trail_stop = high_water_mark - npr_trail_dist
                         stop_price = max(stop_price, trail_stop)
 
-                # SL check first (intrabar)
+                # SL check first (intrabar). Gap-through: if the sub-bar opened
+                # below the stop, fill at the open; always charge slippage on the
+                # market-style exit (booking exactly the stop price was optimistic
+                # on every losing exit).
                 if stop_price > 0 and sub_low <= stop_price:
-                    exit_px = stop_price
+                    exit_px = min(stop_price, sub_open) * (1 - SLIPPAGE_PCT)
                     fee = _exit_fee(exit_px, asset_held)
                     pnl = (exit_px - entry_price) * asset_held - _entry_fee(entry_price, asset_held) - fee
                     cash += exit_px * asset_held - fee
@@ -1810,6 +1840,11 @@ def run_backtest(pair, strategy, timeframe, df, capital, params=None, progress_c
                     asset_held = 0.0
                     exited_this_bar = True
                     break
+
+                # Ratchet the high-water mark AFTER this sub-bar's stop/TP tests —
+                # the next sub-bar's trail uses it (no same-bar high-lifts-stop bias)
+                if sub_high > high_water_mark:
+                    high_water_mark = sub_high
 
         # ── Evaluate strategy signal ──
         if not exited_this_bar:
@@ -2171,19 +2206,37 @@ def _compute_stats(trades, equity_curve, capital, timeframe):
                     for i in range(1, len(equities))]
         mean_ret = np.mean(returns) if returns else 0
         std_ret = np.std(returns) if returns else 1
-        ann_factor = math.sqrt(TF_BARS_PER_YEAR.get(timeframe, 35040))
+        bars_per_year = TF_BARS_PER_YEAR.get(timeframe)
+        if bars_per_year is None:
+            # API timeframes arrive as minute strings ('60m', '1440m', ...) that
+            # never matched '1h'/'1d' keys — hourly Sharpe was inflated 2x, daily 6x
+            m = re.fullmatch(r'(\d+)\s*[mM]', str(timeframe).strip())
+            if m and int(m.group(1)) > 0:
+                bars_per_year = 525600 / int(m.group(1))
+            else:
+                log.warning(f"Unknown timeframe '{timeframe}' for annualization — defaulting to 15m factor")
+                bars_per_year = 35040
+        ann_factor = math.sqrt(bars_per_year)
         stats['sharpe_ratio'] = round((mean_ret / std_ret * ann_factor) if std_ret > 0 else 0, 2)
 
-        downside = [r for r in returns if r < 0]
-        down_std = np.std(downside) if downside else 1
-        stats['sortino_ratio'] = round((mean_ret / down_std * ann_factor) if down_std > 0 else 0, 2)
+        # Downside deviation over ALL returns (std of only the losses subtracts
+        # the loss mean and inflates Sortino when losses are uniform)
+        downside_dev = float(np.sqrt(np.mean([min(r, 0.0) ** 2 for r in returns])))
+        stats['sortino_ratio'] = round((mean_ret / downside_dev * ann_factor) if downside_dev > 0 else 0, 2)
     else:
         stats['sharpe_ratio'] = 0
         stats['sortino_ratio'] = 0
 
-    # Exposure time
-    bars_in_trade = sum(1 for e in equity_curve if e['equity'] != capital)  # rough approximation
-    stats['exposure_pct'] = round(bars_in_trade / len(equity_curve) * 100, 1) if equity_curve else 0
+    # Exposure time: sum of trade durations over the tested span (the old
+    # equity != capital check read ~100% after the first trade forever)
+    if equity_curve and len(equity_curve) >= 2:
+        span_sec = max(1, equity_curve[-1]['time'] - equity_curve[0]['time'])
+        in_trade_sec = sum(max(0, t.get('exit_time', 0) - t.get('entry_time', 0)) for t in trades)
+        bars_in_trade = min(in_trade_sec, span_sec)  # overlapping fills clamp at 100%
+        _exposure_pct_override = round(bars_in_trade / span_sec * 100, 1)
+    else:
+        _exposure_pct_override = 0.0
+    stats['exposure_pct'] = _exposure_pct_override
 
     # Buy and hold comparison
     if len(equity_curve) > 0:
@@ -2191,13 +2244,17 @@ def _compute_stats(trades, equity_curve, capital, timeframe):
         # Will be computed in the route if needed
         stats['buy_hold_return_pct'] = 0
 
-    # Avg trade duration (in bars)
+    # Avg trade duration — durations are unix-second diffs; convert to bars
     if trades:
         durations = []
         for t in trades:
             if t.get('entry_time') and t.get('exit_time'):
                 durations.append(t['exit_time'] - t['entry_time'])
-        stats['avg_trade_bars'] = round(np.mean(durations), 0) if durations else 0
+        m = re.fullmatch(r'(\d+)\s*[mM]', str(timeframe).strip())
+        tf_sec = int(m.group(1)) * 60 if m else {'1h': 3600, '6h': 21600, '1d': 86400}.get(timeframe, 900)
+        avg_sec = float(np.mean(durations)) if durations else 0.0
+        stats['avg_trade_duration_sec'] = round(avg_sec, 0)
+        stats['avg_trade_bars'] = round(avg_sec / tf_sec, 1) if tf_sec > 0 else 0
     else:
         stats['avg_trade_bars'] = 0
 

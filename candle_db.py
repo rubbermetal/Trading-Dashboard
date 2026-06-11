@@ -57,6 +57,11 @@ def fetch_and_store_1m(pair, start_ts, end_ts, progress_cb=None):
     init_db()
     conn = _get_conn()
     total_inserted = 0
+    # DATA-19: clamp to the last fully-closed minute. Coinbase returns the
+    # in-progress candle, and INSERT OR IGNORE would fossilize that partial
+    # snapshot forever (the updater resumes after it and never corrects it).
+    last_closed = (int(time.time()) // 60) * 60 - 60
+    end_ts = min(end_ts, last_closed)
     cursor_end = end_ts
     total_est = max(1, (end_ts - start_ts) // 60)
     fetched = 0
@@ -177,11 +182,12 @@ def query(pair, tf_minutes, start_ts, end_ts):
     ).reset_index()
     result.rename(columns={'tf_group': 'start'}, inplace=True)
 
-    # Drop incomplete candles at the edges
-    expected_bars = tf_minutes
-    bar_counts = df.groupby('tf_group').size()
-    complete_groups = bar_counts[bar_counts >= expected_bars].index
-    result = result[result['start'].isin(complete_groups)]
+    # Coinbase omits minutes with no trades, so requiring ALL tf_minutes rows
+    # silently deleted most bars on thin pairs (a daily bar needed 1440/1440).
+    # Missing minutes mean "no trades", not "bad bar" — aggregate what exists
+    # and only drop the (possibly partial) edge bars of the requested range.
+    if len(result) >= 2:
+        result = result.iloc[:-1] if result.iloc[-1]['start'] + (tf_minutes * 60) > int(time.time()) else result
 
     return result.reset_index(drop=True)
 
@@ -262,6 +268,24 @@ def get_backtest_candles(pair, tf_minutes, start_ts, end_ts, progress_cb=None):
                 progress_cb('Fetching recent candles...', 50)
             log.info(f"[{pair}] Forward-filling gap: {last_ts} to {end_ts}")
             fetch_and_store_1m(pair, last_ts, end_ts, progress_cb=progress_cb)
+
+    # DATA-20: edges above only cover before-first/after-last. Interior gaps
+    # (aborted pagination, API hiccups) were permanent and invisible — detect
+    # holes > 30 minutes and refetch them best-effort.
+    try:
+        df_1m = query(pair, 1, start_ts, end_ts)
+        if df_1m is not None and len(df_1m) > 1:
+            starts = df_1m['start'].values
+            gap_threshold = 1800  # >30min of consecutive missing minutes = real hole
+            refetched = 0
+            for k in range(1, len(starts)):
+                gap = int(starts[k]) - int(starts[k - 1])
+                if gap > gap_threshold and refetched < 5:  # cap per call
+                    log.warning(f"[{pair}] Interior gap {gap//60}min at {int(starts[k-1])} — refetching")
+                    fetch_and_store_1m(pair, int(starts[k - 1]) + 60, int(starts[k]))
+                    refetched += 1
+    except Exception as e:
+        log.warning(f"[{pair}] Interior gap check failed: {e}")
 
     if progress_cb:
         progress_cb('Aggregating candles...', 90)
