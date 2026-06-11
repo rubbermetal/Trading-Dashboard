@@ -155,7 +155,7 @@ In `execute_grid_bot()`, `grid_check_fills` (step 10) runs near the top, before 
 - Grid buy redeployment conditions (depth ≤ 3, not FALLING) — exact
 - Grid dormant bypass (no inventory → abort to DORMANT on halt trigger) — implemented
 - Grid state fields (all 9 spec fields present in bots.json) — complete
-- MOMENTUM entry conditions (ADX, SMA cross, dual ROC thresholds, curl-up logic) — correct (signal shape correct, smoothing window wrong per BUG-1)
+- MOMENTUM entry conditions (ADX, SMA cross, dual ROC thresholds, curl-up logic) — correct (SMA(2) smoothing is intentional as-built, see DEVIATION-0)
 - MOMENTUM three-phase stop (phases 1/2/3, HWM, fee estimate, floors) — exact
 - MOMENTUM dual-path execution (WS primary, REST fallback, shared `momentum_get_stop_price`) — exact
 - MOMENTUM exit reasons (STOP_LOSS phase 1, TRAILING_STOP phase 2/3) — exact
@@ -209,7 +209,7 @@ Full conformance audit pending first live session.
 
 ## Still Pending / Not Changed
 
-- **MOMENTUM ROC smoothing** — still SMA(2), spec says SMA(5) (BUG-1 open)
+- ~~MOMENTUM ROC smoothing~~ — resolved as intentional (DEVIATION-0): SMA(2) is the as-built behavior; the spec should be read as amended to SMA(2)
 - **DCA ROC smoothing** — SMA(3) intentional (see DEVIATION-1 above)
 - **MOMENTUM ADX threshold** — `curr_adx < 25` as-is
 - **botchart_upgrade.zip** (`market_data.py` + `patch_botchart.py`) — not yet deployed

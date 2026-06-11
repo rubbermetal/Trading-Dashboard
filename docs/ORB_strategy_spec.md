@@ -1,6 +1,24 @@
 # ORB STRATEGY — FULL SPECIFICATION
 # Reference Document for Implementation
 # Date: 2026-03-21
+# Amended: 2026-06-11 — documented the AS-BUILT implementation (see below)
+
+## ⚠ AS-BUILT AMENDMENTS (2026-06-11)
+
+The implementation in `strategies.py` / `bot_executors.py` deliberately diverges
+from the original text below. Where they conflict, the as-built behavior is
+authoritative:
+
+| Item | Original spec | As built |
+|---|---|---|
+| Range window | 00:00–01:00 UTC fixed | Configurable; default `range_start_hour=14` UTC, 60-min duration |
+| Setup expiry | 6 hours | Configurable; default 8 hours |
+| Stop loss | Range midpoint | `max(range_width, 1.5 × ATR)` below/above entry |
+| Profit taking | None specified | Partial exits at 1.5R (50%) and trail thereafter; full exit at 3.0R |
+| Trailing stop | +3% activate / 1.5% trail (price-based) | 1.5 × ATR trail (activates after T1) |
+| Return contract | `(signal, reason)` | `(signal, reason, meta)` 3-tuple |
+| Range quality | n/a | Width ∈ [0.5×ATR, 2.0×ATR×√bars_in_range] |
+| Min candles | 12 × 5m hardcoded | Inferred from the data's bar interval |
 
 ## OVERVIEW
 

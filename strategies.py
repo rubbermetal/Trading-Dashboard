@@ -470,7 +470,10 @@ def calculate_trap(df, pos_side="FLAT", entry_stage=0, avg_entry=0.0, breakout_d
             # After T1 hit, stop moves to breakeven (Velez)
             if tp_stage >= 1:
                 sl_price = max(sl_price, avg_entry)
-            R = avg_entry - sl_price if sl_price < avg_entry else atr  # risk per unit
+            # Post-breakeven the stop sits at entry, so entry-stop distance is 0;
+            # raw ATR halved the T2 distance vs the documented 4.0R. Use 2x ATR
+            # (the minimum initial stop distance) to keep R-multiples meaningful.
+            R = avg_entry - sl_price if sl_price < avg_entry else 2.0 * atr  # risk per unit
 
             if curr['close'] <= sl_price:
                 return "EXIT_LONG", f"STOP LOSS: Price {curr['close']:.2f} hit stop {sl_price:.2f} (R={R:.2f})", {}
@@ -497,7 +500,7 @@ def calculate_trap(df, pos_side="FLAT", entry_stage=0, avg_entry=0.0, breakout_d
             # After T1, stop moves to breakeven
             if tp_stage >= 1:
                 sl_price = min(sl_price, avg_entry)
-            R = sl_price - avg_entry if sl_price > avg_entry else atr
+            R = sl_price - avg_entry if sl_price > avg_entry else 2.0 * atr  # see LONG-side note
 
             if curr['close'] >= sl_price:
                 return "EXIT_SHORT", f"STOP LOSS: Price {curr['close']:.2f} hit stop {sl_price:.2f} (R={R:.2f})", {}
@@ -759,7 +762,7 @@ def calculate_dca(df, dca_state="SCANNING", last_cross_direction="ABOVE", arm_th
     State machine signals:
     - "ARM": Both ROCs crossed below zero (dip starting)
     - "DISARM": Both ROCs crossed back above zero before conditions met
-    - "BUY": Armed + both ROCs <= -0.50 + either curling up + ADX >= 20
+    - "BUY": Armed (both ROCs <= arm_threshold, default -0.30) + either ROC curling up + ADX < 10 (chop regime)
     - "HOLD": No action this cycle
     
     Returns: (signal, reason, extra_data)
@@ -906,33 +909,44 @@ def _detect_events(df, config):
     p_bear, p_bull = p_c < p_o, p_c > p_o
     c_bull, c_bear = c_c > c_o, c_c < c_o
     first_ok = p_body >= config['one80_min_first_bar_pct'] * avg_body
-    # 180 bars
+    # 180 bars (clean unless the first bar is only marginally large enough)
     if first_ok and p_body > 0 and c_body > 0:
+        one80_name = 1.0 if p_body >= 1.2 * config['one80_min_first_bar_pct'] * avg_body else 0.5
         if p_bear and c_bull and c_h > p_h:
             if min(c_o, c_c) <= min(p_o, p_c):
                 events.append({'type':'180','direction':'BULL','stop_price':min(p_l,c_l)-sb,'power':2.0,
+                    'name_check': one80_name,
                     'bar_data':{'curr':{'o':c_o,'c':c_c,'h':c_h,'l':c_l},'prev':{'o':p_o,'c':p_c,'h':p_h,'l':p_l}}})
         if p_bull and c_bear and c_l < p_l:
             if max(c_o, c_c) >= max(p_o, p_c):
                 events.append({'type':'180','direction':'BEAR','stop_price':max(p_h,c_h)+sb,'power':2.0,
+                    'name_check': one80_name,
                     'bar_data':{'curr':{'o':c_o,'c':c_c,'h':c_h,'l':c_l},'prev':{'o':p_o,'c':p_c,'h':p_h,'l':p_l}}})
-    # Tail bars
-    if c_range > 0 and c_body > 0 and (c_body / c_range) <= config['tail_body_max_pct']:
+    # Tail bars — spec allows dojis ("can be green, red, or doji"); body==0 bars
+    # qualify when the tail dominates the range, instead of dividing by zero
+    if c_range > 0 and (c_body / c_range) <= config['tail_body_max_pct']:
         lo_tail = min(c_o, c_c) - c_l
-        if c_body > 0 and lo_tail / c_body >= config['tail_ratio_min']:
+        lo_ratio = (lo_tail / c_body) if c_body > 0 else (config['tail_ratio_min'] if lo_tail >= 0.5 * c_range else 0.0)
+        if lo_ratio >= config['tail_ratio_min']:
             events.append({'type':'TAIL','direction':'BULL','stop_price':c_l-sb,'power':1.0,
+                'name_check': 1.0 if lo_ratio >= 1.2 * config['tail_ratio_min'] else 0.5,
                 'bar_data':{'curr':{'o':c_o,'c':c_c,'h':c_h,'l':c_l}}})
         hi_tail = c_h - max(c_o, c_c)
-        if c_body > 0 and hi_tail / c_body >= config['tail_ratio_min']:
+        hi_ratio = (hi_tail / c_body) if c_body > 0 else (config['tail_ratio_min'] if hi_tail >= 0.5 * c_range else 0.0)
+        if hi_ratio >= config['tail_ratio_min']:
             events.append({'type':'TAIL','direction':'BEAR','stop_price':c_h+sb,'power':1.0,
+                'name_check': 1.0 if hi_ratio >= 1.2 * config['tail_ratio_min'] else 0.5,
                 'bar_data':{'curr':{'o':c_o,'c':c_c,'h':c_h,'l':c_l}}})
-    # Elephant bars
-    if c_body >= config['elephant_body_mult'] * avg_body and avg_body > 0:
+    # Elephant bars (marginal when only just past the size threshold)
+    if avg_body > 0 and c_body >= config['elephant_body_mult'] * avg_body:
+        ele_name = 1.0 if c_body >= 1.2 * config['elephant_body_mult'] * avg_body else 0.5
         if c_bull:
             events.append({'type':'ELEPHANT','direction':'BULL','stop_price':c_l-sb,'power':1.0,
+                'name_check': ele_name,
                 'bar_data':{'curr':{'o':c_o,'c':c_c,'h':c_h,'l':c_l}}})
         elif c_bear:
             events.append({'type':'ELEPHANT','direction':'BEAR','stop_price':c_h+sb,'power':1.0,
+                'name_check': ele_name,
                 'bar_data':{'curr':{'o':c_o,'c':c_c,'h':c_h,'l':c_l}}})
     events.sort(key=lambda e: {'180':0,'TAIL':1,'ELEPHANT':2}.get(e['type'],9))
     return events
@@ -953,13 +967,28 @@ def _zone_allows_direction(zone, direction):
     return zone not in (1, -3)
 
 def _score_trade(event, zone, sma20, sma200, price, atr, config):
+    """Spec §6: total = name_check (1 clean / 0.5 marginal) + min(position, 1) + risk (1).
+    The old version returned 2.5 or 3.0 unconditionally, making the <2.0 gate dead code."""
     pos_checks = []
     if abs(zone) == 1: pos_checks.append('zone_1')
     elif abs(zone) == 3: pos_checks.append('zone_3')
-    if atr > 0 and abs(price - sma20) <= config['sma_proximity_atr'] * atr: pos_checks.append('near_20sma')
-    if atr > 0 and abs(price - sma200) <= config['sma_proximity_atr'] * atr: pos_checks.append('near_200sma')
-    pos_score = min(len(pos_checks), 1.0) if pos_checks else 0.5
-    return 1.0 + pos_score + 1.0, pos_checks
+    prox = config['sma_proximity_atr'] * atr
+    near20 = abs(price - sma20)
+    near200 = abs(price - sma200)
+    if atr > 0 and near20 <= prox: pos_checks.append('near_20sma')
+    if atr > 0 and near200 <= prox: pos_checks.append('near_200sma')
+
+    if pos_checks:
+        position_component = 1.0
+    elif atr > 0 and (near20 <= 1.5 * prox or near200 <= 1.5 * prox):
+        position_component = 0.5  # marginal position (spec half-check)
+        pos_checks.append('near_sma_marginal')
+    else:
+        position_component = 0.0
+
+    name_check = float(event.get('name_check', 1.0))
+    risk_check = 1.0
+    return name_check + position_component + risk_check, pos_checks
 
 def calculate_npr(df):
     empty = {'signal':'HOLD','event_type':None,'event_direction':None,'event_stop':0,
@@ -1007,9 +1036,22 @@ def calculate_vwap_mr(df):
     if len(df) < 100:
         return "HOLD", "Not enough data", 0.0
 
-    c, h, l, v = df['close'], df['high'], df['low'], df['volume']
+    # Session anchoring (spec: VWAP resets DAILY). The previous rolling cumsum
+    # over the whole fetch window made the bands drift on every polling cycle.
+    vdf = df
+    if 'start' in df.columns:
+        last_start = float(df['start'].iloc[-1])
+        day_anchor = int(last_start // 86400) * 86400  # UTC midnight of current day
+        session = df[df['start'] >= day_anchor]
+        if len(session) < 12:
+            # Early UTC hours: include the previous day so bands aren't starved
+            session = df[df['start'] >= day_anchor - 86400]
+        if len(session) >= 12:
+            vdf = session
 
-    # VWAP: cumulative (typ_price * volume) / cumulative volume
+    c, h, l, v = vdf['close'], vdf['high'], vdf['low'], vdf['volume']
+
+    # VWAP: cumulative (typ_price * volume) / cumulative volume over the session
     typical = (h + l + c) / 3
     cum_tv = (typical * v).cumsum()
     cum_v = v.cumsum()
@@ -1019,11 +1061,16 @@ def calculate_vwap_mr(df):
     vwap_sq = ((typical - vwap) ** 2 * v).cumsum() / cum_v
     vwap_std = vwap_sq.apply(lambda x: x ** 0.5 if x > 0 else 0)
 
-    # RSI
-    rsi_s = ta.rsi(c, 14)
+    # Indicators computed on the FULL window (need history regardless of session)
+    fc, fh, fl = df['close'], df['high'], df['low']
+    rsi_s = ta.rsi(fc, 14)
 
     # ATR for trailing stop
-    atr_s = ta.atr(h, l, c, 14)
+    atr_s = ta.atr(fh, fl, fc, 14)
+
+    # Trend/regime context for the knife-catch gate
+    adx_df = ta.adx(fh, fl, fc, 14)
+    ema200_s = ta.ema(fc, 200) if len(df) >= 200 else None
 
     if vwap is None or rsi_s is None or atr_s is None:
         return "HOLD", "Indicators warming up", 0.0
@@ -1043,6 +1090,18 @@ def calculate_vwap_mr(df):
 
     # ENTRY: price below VWAP - 1 std dev AND RSI < 35
     if cur_px < lower_band and cur_rsi < 35:
+        # Knife-catch guards: in a sustained downtrend price sits below -1σ with
+        # RSI<35 for hours — mean reversion needs a max-deviation floor and a
+        # trend gate or it buys full size into every crash.
+        if deviation > 2.5:
+            return "HOLD", f"Beyond -2.5σ ({deviation:.2f}σ) — falling knife, no entry", cur_atr
+        try:
+            cur_adx = float(adx_df['ADX_14'].iloc[-1]) if adx_df is not None else 0.0
+        except (KeyError, TypeError):
+            cur_adx = 0.0
+        cur_ema200 = float(ema200_s.iloc[-1]) if ema200_s is not None and not pd.isna(ema200_s.iloc[-1]) else 0.0
+        if cur_adx > 30 and cur_ema200 > 0 and cur_px < cur_ema200:
+            return "HOLD", f"Strong downtrend (ADX {cur_adx:.0f}, px < EMA200) — no counter-trend entry", cur_atr
         return "BUY", f"VWAP reversion: price ${cur_px:.0f} < lower band ${lower_band:.0f}, RSI {cur_rsi:.0f}", cur_atr
 
     # EXIT: price touches VWAP or upper band
@@ -1071,7 +1130,7 @@ def calculate_squeeze(df):
     bb = ta.bbands(c, length=20, std=2.0)
     # Keltner Channels (20, 1.5)
     kc = ta.kc(h, l, c, length=20, scalar=1.5)
-    # Momentum: linear regression value of close over 20 bars (squeeze histogram)
+    # Momentum: 12-bar momentum of close (squeeze histogram proxy)
     mom = ta.mom(c, length=12)
     # ATR
     atr_s = ta.atr(h, l, c, 14)

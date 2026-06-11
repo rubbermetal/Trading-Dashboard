@@ -17,18 +17,19 @@ from strategies import (
 
 class TestQuadRotation:
     def test_hold_on_insufficient_data(self, small_df):
-        signal, reason = calculate_quad_rotation(small_df)
+        signal, reason, details = calculate_quad_rotation(small_df)
         assert signal == "HOLD"
         assert "enough data" in reason.lower() or "warming" in reason.lower()
 
     def test_returns_valid_signal(self, trending_up_df):
-        signal, reason = calculate_quad_rotation(trending_up_df)
+        signal, reason, details = calculate_quad_rotation(trending_up_df)
         assert signal in ("BUY", "SELL", "HOLD")
         assert isinstance(reason, str)
         assert len(reason) > 0
+        assert isinstance(details, dict)
 
     def test_hold_on_ranging_market(self, ranging_df):
-        signal, reason = calculate_quad_rotation(ranging_df)
+        signal, reason, details = calculate_quad_rotation(ranging_df)
         # Ranging market unlikely to have all 4 stochs aligned
         assert signal in ("BUY", "SELL", "HOLD")
 
