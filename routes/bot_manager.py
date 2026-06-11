@@ -384,8 +384,8 @@ def start_bot():
         return jsonify(success=False, error=err), 400
     strategy = d['strategy'].upper()
     paper = bool(d.get('paper', False))
-    if paper and strategy not in ('DCA', 'GRID', 'QUAD', 'QUAD_SUPER'):
-        return jsonify(success=False, error=f"Paper trading is only supported for DCA, GRID, and QUAD strategies.")
+    if paper and strategy not in ('DCA', 'GRID', 'QUAD', 'QUAD_SUPER', 'MOMENTUM', 'ORB', 'NPR'):
+        return jsonify(success=False, error=f"Paper trading is not supported for {strategy}."), 400
     tf = d.get('timeframe', STRATEGY_DEFAULT_TF.get(strategy, '15m'))
     if tf not in TF_MAP:
         tf = STRATEGY_DEFAULT_TF.get(strategy, '15m')

@@ -146,7 +146,9 @@ def execute_orb(bot_id, bot, pair):
 
         try:
             oid = str(uuid.uuid4())
-            if deriv_flag:
+            if bot.get('paper'):
+                log.info(f"[{pair}] PAPER ORB BUY: {qty} at ${current_px:.4f}")
+            elif deriv_flag:
                 client.market_order_buy(client_order_id=oid, product_id=pair, base_size=str(qty))
             else:
                 client.market_order_buy(client_order_id=oid, product_id=pair, quote_size=str(round(alloc * 0.99, 2)))
@@ -178,7 +180,10 @@ def execute_orb(bot_id, bot, pair):
 
         try:
             oid = str(uuid.uuid4())
-            client.market_order_sell(client_order_id=oid, product_id=pair, base_size=str(qty))
+            if bot.get('paper'):
+                log.info(f"[{pair}] PAPER ORB SELL (SHORT entry): {qty} at ${current_px:.4f}")
+            else:
+                client.market_order_sell(client_order_id=oid, product_id=pair, base_size=str(qty))
 
             bot['asset_held'] = -qty
             bot['current_usd'] -= alloc
@@ -197,12 +202,16 @@ def execute_orb(bot_id, bot, pair):
         try:
             held = abs(bot['asset_held'])
             sell_qty = round(held * 0.5, 6) if not deriv_flag else max(1, int(held * 0.5))
-            oid = str(uuid.uuid4())
-            client.market_order_sell(client_order_id=oid, product_id=pair, base_size=str(sell_qty))
-
-            fill_px, fill_sz, fill_fee = poll_market_fill(oid, pair)
-            actual_exit = fill_px if fill_px else current_px
-            actual_fee = fill_fee if fill_fee is not None else (actual_exit * sell_qty * mult * 0.0025)
+            if bot.get('paper'):
+                actual_exit = current_px
+                actual_fee = current_px * sell_qty * mult * 0.004
+                log.info(f"[{pair}] PAPER ORB PARTIAL EXIT LONG: {sell_qty} at ${current_px:.4f}")
+            else:
+                oid = str(uuid.uuid4())
+                client.market_order_sell(client_order_id=oid, product_id=pair, base_size=str(sell_qty))
+                fill_px, fill_sz, fill_fee = poll_market_fill(oid, pair)
+                actual_exit = fill_px if fill_px else current_px
+                actual_fee = fill_fee if fill_fee is not None else (actual_exit * sell_qty * mult * 0.0025)
 
             record_trade(bot, bot['entry_price'], actual_exit, sell_qty, 'LONG', 'TARGET_1', pair, mult, actual_fee=actual_fee)
 
@@ -220,12 +229,16 @@ def execute_orb(bot_id, bot, pair):
         try:
             held = abs(bot['asset_held'])
             cover_qty = max(1, int(held * 0.5))
-            oid = str(uuid.uuid4())
-            client.market_order_buy(client_order_id=oid, product_id=pair, base_size=str(cover_qty))
-
-            fill_px, fill_sz, fill_fee = poll_market_fill(oid, pair)
-            actual_exit = fill_px if fill_px else current_px
-            actual_fee = fill_fee if fill_fee is not None else (actual_exit * cover_qty * mult * 0.0025)
+            if bot.get('paper'):
+                actual_exit = current_px
+                actual_fee = current_px * cover_qty * mult * 0.004
+                log.info(f"[{pair}] PAPER ORB PARTIAL EXIT SHORT: {cover_qty} at ${current_px:.4f}")
+            else:
+                oid = str(uuid.uuid4())
+                client.market_order_buy(client_order_id=oid, product_id=pair, base_size=str(cover_qty))
+                fill_px, fill_sz, fill_fee = poll_market_fill(oid, pair)
+                actual_exit = fill_px if fill_px else current_px
+                actual_fee = fill_fee if fill_fee is not None else (actual_exit * cover_qty * mult * 0.0025)
 
             record_trade(bot, bot['entry_price'], actual_exit, cover_qty, 'SHORT', 'TARGET_1', pair, mult, actual_fee=actual_fee)
 
@@ -243,13 +256,17 @@ def execute_orb(bot_id, bot, pair):
     elif signal == 'EXIT_LONG' and pos_side == 'LONG' and bot['asset_held'] > 0:
         exit_reason = 'STOP_LOSS' if 'STOP' in reason.upper() else ('TRAILING_STOP' if 'TRAIL' in reason.upper() else 'SIGNAL')
         try:
-            oid = str(uuid.uuid4())
             held = abs(bot['asset_held'])
-            client.market_order_sell(client_order_id=oid, product_id=pair, base_size=str(held))
-
-            fill_px, fill_sz, fill_fee = poll_market_fill(oid, pair)
-            actual_exit = fill_px if fill_px else current_px
-            actual_fee = fill_fee if fill_fee is not None else (actual_exit * held * mult * 0.0025)
+            if bot.get('paper'):
+                actual_exit = current_px
+                actual_fee = current_px * held * mult * 0.004
+                log.info(f"[{pair}] PAPER ORB EXIT LONG ({exit_reason}): {held} at ${current_px:.4f}")
+            else:
+                oid = str(uuid.uuid4())
+                client.market_order_sell(client_order_id=oid, product_id=pair, base_size=str(held))
+                fill_px, fill_sz, fill_fee = poll_market_fill(oid, pair)
+                actual_exit = fill_px if fill_px else current_px
+                actual_fee = fill_fee if fill_fee is not None else (actual_exit * held * mult * 0.0025)
 
             record_trade(bot, bot['entry_price'], actual_exit, held, 'LONG', exit_reason, pair, mult, actual_fee=actual_fee)
 
@@ -269,13 +286,17 @@ def execute_orb(bot_id, bot, pair):
     elif signal == 'EXIT_SHORT' and pos_side == 'SHORT' and bot['asset_held'] < 0:
         exit_reason = 'STOP_LOSS' if 'STOP' in reason.upper() else ('TRAILING_STOP' if 'TRAIL' in reason.upper() else 'SIGNAL')
         try:
-            oid = str(uuid.uuid4())
             held = abs(bot['asset_held'])
-            client.market_order_buy(client_order_id=oid, product_id=pair, base_size=str(held))
-
-            fill_px, fill_sz, fill_fee = poll_market_fill(oid, pair)
-            actual_exit = fill_px if fill_px else current_px
-            actual_fee = fill_fee if fill_fee is not None else (actual_exit * held * mult * 0.0025)
+            if bot.get('paper'):
+                actual_exit = current_px
+                actual_fee = current_px * held * mult * 0.004
+                log.info(f"[{pair}] PAPER ORB EXIT SHORT ({exit_reason}): {held} at ${current_px:.4f}")
+            else:
+                oid = str(uuid.uuid4())
+                client.market_order_buy(client_order_id=oid, product_id=pair, base_size=str(held))
+                fill_px, fill_sz, fill_fee = poll_market_fill(oid, pair)
+                actual_exit = fill_px if fill_px else current_px
+                actual_fee = fill_fee if fill_fee is not None else (actual_exit * held * mult * 0.0025)
 
             record_trade(bot, bot['entry_price'], actual_exit, held, 'SHORT', exit_reason, pair, mult, actual_fee=actual_fee)
 
@@ -783,13 +804,18 @@ def execute_momentum(bot_id, bot, pair):
             log.warning(f"[{pair}] Phase {phase} stop triggered: price {cur_px:.2f} <= stop {stop_px:.2f}")
 
             try:
-                oid = str(uuid.uuid4())
-                str_qty = snap_to_increment(held, base_inc)
-                client.market_order_sell(client_order_id=oid, product_id=pair, base_size=str_qty)
+                if bot.get('paper'):
+                    actual_exit = cur_px
+                    actual_fee = cur_px * held * mult * 0.004
+                    log.info(f"[{pair}] PAPER MOMENTUM EXIT ({exit_reason}): {held} at ${cur_px:.4f}")
+                else:
+                    oid = str(uuid.uuid4())
+                    str_qty = snap_to_increment(held, base_inc)
+                    client.market_order_sell(client_order_id=oid, product_id=pair, base_size=str_qty)
 
-                fill_px, fill_sz, fill_fee = poll_market_fill(oid, pair)
-                actual_exit = fill_px if fill_px else cur_px
-                actual_fee = fill_fee if fill_fee is not None else (actual_exit * held * mult * 0.0025)
+                    fill_px, fill_sz, fill_fee = poll_market_fill(oid, pair)
+                    actual_exit = fill_px if fill_px else cur_px
+                    actual_fee = fill_fee if fill_fee is not None else (actual_exit * held * mult * 0.0025)
 
                 record_trade(bot, bot['entry_price'], actual_exit, held, 'LONG', exit_reason, pair, mult, actual_fee=actual_fee)
 
@@ -955,6 +981,26 @@ def execute_momentum(bot_id, bot, pair):
         str_qty = snap_to_increment(qty, base_inc)
 
     if float(str_qty) <= 0:
+        return
+
+    # Paper mode: instant-fill at current price, skip the pending/retry dance
+    if bot.get('paper'):
+        import pandas_ta as pta
+        atr_series = pta.atr(df['high'], df['low'], df['close'], 14)
+        entry_atr = float(atr_series.iloc[-1]) if atr_series is not None and not atr_series.empty else cur_px * 0.01
+        filled = float(str_qty)
+        gross_cost = cur_px * filled * mult
+        sim_fee = gross_cost * 0.004
+        bot['asset_held'] = filled
+        bot['current_usd'] -= (gross_cost + sim_fee)
+        bot['position_side'] = 'LONG'
+        bot['entry_price'] = cur_px
+        bot['entry_atr'] = entry_atr
+        bot['high_water_mark'] = cur_px
+        bot['stop_phase'] = 1
+        bot['fee_estimate'] = sim_fee
+        save_bots()
+        log.info(f"[{pair}] PAPER MOMENTUM LONG: {filled:.8f} at ${cur_px:.4f}. ATR={entry_atr:.4f}. Phase 1 stop at ${cur_px - 1.5*entry_atr:.4f}")
         return
 
     try:
@@ -2399,22 +2445,27 @@ def execute_npr(bot_id, bot, pair):
         if should_exit:
             try:
                 held = bot['asset_held']
-                if side == 'LONG':
-                    str_price = snap_to_increment(cur_px - float(quote_inc), quote_inc)
-                    str_qty = snap_to_increment(held, base_inc)
-                    oid = str(uuid.uuid4())
-                    client.limit_order_gtc_sell(client_order_id=oid, product_id=pair,
-                                                base_size=str_qty, limit_price=str_price, post_only=True)
+                if bot.get('paper'):
+                    actual_exit = cur_px
+                    actual_fee = cur_px * held * mult * 0.004
+                    log.info(f"[{pair}] PAPER NPR EXIT {side} ({exit_reason}): {held} at ${cur_px:.4f}")
                 else:
-                    str_price = snap_to_increment(cur_px + float(quote_inc), quote_inc)
-                    str_qty = snap_to_increment(held, base_inc)
-                    oid = str(uuid.uuid4())
-                    client.limit_order_gtc_buy(client_order_id=oid, product_id=pair,
-                                               base_size=str_qty, limit_price=str_price, post_only=True)
+                    if side == 'LONG':
+                        str_price = snap_to_increment(cur_px - float(quote_inc), quote_inc)
+                        str_qty = snap_to_increment(held, base_inc)
+                        oid = str(uuid.uuid4())
+                        client.limit_order_gtc_sell(client_order_id=oid, product_id=pair,
+                                                    base_size=str_qty, limit_price=str_price, post_only=True)
+                    else:
+                        str_price = snap_to_increment(cur_px + float(quote_inc), quote_inc)
+                        str_qty = snap_to_increment(held, base_inc)
+                        oid = str(uuid.uuid4())
+                        client.limit_order_gtc_buy(client_order_id=oid, product_id=pair,
+                                                   base_size=str_qty, limit_price=str_price, post_only=True)
 
-                fill_px, fill_sz, fill_fee = poll_market_fill(oid, pair)
-                actual_exit = fill_px if fill_px else cur_px
-                actual_fee = fill_fee if fill_fee is not None else (actual_exit * held * mult * 0.0025)
+                    fill_px, fill_sz, fill_fee = poll_market_fill(oid, pair)
+                    actual_exit = fill_px if fill_px else cur_px
+                    actual_fee = fill_fee if fill_fee is not None else (actual_exit * held * mult * 0.0025)
 
                 pnl = (actual_exit - entry_px) * held * mult if side == 'LONG' else (entry_px - actual_exit) * held * mult
                 record_trade(bot, entry_px, actual_exit, held, side, exit_reason, pair, mult, actual_fee=actual_fee)
@@ -2576,6 +2627,34 @@ def execute_npr(bot_id, bot, pair):
                 else:
                     str_price = snap_to_increment(cur_px + float(quote_inc), quote_inc)
                 str_qty = snap_to_increment(position_size, base_inc)
+
+                # Paper mode: instant-fill at current price, skip ENTERING state entirely
+                if bot.get('paper'):
+                    new_side = 'LONG' if direction == 'BULL' else 'SHORT'
+                    filled = float(str_qty)
+                    gross_cost = cur_px * filled * mult
+                    sim_fee = gross_cost * 0.004
+                    bot['asset_held'] = filled
+                    bot['current_usd'] -= (gross_cost + sim_fee)
+                    bot['position_side'] = new_side
+                    bot['entry_price'] = cur_px
+                    bot['npr_state'] = 'IN_POSITION'
+                    bot['high_water_mark'] = cur_px
+                    bot['low_water_mark'] = cur_px
+                    bot['partial_filled'] = False
+                    bot['event_type'] = signal['event_type']
+                    bot['event_direction'] = signal['event_direction']
+                    bot['event_stop'] = signal['event_stop']
+                    bot['event_power'] = signal['event_power']
+                    bot['event_bar_data'] = signal['event_bar_data']
+                    bot['zone'] = signal['zone']
+                    bot['check_score'] = signal['check_score']
+                    bot['position_checks'] = signal['position_checks']
+                    bot['atr_at_entry'] = signal['atr']
+                    save_bots()
+                    log.info(f"[{pair}] PAPER NPR ENTRY {new_side}: {filled:.8f} at ${cur_px:.4f} — {signal['reason']}")
+                    return
+
                 oid = str(uuid.uuid4())
                 try:
                     if direction == 'BULL':

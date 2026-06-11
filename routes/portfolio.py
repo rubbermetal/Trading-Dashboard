@@ -128,8 +128,8 @@ def fetch_data():
                         pnl_str = f"{'+' if pnl_val > 0 else ''}${pnl_val:.2f}"
                 
                 active.append({
-                    'type': 'SPOT', 'asset': currency, 'size': f"{val:g}", 
-                    'price': px, 'entry_price': entry_px, 'usd_value': usd, 
+                    'type': 'SPOT', 'asset': currency, 'size': f"{val:.8f}".rstrip('0').rstrip('.'),
+                    'price': px, 'entry_price': entry_px, 'usd_value': usd,
                     'liquidation': 'N/A', 'pnl': pnl_str
                 })
     except Exception as e: log.error("Spot fetch error: %s", e)
@@ -194,8 +194,8 @@ def fetch_data():
                         est_liq = f"${max(0, liq_val):,.2f}"
 
                 active.append({
-                    'type': 'DERIVATIVE', 'asset': asset, 'size': f"{qty:g}", 'side': side, 
-                    'price': cur_px, 'entry_price': entry_px, 'usd_value': pnl, 
+                    'type': 'DERIVATIVE', 'asset': asset, 'size': f"{qty:.8f}".rstrip('0').rstrip('.'), 'side': side,
+                    'price': cur_px, 'entry_price': entry_px, 'usd_value': pnl,
                     'pnl': f"{'+' if pnl > 0 else ''}${pnl:.2f}", 'liquidation': est_liq
                 })
     except Exception as e: log.error("Derivative fetch error: %s", e)

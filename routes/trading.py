@@ -38,8 +38,39 @@ load_trailing_stops()
 
 REPRICE_AFTER_SEC = 60  # cancel + re-place unfilled maker exit after this many seconds
 
+def _get_available_base(pair):
+    """Return the available (unheld) balance of the base currency for `pair`, or None on failure."""
+    try:
+        base_ccy = pair.split('-')[0]
+        accounts = client.get_accounts()
+        for a in accounts.accounts:
+            if a.currency == base_ccy:
+                return float(a.available_balance['value'])
+    except Exception as e:
+        log.error(f"[{pair}] balance lookup failed: {e}")
+    return None
+
+
+def _extract_failure_reason(api_res):
+    """Pull the best failure reason out of a Coinbase order response, across response shapes."""
+    def _get(obj, key):
+        if hasattr(obj, key): return getattr(obj, key)
+        if isinstance(obj, dict): return obj.get(key)
+        return None
+
+    err_resp = _get(api_res, 'error_response')
+    if err_resp:
+        err = _get(err_resp, 'error') or ''
+        msg = _get(err_resp, 'message') or ''
+        if err or msg:
+            return f"{err}: {msg}".strip(': ') if msg else err
+    return _get(api_res, 'failure_reason') or ''
+
+
 def _place_maker_exit(pair, side, base_size):
     """Place a post_only limit at best bid (BUY) / best ask (SELL).
+    For SELL exits, clips the order down to the wallet's actual available base balance so a
+    slightly-over-rounded stored size still closes the full position instead of rejecting.
     Returns (success: bool, oid: str, price: float, str_qty: str, fail_reason: str)."""
     oid = str(uuid.uuid4())
     try:
@@ -52,7 +83,14 @@ def _place_maker_exit(pair, side, base_size):
         else:
             limit_px = float(book.pricebook.bids[0].price)
         str_price = snap_to_increment(limit_px, quote_inc)
-        str_qty = snap_to_increment(float(base_size), base_inc)
+
+        requested_qty = float(base_size)
+        if side == 'SELL':
+            avail = _get_available_base(pair)
+            if avail is not None and avail < requested_qty:
+                log.info(f"[{pair}] SELL size clipped to available balance: {avail} (requested {requested_qty})")
+                requested_qty = avail
+        str_qty = snap_to_increment(requested_qty, base_inc)
         if float(str_qty) <= 0:
             return False, oid, 0.0, str_qty, f"size snaps to 0 (base_inc={base_inc})"
         if side == 'SELL':
@@ -62,7 +100,7 @@ def _place_maker_exit(pair, side, base_size):
             api_res = client.limit_order_gtc_buy(client_order_id=oid, product_id=pair,
                                                   base_size=str_qty, limit_price=str_price, post_only=True)
         success = getattr(api_res, 'success', False) or (isinstance(api_res, dict) and api_res.get('success', False))
-        fail_reason = getattr(api_res, 'failure_reason', '') or (isinstance(api_res, dict) and api_res.get('failure_reason', ''))
+        fail_reason = _extract_failure_reason(api_res)
         if success or fail_reason == 'UNKNOWN_FAILURE_REASON':
             return True, oid, float(str_price), str_qty, ''
         return False, oid, float(str_price), str_qty, fail_reason or 'unknown'
