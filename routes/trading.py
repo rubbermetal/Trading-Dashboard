@@ -4,7 +4,7 @@ import pandas as pd
 import pandas_ta as ta
 from flask import Blueprint, jsonify, request
 from shared import client, TRAILING_STOPS, BRACKET_ORDERS, TWAP_ORDERS, SNIPER_ORDERS, MANUAL_POSITIONS
-from bot_utils import snap_to_increment, get_bot_tf, TF_MAP, get_contract_multiplier, is_derivative, record_trade, save_bots, poll_market_fill, extract_fee
+from bot_utils import snap_to_increment, get_bot_tf, TF_MAP, get_contract_multiplier, is_derivative, record_trade, save_bots, poll_market_fill, extract_fee, order_success, order_error
 from validators import validate_trade, validate_bracket, validate_trail, rate_limit
 from logger import get_logger
 
@@ -418,8 +418,14 @@ def trade():
     try:
         oid = str(uuid.uuid4())
         if d.get('action') == 'CLOSE':
+            # Closing a derivative SHORT requires a BUY; only spot/long closes sell
             side = 'SELL' if d.get('side') == 'BUY' or d.get('type') == 'SPOT' else 'BUY'
-            client.market_order_sell(client_order_id=oid, product_id=d['pair'], base_size=d['size'])
+            if side == 'SELL':
+                res = client.market_order_sell(client_order_id=oid, product_id=d['pair'], base_size=d['size'])
+            else:
+                res = client.market_order_buy(client_order_id=oid, product_id=d['pair'], base_size=d['size'])
+            if not order_success(res):
+                return jsonify({"success": False, "error": f"Close rejected: {order_error(res)}"})
             return jsonify({"success": True, "message": "Position Closed"})
 
         side, pair, o_type, amt = d['side'], d['pair'], d['order_type'], str(d['amount'])

@@ -152,9 +152,59 @@ def ensure_stats(bot):
     return bot['stats']
 
 def save_bots():
+    # Serialize first so a concurrent-mutation error can't truncate the file,
+    # then write to a temp file and atomically replace.
     with BOTS_LOCK:
-        with open(BOTS_FILE, 'w') as f:
-            json.dump(ACTIVE_BOTS, f)
+        try:
+            payload = json.dumps(ACTIVE_BOTS)
+        except (RuntimeError, ValueError, TypeError) as e:
+            log.error(f"save_bots: serialization failed, keeping previous file: {e}")
+            return
+        import tempfile
+        fd, tmp_path = tempfile.mkstemp(dir='.', prefix='.bots_', suffix='.tmp')
+        try:
+            with os.fdopen(fd, 'w') as f:
+                f.write(payload)
+            os.replace(tmp_path, BOTS_FILE)
+        except OSError as e:
+            log.error(f"save_bots: write failed: {e}")
+            try: os.unlink(tmp_path)
+            except OSError: pass
+
+# ==========================================
+# ORDER RESPONSE & EXIT-CONCURRENCY HELPERS
+# ==========================================
+def order_success(res):
+    """Coinbase returns rejections as HTTP 200 with success=false (no exception).
+    Returns True only when the response explicitly reports success."""
+    if res is None:
+        return False
+    s = getattr(res, 'success', None)
+    if s is None and isinstance(res, dict):
+        s = res.get('success')
+    return bool(s)
+
+def order_error(res):
+    """Best-effort extraction of the error reason from a failed order response."""
+    try:
+        err = getattr(res, 'error_response', None)
+        if err is None and isinstance(res, dict):
+            err = res.get('error_response')
+        return str(err) if err else 'unknown error'
+    except Exception:
+        return 'unknown error'
+
+_exit_locks = {}
+_exit_locks_guard = threading.Lock()
+
+def get_exit_lock(bot_id):
+    """Per-bot lock so the WS ticker thread and the REST executor thread can't
+    both submit an exit for the same position."""
+    with _exit_locks_guard:
+        lock = _exit_locks.get(bot_id)
+        if lock is None:
+            lock = _exit_locks[bot_id] = threading.Lock()
+        return lock
 
 def record_trade(bot, entry_px, exit_px, size, side, exit_reason, pair, multiplier=1.0, actual_fee=None):
     """
@@ -209,13 +259,15 @@ def record_trade(bot, entry_px, exit_px, size, side, exit_reason, pair, multipli
         'timestamp': datetime.now(timezone.utc).isoformat()
     })
     strategy = bot.get("strategy", "UNKNOWN")
-    try:
-        update_permanent_stats(strategy, pair, entry_px, exit_px, size, side, exit_reason, round(net_pnl, 4), actual_fee=fee)
-    except Exception as e:
-        log.error(f"update_permanent_stats failed: {e}")
+    # Paper trades must not pollute permanent stats (they feed Kelly sizing for live bots)
+    if not bot.get('paper'):
+        try:
+            update_permanent_stats(strategy, pair, entry_px, exit_px, size, side, exit_reason, round(net_pnl, 4), actual_fee=fee)
+        except Exception as e:
+            log.error(f"update_permanent_stats failed: {e}")
     save_bots()
 
-_stats_lock = threading.Lock()
+_stats_lock = threading.RLock()
 
 def load_permanent_stats():
     try:
@@ -231,6 +283,10 @@ def save_permanent_stats(stats):
 
 def update_permanent_stats(strategy, pair, entry_px, exit_px, size, side, exit_reason, pnl, actual_fee=None):
     key = f"{strategy}:{pair}"
+    with _stats_lock:
+        _update_permanent_stats_locked(key, strategy, pair, exit_px, size, exit_reason, pnl, actual_fee)
+
+def _update_permanent_stats_locked(key, strategy, pair, exit_px, size, exit_reason, pnl, actual_fee):
     stats = load_permanent_stats()
     if key not in stats:
         stats[key] = {'strategy': strategy, 'pair': pair, 'total_trades': 0, 'winning_trades': 0,
@@ -279,7 +335,7 @@ def poll_market_fill(client_oid, pair, retries=3, delay=1.0):
         _time.sleep(delay)
         try:
             order_data = _client.get("/api/v3/brokerage/orders/historical/batch", params={
-                "order_status": "FILLED", "product_id": pair, "limit": 10
+                "order_status": "FILLED", "product_id": pair, "limit": 50
             })
             for o in order_data.get('orders', []):
                 if o.get('client_order_id') == client_oid:

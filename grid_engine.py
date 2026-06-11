@@ -268,6 +268,7 @@ def grid_check_fills(bot_id, bot, pair):
         log.info(f"[{pair}] Fill detected: {grid['side']} at {grid['price']:.2f}")
 
         if grid['side'] == 'BUY':
+            risk = bot['settings'].setdefault('risk', {})
             # Dynamic mode: use regime-aware sell target
             if bot.get('settings', {}).get('dynamic', False):
                 regime = risk.get('regime', 'WIDE_RANGE')
