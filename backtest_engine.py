@@ -4,6 +4,7 @@ Runs any dashboard strategy against historical candle data with
 confidence-based sizing, ATR SL/TP, and fee simulation.
 """
 import math
+import re
 import numpy as np
 import pandas as pd
 import pandas_ta as ta
@@ -22,6 +23,7 @@ log = get_logger('backtest')
 
 FEE_RATE = 0.002        # 0.2% per side (taker)
 MAKER_FEE_RATE = 0.0006  # 0.06% maker (post_only limit orders)
+SLIPPAGE_PCT = 0.0005    # 0.05% adverse slippage on market-style fills (entries at close, market exits, stop fills)
 WARMUP_BARS = 210
 
 
@@ -533,14 +535,16 @@ def _run_dca_backtest(pair, timeframe, df, capital, params, progress_cb):
 
                     if cut_pct > 0:
                         sell_qty = bag_held * cut_pct
-                        fee = _maker_fee(close_px, sell_qty)
-                        pnl = (close_px - bag_avg) * sell_qty
-                        cash += close_px * sell_qty - fee
+                        # Crisis cuts are market sells in live — taker fee + slippage
+                        exit_px = close_px * (1 - SLIPPAGE_PCT)
+                        fee = _exit_fee(exit_px, sell_qty)
+                        pnl = (exit_px - bag_avg) * sell_qty
+                        cash += exit_px * sell_qty - fee
                         f_str = ' '.join(f'{k[0]}={v}' for k, v in factors.items())
                         risk_events.append({
                             'entry_time': bag_entry_times[0] if bag_entry_times else bar_time,
                             'exit_time': bar_time, 'side': 'LONG',
-                            'entry_price': bag_avg, 'exit_price': close_px,
+                            'entry_price': bag_avg, 'exit_price': exit_px,
                             'size': sell_qty, 'pnl': round(pnl - fee, 4), 'fee': round(fee, 4),
                             'exit_reason': f'{action_name} (score={crisis_score} {f_str})',
                             'signal_type': f'DCA/{mode} ({bag_buys} buys)',
@@ -568,10 +572,12 @@ def _run_dca_backtest(pair, timeframe, df, capital, params, progress_cb):
                             bag_entry_times = []
                             last_action_score = 0
 
+            # ── Tier ladder re-arm: a ≥3% retrace re-arms the lower tiers ──
+            if bag_held > 0 and bag_profit_pct <= -3.0 and bag_highest_tier > 0:
+                bag_highest_tier = 0.0
+
             # ── Tier exits on bag (still active even when frozen) ──
             if bag_held > 0 and bag_profit_pct > 0:
-                if bag_profit_pct <= -3.0 and bag_highest_tier > 0:
-                    bag_highest_tier = 0.0
                 for tier_pct, sell_frac in active_tiers:
                     if tier_pct <= bag_highest_tier:
                         continue
@@ -629,8 +635,28 @@ def _run_dca_backtest(pair, timeframe, df, capital, params, progress_cb):
             sub_tp = flat_tp if flat_tp > 0 else 3.0  # default 3% for sub-cycles
             sub_tp_price = sub_avg * (1 + sub_tp / 100)
             sub_stop_price = sub_avg * (1 - 5.0 / 100)
-            # Use bar_high for TP detection (intrabar) and bar_low for stop detection
-            if bar_high >= sub_tp_price:
+            # Check the stop BEFORE the TP on the same bar (conservative intrabar ordering)
+            if bar_low <= sub_stop_price:
+                # Sub-cycle stop: tight -5% stop (intrabar trigger).
+                # Gap-through: if the bar opened below the stop, fill at the open.
+                # Market sell in live — taker fee + slippage.
+                exit_px = min(sub_stop_price, float(bar['open'])) * (1 - SLIPPAGE_PCT)
+                fee = _exit_fee(exit_px, sub_held)
+                pnl = (exit_px - sub_avg) * sub_held - fee
+                cash += exit_px * sub_held - fee
+                cycle_trades.append({
+                    'entry_time': sub_entry_time,
+                    'exit_time': bar_time, 'side': 'LONG',
+                    'entry_price': sub_avg, 'exit_price': exit_px,
+                    'size': sub_held, 'pnl': round(pnl, 4), 'fee': round(fee, 4),
+                    'exit_reason': 'SUB_STOP',
+                    'signal_type': 'DCA/SUB-CYCLE',
+                    'trade_type': 'cycle_trade'
+                })
+                sub_held = 0.0
+                sub_avg = 0.0
+                sub_cost = 0.0
+            elif bar_high >= sub_tp_price:
                 exit_px = sub_tp_price
                 fee = _maker_fee(exit_px, sub_held)
                 pnl = (exit_px - sub_avg) * sub_held - fee
@@ -642,24 +668,6 @@ def _run_dca_backtest(pair, timeframe, df, capital, params, progress_cb):
                     'entry_price': sub_avg, 'exit_price': exit_px,
                     'size': sub_held, 'pnl': round(pnl, 4), 'fee': round(fee, 4),
                     'exit_reason': f'SUB_TP_{sub_tp}%',
-                    'signal_type': 'DCA/SUB-CYCLE',
-                    'trade_type': 'cycle_trade'
-                })
-                sub_held = 0.0
-                sub_avg = 0.0
-                sub_cost = 0.0
-            elif bar_low <= sub_stop_price:
-                # Sub-cycle stop: tight -5% stop (intrabar trigger)
-                exit_px = sub_stop_price
-                fee = _maker_fee(exit_px, sub_held)
-                pnl = (exit_px - sub_avg) * sub_held - fee
-                cash += exit_px * sub_held - fee
-                cycle_trades.append({
-                    'entry_time': sub_entry_time,
-                    'exit_time': bar_time, 'side': 'LONG',
-                    'entry_price': sub_avg, 'exit_price': exit_px,
-                    'size': sub_held, 'pnl': round(pnl, 4), 'fee': round(fee, 4),
-                    'exit_reason': 'SUB_STOP',
                     'signal_type': 'DCA/SUB-CYCLE',
                     'trade_type': 'cycle_trade'
                 })

@@ -46,6 +46,6 @@ def home():
     return response
 
 if __name__ == '__main__':
-    from routes.trading import start_manual_evaluator
-    start_manual_evaluator()
+    # Manual-position evaluator now starts at import (routes/trading.py),
+    # so it also runs under gunicorn/uwsgi where __main__ never executes.
     app.run(host='0.0.0.0', port=5000)

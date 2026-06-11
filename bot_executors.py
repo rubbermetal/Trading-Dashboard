@@ -2,14 +2,15 @@ import time
 import uuid
 import pandas as pd
 from shared import client, ACTIVE_BOTS
-from notifier import notify_bot_entry, notify_bot_exit, notify_drawdown
+from notifier import notify, notify_bot_entry, notify_bot_exit, notify_drawdown
 from strategies import (calculate_quad_rotation, calculate_orb,
     calculate_trap, calculate_momentum, calculate_dca, calculate_npr, NPR_CONFIG, _compute_zone,
     calculate_vwap_mr, calculate_squeeze)
 from bot_utils import (
     get_bot_tf, is_derivative, get_contract_multiplier,
     snap_to_increment, record_trade, save_bots,
-    extract_fee, poll_market_fill
+    extract_fee, poll_market_fill,
+    order_success, order_error, get_exit_lock
 )
 from logger import get_logger
 
@@ -67,6 +68,53 @@ def paper_fill_sell(bot, pair, tier_pct, qty, price, mult):
 
 
 # ==========================================
+# SHARED EXECUTOR HELPERS
+# ==========================================
+
+def _drop_forming_candle(df, tf_sec):
+    """STRAT-H1: strategies must evaluate CLOSED bars only (matches backtester).
+    Drops the final row if its bar is still forming."""
+    try:
+        if len(df) > 0 and float(df['start'].iloc[-1]) + tf_sec > time.time():
+            return df.iloc[:-1].reset_index(drop=True)
+    except (KeyError, ValueError, TypeError):
+        pass
+    return df
+
+
+def _lookup_order(client_oid, pair):
+    """Find an order by client_order_id regardless of status (EXEC-H2).
+    Returns the order dict or None."""
+    if not client_oid:
+        return None
+    try:
+        order_data = client.get("/api/v3/brokerage/orders/historical/batch", params={
+            "product_id": pair, "limit": 50
+        })
+        for o in order_data.get('orders', []):
+            if o.get('client_order_id') == client_oid:
+                return o
+    except Exception as e:
+        log.debug(f"[{pair}] Order lookup error: {e}")
+    return None
+
+
+def get_base_increment(bot, pair):
+    """EXEC-H4: product base_increment, fetched once and cached in bot state."""
+    bi = bot.get('base_increment')
+    if bi:
+        return bi
+    try:
+        p_info = client.get_product(product_id=pair)
+        bi = str(getattr(p_info, 'base_increment', '0.00000001'))
+        bot['base_increment'] = bi
+    except Exception as e:
+        log.debug(f"[{pair}] base_increment fetch failed: {e}")
+        bi = '0.00000001'
+    return bi
+
+
+# ==========================================
 # STRATEGY EXECUTORS (NON-GRID)
 # ==========================================
 
@@ -87,13 +135,15 @@ def execute_orb(bot_id, bot, pair):
     parsed = [{'start': int(c['start']), 'open': float(c['open']), 'high': float(c['high']),
                'low': float(c['low']), 'close': float(c['close']), 'volume': float(c.get('volume', 0))} for c in candles]
     df = pd.DataFrame(parsed).sort_values('start').reset_index(drop=True)
+    current_px = float(df.iloc[-1]['close'])  # live price proxy (may be forming bar) for stop checks
+    df = _drop_forming_candle(df, tf_sec)
+    if len(df) < 50: return
 
     pos_side = bot.get('position_side', 'FLAT')
     entry_price = bot.get('entry_price', 0.0)
     orb_data = bot.get('orb_data', None)
     tp_stage = bot.get('tp_stage', 0)
     settings = bot.get('settings', {})
-    current_px = float(df.iloc[-1]['close'])
 
     deriv_flag = is_derivative(pair)
     mult = get_contract_multiplier(pair)
@@ -146,20 +196,30 @@ def execute_orb(bot_id, bot, pair):
 
         try:
             oid = str(uuid.uuid4())
+            actual_px, actual_qty = current_px, qty
             if bot.get('paper'):
+                entry_fee = qty * current_px * mult * 0.004
                 log.info(f"[{pair}] PAPER ORB BUY: {qty} at ${current_px:.4f}")
-            elif deriv_flag:
-                client.market_order_buy(client_order_id=oid, product_id=pair, base_size=str(qty))
             else:
-                client.market_order_buy(client_order_id=oid, product_id=pair, quote_size=str(round(alloc * 0.99, 2)))
+                if deriv_flag:
+                    res = client.market_order_buy(client_order_id=oid, product_id=pair, base_size=str(qty))
+                else:
+                    res = client.market_order_buy(client_order_id=oid, product_id=pair, quote_size=str(round(alloc * 0.99, 2)))
+                if not order_success(res):
+                    log.error(f"[{pair}] ORB entry buy rejected: {order_error(res)}")
+                    return
+                fill_px, fill_sz, fill_fee = poll_market_fill(oid, pair)
+                if fill_px and fill_sz:
+                    actual_px, actual_qty = fill_px, fill_sz
+                entry_fee = fill_fee if fill_fee is not None else (actual_px * actual_qty * mult * 0.0025)
 
-            bot['asset_held'] = qty
-            bot['current_usd'] -= alloc
+            bot['asset_held'] = actual_qty
+            bot['current_usd'] -= (actual_qty * actual_px * mult + entry_fee)
             bot['position_side'] = 'LONG'
-            bot['entry_price'] = current_px
+            bot['entry_price'] = actual_px
             bot['orb_data'] = orb_meta
             bot['tp_stage'] = 0
-            bot['high_water_mark'] = current_px
+            bot['high_water_mark'] = actual_px
             save_bots()
             log.info(f"[{pair}] ORB LONG: {reason}")
         except Exception as e:
@@ -180,18 +240,27 @@ def execute_orb(bot_id, bot, pair):
 
         try:
             oid = str(uuid.uuid4())
+            actual_px = current_px
             if bot.get('paper'):
+                entry_fee = qty * current_px * mult * 0.004
                 log.info(f"[{pair}] PAPER ORB SELL (SHORT entry): {qty} at ${current_px:.4f}")
             else:
-                client.market_order_sell(client_order_id=oid, product_id=pair, base_size=str(qty))
+                res = client.market_order_sell(client_order_id=oid, product_id=pair, base_size=str(qty))
+                if not order_success(res):
+                    log.error(f"[{pair}] ORB short entry rejected: {order_error(res)}")
+                    return
+                fill_px, fill_sz, fill_fee = poll_market_fill(oid, pair)
+                if fill_px:
+                    actual_px = fill_px
+                entry_fee = fill_fee if fill_fee is not None else (actual_px * qty * mult * 0.0025)
 
             bot['asset_held'] = -qty
-            bot['current_usd'] -= alloc
+            bot['current_usd'] -= (qty * actual_px * mult + entry_fee)
             bot['position_side'] = 'SHORT'
-            bot['entry_price'] = current_px
+            bot['entry_price'] = actual_px
             bot['orb_data'] = orb_meta
             bot['tp_stage'] = 0
-            bot['low_water_mark'] = current_px
+            bot['low_water_mark'] = actual_px
             save_bots()
             log.info(f"[{pair}] ORB SHORT: {reason}")
         except Exception as e:
@@ -208,15 +277,22 @@ def execute_orb(bot_id, bot, pair):
                 log.info(f"[{pair}] PAPER ORB PARTIAL EXIT LONG: {sell_qty} at ${current_px:.4f}")
             else:
                 oid = str(uuid.uuid4())
-                client.market_order_sell(client_order_id=oid, product_id=pair, base_size=str(sell_qty))
+                str_qty = snap_to_increment(sell_qty, get_base_increment(bot, pair))
+                sell_qty = float(str_qty)
+                if sell_qty <= 0:
+                    return
+                res = client.market_order_sell(client_order_id=oid, product_id=pair, base_size=str_qty)
+                if not order_success(res):
+                    log.error(f"[{pair}] ORB partial exit sell rejected: {order_error(res)} — position unchanged")
+                    return
                 fill_px, fill_sz, fill_fee = poll_market_fill(oid, pair)
                 actual_exit = fill_px if fill_px else current_px
                 actual_fee = fill_fee if fill_fee is not None else (actual_exit * sell_qty * mult * 0.0025)
 
             record_trade(bot, bot['entry_price'], actual_exit, sell_qty, 'LONG', 'TARGET_1', pair, mult, actual_fee=actual_fee)
 
-            profit = (actual_exit - bot['entry_price']) * sell_qty * mult
-            bot['current_usd'] += profit - actual_fee
+            # Additive cash ledger: partial exit returns gross proceeds minus fee
+            bot['current_usd'] += (sell_qty * actual_exit * mult) - actual_fee
             bot['asset_held'] -= sell_qty
             bot['tp_stage'] = 1
             bot['high_water_mark'] = current_px
@@ -235,15 +311,19 @@ def execute_orb(bot_id, bot, pair):
                 log.info(f"[{pair}] PAPER ORB PARTIAL EXIT SHORT: {cover_qty} at ${current_px:.4f}")
             else:
                 oid = str(uuid.uuid4())
-                client.market_order_buy(client_order_id=oid, product_id=pair, base_size=str(cover_qty))
+                res = client.market_order_buy(client_order_id=oid, product_id=pair, base_size=str(cover_qty))
+                if not order_success(res):
+                    log.error(f"[{pair}] ORB partial cover rejected: {order_error(res)} — position unchanged")
+                    return
                 fill_px, fill_sz, fill_fee = poll_market_fill(oid, pair)
                 actual_exit = fill_px if fill_px else current_px
                 actual_fee = fill_fee if fill_fee is not None else (actual_exit * cover_qty * mult * 0.0025)
 
             record_trade(bot, bot['entry_price'], actual_exit, cover_qty, 'SHORT', 'TARGET_1', pair, mult, actual_fee=actual_fee)
 
+            # Additive cash ledger: return entry notional for the covered qty plus PnL
             profit = (bot['entry_price'] - actual_exit) * cover_qty * mult
-            bot['current_usd'] += profit - actual_fee
+            bot['current_usd'] += (cover_qty * bot['entry_price'] * mult) + profit - actual_fee
             bot['asset_held'] += cover_qty
             bot['tp_stage'] = 1
             bot['low_water_mark'] = current_px
@@ -263,7 +343,14 @@ def execute_orb(bot_id, bot, pair):
                 log.info(f"[{pair}] PAPER ORB EXIT LONG ({exit_reason}): {held} at ${current_px:.4f}")
             else:
                 oid = str(uuid.uuid4())
-                client.market_order_sell(client_order_id=oid, product_id=pair, base_size=str(held))
+                str_qty = snap_to_increment(held, get_base_increment(bot, pair))
+                held = float(str_qty)
+                if held <= 0:
+                    return
+                res = client.market_order_sell(client_order_id=oid, product_id=pair, base_size=str_qty)
+                if not order_success(res):
+                    log.error(f"[{pair}] ORB exit sell rejected: {order_error(res)} — position unchanged, stop will re-fire")
+                    return
                 fill_px, fill_sz, fill_fee = poll_market_fill(oid, pair)
                 actual_exit = fill_px if fill_px else current_px
                 actual_fee = fill_fee if fill_fee is not None else (actual_exit * held * mult * 0.0025)
@@ -271,7 +358,8 @@ def execute_orb(bot_id, bot, pair):
             record_trade(bot, bot['entry_price'], actual_exit, held, 'LONG', exit_reason, pair, mult, actual_fee=actual_fee)
 
             profit = (actual_exit - bot['entry_price']) * held * mult
-            bot['current_usd'] = bot['allocated_usd'] + profit - actual_fee
+            # Additive cash ledger: exit adds gross proceeds minus fee (entry subtracted cost)
+            bot['current_usd'] += (held * actual_exit * mult) - actual_fee
             bot['asset_held'] = 0.0
             bot['position_side'] = 'FLAT'
             bot.pop('orb_data', None)

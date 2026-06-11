@@ -272,8 +272,16 @@ def calculate_orb(df, pos_side="FLAT", entry_price=0.0, orb_data=None, tp_stage=
          ((df['datetime'].dt.hour == range_end_hour) & (df['datetime'].dt.minute < range_end_minute)))
     ]
 
-    # Range not ready yet
-    min_candles = max(3, range_duration_min // 5)  # at least 3 candles or duration/5
+    # Range not ready yet — infer bar interval from the data instead of
+    # hardcoding 5m bars (STRAT-M1), fallback 300s when undeterminable
+    bar_seconds = 300.0
+    if 'start' in df.columns and len(df) >= 2:
+        diffs = df['start'].diff().dropna()
+        med = float(diffs.median()) if len(diffs) > 0 else 0.0
+        if med > 0:
+            bar_seconds = med
+    bar_minutes = max(1, int(round(bar_seconds / 60.0)))
+    min_candles = max(3, range_duration_min // bar_minutes)  # at least 3 candles or duration/bar
     if len(opening_range) < min_candles:
         return "HOLD", f"Defining range ({range_start_hour}:00-{range_end_hour}:{range_end_minute:02d} UTC, {len(opening_range)}/{min_candles} candles)", {}
 
@@ -347,11 +355,14 @@ def calculate_orb(df, pos_side="FLAT", entry_price=0.0, orb_data=None, tp_stage=
     if hours_since_range > expiry_hours:
         return "HOLD", f"ORB expired ({hours_since_range:.0f}h > {expiry_hours}h)", {}
 
-    # Range quality filter: 0.5x - 2.0x ATR
+    # Range quality filter: 0.5x ATR floor; width cap scaled by sqrt(bars in
+    # range) since an N-bar range is expected to span ~sqrt(N)x a 1-bar ATR (STRAT-M3)
+    bars_in_range = len(opening_range)
+    max_range_width = 2.0 * atr * math.sqrt(bars_in_range)
     if range_width < 0.5 * atr:
         return "HOLD", f"Range too narrow ({range_width:.2f} < 0.5x ATR {0.5*atr:.2f})", {}
-    if range_width > 2.0 * atr:
-        return "HOLD", f"Range too wide ({range_width:.2f} > 2.0x ATR {2.0*atr:.2f})", {}
+    if range_width > max_range_width:
+        return "HOLD", f"Range too wide ({range_width:.2f} > 2.0x ATR x sqrt({bars_in_range}) = {max_range_width:.2f})", {}
 
     # Candle quality checks
     curr_body = abs(curr['close'] - curr['open'])

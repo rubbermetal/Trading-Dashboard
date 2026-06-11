@@ -128,18 +128,32 @@ def load_bots():
                 ACTIVE_BOTS.update(loaded)
             for bot_id, data in list(ACTIVE_BOTS.items()):
                 if data.get('status') == 'RUNNING':
-                    threading.Thread(target=run_bot, args=(bot_id,), daemon=True).start()
+                    spawn_bot_thread(bot_id)
         except Exception as e:
             log.error(f"Failed to load bots: {e}")
 
-def run_bot(bot_id):
+def spawn_bot_thread(bot_id):
+    """Start a run_bot thread with a fresh generation token. Any older thread for
+    this bot exits its loop when it sees the token changed — prevents the
+    stop->restart race from leaving two engines trading the same bot."""
+    with BOTS_LOCK:
+        bot = ACTIVE_BOTS.get(bot_id)
+        if bot is None:
+            return
+        bot['run_generation'] = bot.get('run_generation', 0) + 1
+        gen = bot['run_generation']
+    threading.Thread(target=run_bot, args=(bot_id, gen), daemon=True).start()
+
+def run_bot(bot_id, my_gen=None):
     """The master thread loop for a single bot. Evaluates every 15s."""
     log.info(f"[BOT ENGINE] Started thread for Bot ID: {bot_id}")
+    if my_gen is None:
+        my_gen = ACTIVE_BOTS.get(bot_id, {}).get('run_generation', 0)
     while True:
         bot = ACTIVE_BOTS.get(bot_id)
         
-        if not bot or bot.get('status') != 'RUNNING':
-            log.warning(f"[BOT ENGINE] Stopping thread for Bot ID: {bot_id}")
+        if not bot or bot.get('status') != 'RUNNING' or bot.get('run_generation', 0) != my_gen:
+            log.warning(f"[BOT ENGINE] Stopping thread for Bot ID: {bot_id} (gen {my_gen})")
             break 
             
         pair = bot['pair']
@@ -167,7 +181,11 @@ def run_bot(bot_id):
         except Exception as e:
             log.error(f"[BOT ENGINE] Error in {pair} {strategy} bot: {e}")
             
-        time.sleep(15)
+        for _ in range(15):
+            b = ACTIVE_BOTS.get(bot_id)
+            if not b or b.get('status') != 'RUNNING' or b.get('run_generation', 0) != my_gen:
+                break
+            time.sleep(1)
 
 # ==========================================
 # API ENDPOINTS (DASHBOARD UI)
@@ -316,9 +334,12 @@ def grid_preview():
     """Calculates deterministic grid parameters for preview before deployment."""
     d = request.json
     pair = d.get('pair', '')
-    capital = float(d.get('capital', 0))
-    step_pct = float(d.get('step_pct', 0.6)) / 100.0
-    min_order_usd = float(d.get('min_order_usd', 5))
+    try:
+        capital = float(d.get('capital', 0))
+        step_pct = float(d.get('step_pct', 0.6)) / 100.0
+        min_order_usd = float(d.get('min_order_usd', 5))
+    except (ValueError, TypeError):
+        return jsonify(error="capital, step_pct and min_order_usd must be numbers"), 400
     mode = d.get('mode', 'BOTH').upper()
 
     if capital <= 0 or not pair: return jsonify(error="Invalid pair or capital.")
@@ -408,7 +429,7 @@ def start_bot():
         }
         ACTIVE_BOTS[bot_id]['stats']['deposits'] = float(d['amount'])
         save_bots()
-    threading.Thread(target=run_bot, args=(bot_id,), daemon=True).start()
+    spawn_bot_thread(bot_id)
     return jsonify(success=True, message=f"Bot started on {tf} timeframe!")
 
 @bot_manager_bp.route('/api/bots/clone/<bot_id>', methods=['POST'])
@@ -440,7 +461,7 @@ def clone_bot(bot_id):
             ACTIVE_BOTS[new_id]['buy_pct'] = source['buy_pct']
         ACTIVE_BOTS[new_id]['stats']['deposits'] = new_amount
         save_bots()
-    threading.Thread(target=run_bot, args=(new_id,), daemon=True).start()
+    spawn_bot_thread(new_id)
     return jsonify(success=True, message=f"Cloned {source['strategy']} to {new_pair} with ${new_amount:.2f}", bot_id=new_id)
 
 @bot_manager_bp.route('/api/bots/timeframe/<bot_id>', methods=['POST'])
@@ -496,12 +517,13 @@ def stop_bot(bot_id):
 @bot_manager_bp.route('/api/bots/restart/<bot_id>', methods=['POST'])
 def restart_bot(bot_id):
     if bot_id in ACTIVE_BOTS:
-        if ACTIVE_BOTS[bot_id]['status'] == 'STOPPED':
+        with BOTS_LOCK:
+            if ACTIVE_BOTS[bot_id]['status'] != 'STOPPED':
+                return jsonify(success=False, error="Bot is already running.")
             ACTIVE_BOTS[bot_id]['status'] = "RUNNING"
-            save_bots()
-            threading.Thread(target=run_bot, args=(bot_id,), daemon=True).start()
-            return jsonify(success=True, message="Bot restarted successfully.")
-        return jsonify(success=False, error="Bot is already running.")
+        save_bots()
+        spawn_bot_thread(bot_id)
+        return jsonify(success=True, message="Bot restarted successfully.")
     return jsonify(success=False, error="Bot not found.")
 
 @bot_manager_bp.route('/api/bots/delete/<bot_id>', methods=['DELETE'])
@@ -554,13 +576,17 @@ def delete_bot(bot_id):
 def deposit_to_bot(bot_id):
     if bot_id not in ACTIVE_BOTS: return jsonify(success=False, error="Bot not found.")
     d = request.json
-    amount = float(d.get('amount', 0))
+    try:
+        amount = float(d.get('amount', 0))
+    except (ValueError, TypeError):
+        return jsonify(success=False, error="Amount must be a number."), 400
     if amount <= 0: return jsonify(success=False, error="Amount must be positive.")
     
-    bot = ACTIVE_BOTS[bot_id]
-    bot['current_usd'] += amount
-    bot['allocated_usd'] += amount
-    ensure_stats(bot)['deposits'] += amount
+    with BOTS_LOCK:
+        bot = ACTIVE_BOTS[bot_id]
+        bot['current_usd'] += amount
+        bot['allocated_usd'] += amount
+        ensure_stats(bot)['deposits'] += amount
     save_bots()
     return jsonify(success=True, message=f"Deposited ${amount:.2f} into bot {bot_id}.")
 
@@ -568,15 +594,19 @@ def deposit_to_bot(bot_id):
 def withdraw_from_bot(bot_id):
     if bot_id not in ACTIVE_BOTS: return jsonify(success=False, error="Bot not found.")
     d = request.json
-    amount = float(d.get('amount', 0))
+    try:
+        amount = float(d.get('amount', 0))
+    except (ValueError, TypeError):
+        return jsonify(success=False, error="Amount must be a number."), 400
     if amount <= 0: return jsonify(success=False, error="Amount must be positive.")
     
-    bot = ACTIVE_BOTS[bot_id]
-    if amount > bot['current_usd']: return jsonify(success=False, error=f"Insufficient idle USD. Available: ${bot['current_usd']:.2f}")
-    
-    bot['current_usd'] -= amount
-    bot['allocated_usd'] -= amount
-    ensure_stats(bot)['withdrawals'] += amount
+    with BOTS_LOCK:
+        bot = ACTIVE_BOTS[bot_id]
+        if amount > bot['current_usd']: return jsonify(success=False, error=f"Insufficient idle USD. Available: ${bot['current_usd']:.2f}")
+        
+        bot['current_usd'] -= amount
+        bot['allocated_usd'] -= amount
+        ensure_stats(bot)['withdrawals'] += amount
     save_bots()
     return jsonify(success=True, message=f"Withdrew ${amount:.2f} from bot {bot_id}.")
 
@@ -615,7 +645,10 @@ def set_buy_pct(bot_id):
     if bot.get('strategy') != 'DCA':
         return jsonify(error="Only DCA bots support buy_pct")
     data = request.get_json()
-    pct = float(data.get('buy_pct', 5.0))
+    try:
+        pct = float(data.get('buy_pct', 5.0))
+    except (ValueError, TypeError):
+        return jsonify(error="buy_pct must be a number")
     if pct < 0.1 or pct > 50:
         return jsonify(error="buy_pct must be between 0.1 and 50")
     bot['buy_pct'] = round(pct, 1)

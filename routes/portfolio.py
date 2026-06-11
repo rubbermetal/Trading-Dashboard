@@ -1,6 +1,7 @@
 import uuid, time, json, os, threading
 from flask import Blueprint, jsonify, request
 from shared import client, MANUAL_SPOT_ENTRIES, REBALANCE_TARGETS, TRAILING_STOPS, BRACKET_ORDERS, ACTIVE_BOTS
+from bot_utils import order_success, order_error
 from logger import get_logger
 
 log = get_logger('api')
@@ -44,13 +45,24 @@ def _auto_rebalance_thread():
                         if abs(actual_pct - target_pct) > 0.05 and abs(diff_usd) > 5.0:
                             if diff_usd > 0: sells.append({"pair": f"{asset}-USD", "size": str(round(diff_usd / px, 6))})
                             else: buys.append({"pair": f"{asset}-USD", "size": str(round(abs(diff_usd), 2))})
+                    sells_ok = 0
                     for s in sells:
-                        client.market_order_sell(client_order_id=str(uuid.uuid4()), product_id=s['pair'], base_size=s['size'])
-                        log.info("Auto-rebalance sold %s %s", s['size'], s['pair'])
-                    if sells and buys: time.sleep(2)
+                        res = client.market_order_sell(client_order_id=str(uuid.uuid4()), product_id=s['pair'], base_size=s['size'])
+                        if order_success(res):
+                            sells_ok += 1
+                            log.info("Auto-rebalance sold %s %s", s['size'], s['pair'])
+                        else:
+                            log.error("Auto-rebalance sell REJECTED %s %s: %s", s['size'], s['pair'], order_error(res))
+                    if sells and not sells_ok and buys:
+                        log.error("Auto-rebalance: all sells failed — skipping buys (no freed funds)")
+                        buys = []
+                    if sells_ok and buys: time.sleep(2)
                     for b in buys:
-                        client.market_order_buy(client_order_id=str(uuid.uuid4()), product_id=b['pair'], quote_size=b['size'])
-                        log.info("Auto-rebalance bought $%s of %s", b['size'], b['pair'])
+                        res = client.market_order_buy(client_order_id=str(uuid.uuid4()), product_id=b['pair'], quote_size=b['size'])
+                        if order_success(res):
+                            log.info("Auto-rebalance bought $%s of %s", b['size'], b['pair'])
+                        else:
+                            log.error("Auto-rebalance buy REJECTED $%s of %s: %s", b['size'], b['pair'], order_error(res))
                     _rebalance_schedule['last_run'] = time.time()
                     _save_rebal_schedule()
                     if not sells and not buys:
@@ -88,7 +100,12 @@ def fetch_data():
                 try:
                     p = client.get_product(product_id=prod_id)
                     px = float(p.price)
-                except: px = 0.0
+                except Exception:
+                    px = 0.0
+                if px == 0.0:
+                    # Failed price fetch — excluding from totals would hide the asset,
+                    # but a silent 0 skews rebalance math; log it loudly.
+                    log.warning("Portfolio valuation: no price for %s — valued at $0 this cycle", prod_id)
                     
                 usd = val * px
                 total += usd
@@ -313,15 +330,26 @@ def execute_rebalance():
                 if diff_usd > 0: sells.append({"pair": f"{asset}-USD", "size": str(round(diff_usd / px, 6))})
                 else: buys.append({"pair": f"{asset}-USD", "size": str(round(abs(diff_usd), 2))})
         
+        sells_ok = 0
         for s in sells:
-            client.market_order_sell(client_order_id=str(uuid.uuid4()), product_id=s['pair'], base_size=s['size'])
-            msgs.append(f"Sold {s['size']} {s['pair']}")
-            
-        if sells and buys: time.sleep(2) 
+            res = client.market_order_sell(client_order_id=str(uuid.uuid4()), product_id=s['pair'], base_size=s['size'])
+            if order_success(res):
+                sells_ok += 1
+                msgs.append(f"Sold {s['size']} {s['pair']}")
+            else:
+                msgs.append(f"SELL FAILED {s['size']} {s['pair']}: {order_error(res)}")
+        
+        if sells and not sells_ok and buys:
+            msgs.append("All sells failed — buys skipped (no freed funds)")
+            buys = []
+        if sells_ok and buys: time.sleep(2) 
             
         for b in buys:
-            client.market_order_buy(client_order_id=str(uuid.uuid4()), product_id=b['pair'], quote_size=b['size'])
-            msgs.append(f"Bought ${b['size']} of {b['pair']}")
+            res = client.market_order_buy(client_order_id=str(uuid.uuid4()), product_id=b['pair'], quote_size=b['size'])
+            if order_success(res):
+                msgs.append(f"Bought ${b['size']} of {b['pair']}")
+            else:
+                msgs.append(f"BUY FAILED ${b['size']} of {b['pair']}: {order_error(res)}")
             
         if not msgs: return jsonify(success=True, message="Portfolio is already balanced.")
         return jsonify(success=True, message=" | ".join(msgs))

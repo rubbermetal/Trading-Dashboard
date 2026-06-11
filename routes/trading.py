@@ -13,28 +13,57 @@ from notifier import notify_bracket_hit, notify_sniper, notify_twap_complete
 
 trading_bp = Blueprint('trading', __name__)
 
-TRAIL_STATE_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'trailing_stops.json')
+_STATE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+TRAIL_STATE_PATH = os.path.join(_STATE_DIR, 'trailing_stops.json')
+BRACKET_STATE_PATH = os.path.join(_STATE_DIR, 'bracket_orders.json')
+TWAP_STATE_PATH = os.path.join(_STATE_DIR, 'twap_orders.json')
+SNIPER_STATE_PATH = os.path.join(_STATE_DIR, 'sniper_orders.json')
+
+# Guards read-modify-write of the protection/advanced-order dicts shared between
+# request handlers and the background watcher. Keep critical sections short —
+# never hold this across network calls.
+PROTECTIONS_LOCK = threading.RLock()
+
+def _save_state(state_dict, path, label):
+    try:
+        with PROTECTIONS_LOCK:
+            payload = json.dumps(state_dict, indent=2)
+        tmp_fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(path), prefix='.state_', suffix='.tmp')
+        with os.fdopen(tmp_fd, 'w') as f:
+            f.write(payload)
+        os.replace(tmp_path, path)
+    except Exception as e:
+        log.error(f"{label} persist error: {e}")
+
+def _load_state(state_dict, path, label):
+    try:
+        if os.path.exists(path):
+            with open(path) as f:
+                data = json.load(f)
+            state_dict.update(data)
+            log.info(f"Restored {len(data)} {label}(s) from disk: {list(data.keys())}")
+    except Exception as e:
+        log.error(f"{label} load error: {e}")
 
 def save_trailing_stops():
-    try:
-        tmp_fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(TRAIL_STATE_PATH), prefix='.trail_', suffix='.tmp')
-        with os.fdopen(tmp_fd, 'w') as f:
-            json.dump(TRAILING_STOPS, f, indent=2)
-        os.replace(tmp_path, TRAIL_STATE_PATH)
-    except Exception as e:
-        log.error(f"Trail persist error: {e}")
+    _save_state(TRAILING_STOPS, TRAIL_STATE_PATH, 'trailing stop')
+
+def save_bracket_orders():
+    _save_state(BRACKET_ORDERS, BRACKET_STATE_PATH, 'bracket order')
+
+def save_twap_orders():
+    _save_state(TWAP_ORDERS, TWAP_STATE_PATH, 'TWAP order')
+
+def save_sniper_orders():
+    _save_state(SNIPER_ORDERS, SNIPER_STATE_PATH, 'sniper order')
 
 def load_trailing_stops():
-    try:
-        if os.path.exists(TRAIL_STATE_PATH):
-            with open(TRAIL_STATE_PATH) as f:
-                data = json.load(f)
-            TRAILING_STOPS.update(data)
-            log.info(f"Restored {len(data)} trailing stop(s) from disk: {list(data.keys())}")
-    except Exception as e:
-        log.error(f"Trail load error: {e}")
+    _load_state(TRAILING_STOPS, TRAIL_STATE_PATH, 'trailing stop')
 
 load_trailing_stops()
+_load_state(BRACKET_ORDERS, BRACKET_STATE_PATH, 'bracket order')
+_load_state(TWAP_ORDERS, TWAP_STATE_PATH, 'TWAP order')
+_load_state(SNIPER_ORDERS, SNIPER_STATE_PATH, 'sniper order')
 
 REPRICE_AFTER_SEC = 60  # cancel + re-place unfilled maker exit after this many seconds
 
@@ -161,7 +190,8 @@ def background_watcher():
                         status, filled_size, avg_px = _check_order_filled(pair, oid)
                         if status == 'FILLED':
                             log.info(f"[{pair}] TRAIL {exit_side} FILLED @ ${avg_px:.4f} (size {filled_size})")
-                            del TRAILING_STOPS[pair]
+                            with PROTECTIONS_LOCK:
+                                TRAILING_STOPS.pop(pair, None)
                             save_trailing_stops()
                             continue
                         age = time.time() - data.get('triggered_at', 0)
@@ -170,17 +200,21 @@ def background_watcher():
                             # Cancel existing and re-place at fresh best bid/ask
                             _cancel_by_client_oid(pair, oid)
                             ok, new_oid, new_px, qty, reason = _place_maker_exit(pair, exit_side, data['size'])
+                            with PROTECTIONS_LOCK:
+                                entry = TRAILING_STOPS.get(pair)
+                                if entry is not None:
+                                    if ok:
+                                        entry['triggered_oid'] = new_oid
+                                        entry['last_reprice_at'] = time.time()
+                                    else:
+                                        entry.pop('triggered_oid', None)
+                                        entry.pop('triggered_at', None)
+                                        entry.pop('last_reprice_at', None)
+                            save_trailing_stops()
                             if ok:
-                                TRAILING_STOPS[pair]['triggered_oid'] = new_oid
-                                TRAILING_STOPS[pair]['last_reprice_at'] = time.time()
-                                save_trailing_stops()
                                 log.info(f"[{pair}] TRAIL {exit_side} repriced @ ${new_px} (unfilled {age:.0f}s)")
                             else:
                                 log.error(f"[{pair}] TRAIL {exit_side} reprice REJECTED: {reason} — keeping trail armed, will retry")
-                                TRAILING_STOPS[pair].pop('triggered_oid', None)
-                                TRAILING_STOPS[pair].pop('triggered_at', None)
-                                TRAILING_STOPS[pair].pop('last_reprice_at', None)
-                                save_trailing_stops()
                         continue
 
                     # Phase A: tracking peak / trough, check for trigger
@@ -189,30 +223,38 @@ def background_watcher():
 
                     if side == 'SELL':
                         if cur_px > data['highest_price']:
-                            TRAILING_STOPS[pair]['highest_price'] = cur_px
+                            with PROTECTIONS_LOCK:
+                                if pair in TRAILING_STOPS:
+                                    TRAILING_STOPS[pair]['highest_price'] = cur_px
                             save_trailing_stops()
                         trigger_px = data['highest_price'] * (1 - data['trail_pct'])
                         if cur_px <= trigger_px:
                             ok, oid, px, qty, reason = _place_maker_exit(pair, 'SELL', data['size'])
                             if ok:
-                                TRAILING_STOPS[pair]['triggered_oid'] = oid
-                                TRAILING_STOPS[pair]['triggered_at'] = time.time()
-                                TRAILING_STOPS[pair]['last_reprice_at'] = time.time()
+                                with PROTECTIONS_LOCK:
+                                    if pair in TRAILING_STOPS:
+                                        TRAILING_STOPS[pair]['triggered_oid'] = oid
+                                        TRAILING_STOPS[pair]['triggered_at'] = time.time()
+                                        TRAILING_STOPS[pair]['last_reprice_at'] = time.time()
                                 save_trailing_stops()
                                 log.info(f"[{pair}] TRAIL SELL triggered @ ${cur_px:.4f} (peak ${data['highest_price']:.4f}) — maker limit {qty}@${px}")
                             else:
                                 log.error(f"[{pair}] TRAIL SELL place REJECTED: {reason} — will retry next cycle")
                     else:
                         if cur_px < data.get('lowest_price', cur_px):
-                            TRAILING_STOPS[pair]['lowest_price'] = cur_px
+                            with PROTECTIONS_LOCK:
+                                if pair in TRAILING_STOPS:
+                                    TRAILING_STOPS[pair]['lowest_price'] = cur_px
                             save_trailing_stops()
                         trigger_px = data.get('lowest_price', cur_px) * (1 + data['trail_pct'])
                         if cur_px >= trigger_px:
                             ok, oid, px, qty, reason = _place_maker_exit(pair, 'BUY', data['size'])
                             if ok:
-                                TRAILING_STOPS[pair]['triggered_oid'] = oid
-                                TRAILING_STOPS[pair]['triggered_at'] = time.time()
-                                TRAILING_STOPS[pair]['last_reprice_at'] = time.time()
+                                with PROTECTIONS_LOCK:
+                                    if pair in TRAILING_STOPS:
+                                        TRAILING_STOPS[pair]['triggered_oid'] = oid
+                                        TRAILING_STOPS[pair]['triggered_at'] = time.time()
+                                        TRAILING_STOPS[pair]['last_reprice_at'] = time.time()
                                 save_trailing_stops()
                                 log.info(f"[{pair}] TRAIL BUY triggered @ ${cur_px:.4f} (trough ${data.get('lowest_price', 0):.4f}) — maker limit {qty}@${px}")
                             else:
@@ -238,7 +280,9 @@ def background_watcher():
                     remaining_slices = tw['slices'] - tw['filled_slices']
 
                     if remaining_slices <= 0:
-                        tw['status'] = 'COMPLETED'
+                        with PROTECTIONS_LOCK:
+                            tw['status'] = 'COMPLETED'
+                        save_twap_orders()
                         log.info(f"TWAP {twap_id} completed: {tw['filled_slices']} slices filled")
                         notify_twap_complete(pair, tw['side'], tw['total_usd'], tw['filled_slices'])
                         continue
@@ -246,6 +290,7 @@ def background_watcher():
                     # Place maker limit at best bid/ask
                     book = client.get_product_book(product_id=pair, limit=1)
                     oid = str(uuid.uuid4())
+                    res = None
 
                     if tw['side'] == 'BUY':
                         limit_px = float(book.pricebook.bids[0].price)
@@ -253,18 +298,34 @@ def background_watcher():
                         base_qty = slice_usd / limit_px
                         str_qty = snap_to_increment(base_qty, base_inc)
                         if float(str_qty) > 0:
-                            client.limit_order_gtc_buy(client_order_id=oid, product_id=pair, base_size=str_qty, limit_price=str_price, post_only=True)
+                            res = client.limit_order_gtc_buy(client_order_id=oid, product_id=pair, base_size=str_qty, limit_price=str_price, post_only=True)
                     else:
                         limit_px = float(book.pricebook.asks[0].price)
                         str_price = snap_to_increment(limit_px, quote_inc)
                         str_qty = snap_to_increment(slice_usd / limit_px, base_inc)
                         if float(str_qty) > 0:
-                            client.limit_order_gtc_sell(client_order_id=oid, product_id=pair, base_size=str_qty, limit_price=str_price, post_only=True)
+                            res = client.limit_order_gtc_sell(client_order_id=oid, product_id=pair, base_size=str_qty, limit_price=str_price, post_only=True)
 
-                    tw['filled_slices'] = tw.get('filled_slices', 0) + 1
-                    tw['next_slice_at'] = now + tw['interval_sec']
-                    tw['last_price'] = cur_px
-                    log.info(f"[{pair}] TWAP slice {tw['filled_slices']}/{tw['slices']} @ ${str_price} ({str_qty})")
+                    if order_success(res):
+                        with PROTECTIONS_LOCK:
+                            tw['filled_slices'] = tw.get('filled_slices', 0) + 1
+                            tw['consec_fails'] = 0
+                            tw['next_slice_at'] = now + tw['interval_sec']
+                            tw['last_price'] = cur_px
+                        save_twap_orders()
+                        log.info(f"[{pair}] TWAP slice {tw['filled_slices']}/{tw['slices']} @ ${str_price} ({str_qty})")
+                    else:
+                        reason = order_error(res) if res is not None else f"size snaps to 0 (base_inc={base_inc})"
+                        with PROTECTIONS_LOCK:
+                            tw['consec_fails'] = tw.get('consec_fails', 0) + 1
+                            fails = tw['consec_fails']
+                            if fails >= 3:
+                                tw['status'] = 'FAILED'
+                        save_twap_orders()
+                        if fails >= 3:
+                            log.error(f"[{pair}] TWAP {twap_id} slice rejected ({reason}) — {fails} consecutive failures, marking FAILED")
+                        else:
+                            log.error(f"[{pair}] TWAP {twap_id} slice rejected ({reason}) — failure {fails}/3, will retry")
                 except Exception as e:
                     log.error(f"TWAP {twap_id} error: {e}")
 
@@ -294,17 +355,32 @@ def background_watcher():
                             str_price = snap_to_increment(limit_px, quote_inc)
                             base_qty = float(sn['amount']) / limit_px
                             str_qty = snap_to_increment(base_qty, base_inc)
-                            client.limit_order_gtc_buy(client_order_id=oid, product_id=pair, base_size=str_qty, limit_price=str_price, post_only=True)
+                            res = client.limit_order_gtc_buy(client_order_id=oid, product_id=pair, base_size=str_qty, limit_price=str_price, post_only=True)
                         else:
                             limit_px = float(book.pricebook.asks[0].price)
                             str_price = snap_to_increment(limit_px, quote_inc)
                             str_qty = snap_to_increment(float(sn['amount']), base_inc)
-                            client.limit_order_gtc_sell(client_order_id=oid, product_id=pair, base_size=str_qty, limit_price=str_price, post_only=True)
+                            res = client.limit_order_gtc_sell(client_order_id=oid, product_id=pair, base_size=str_qty, limit_price=str_price, post_only=True)
 
-                        sn['status'] = 'TRIGGERED'
-                        sn['triggered_at'] = cur_px
-                        log.info(f"[{pair}] Sniper triggered @ ${cur_px:.2f} (target ${trigger:.2f}), {sn['side']} placed @ ${str_price}")
-                        notify_sniper(pair, sn['side'], cur_px)
+                        if order_success(res):
+                            with PROTECTIONS_LOCK:
+                                sn['status'] = 'TRIGGERED'
+                                sn['triggered_at'] = cur_px
+                                sn['consec_fails'] = 0
+                            save_sniper_orders()
+                            log.info(f"[{pair}] Sniper triggered @ ${cur_px:.2f} (target ${trigger:.2f}), {sn['side']} placed @ ${str_price}")
+                            notify_sniper(pair, sn['side'], cur_px)
+                        else:
+                            with PROTECTIONS_LOCK:
+                                sn['consec_fails'] = sn.get('consec_fails', 0) + 1
+                                fails = sn['consec_fails']
+                                if fails >= 3:
+                                    sn['status'] = 'FAILED'
+                            save_sniper_orders()
+                            if fails >= 3:
+                                log.error(f"[{pair}] Sniper {snip_id} order rejected ({order_error(res)}) — {fails} consecutive failures, marking FAILED")
+                            else:
+                                log.error(f"[{pair}] Sniper {snip_id} order rejected ({order_error(res)}) — failure {fails}/3, will retry")
                 except Exception as e:
                     log.error(f"Sniper {snip_id} error: {e}")
 
@@ -322,22 +398,29 @@ def background_watcher():
                             pnl = (avg_px - bkt['entry_price']) * float(bkt['size']) if side == 'BUY' else (bkt['entry_price'] - avg_px) * float(bkt['size'])
                             log.info(f"[{pair}] Bracket {bkt.get('hit','?')} FILLED @ ${avg_px:.4f} | entry ${bkt['entry_price']:.4f} | PnL ${pnl:.2f}")
                             notify_bracket_hit(pair, bkt.get('hit','?'), avg_px, pnl)
-                            del BRACKET_ORDERS[pair]
+                            with PROTECTIONS_LOCK:
+                                BRACKET_ORDERS.pop(pair, None)
+                            save_bracket_orders()
                             continue
                         reprice_age = time.time() - bkt.get('last_reprice_at', bkt.get('triggered_at', 0))
                         if reprice_age >= REPRICE_AFTER_SEC:
                             _cancel_by_client_oid(pair, oid)
                             ok, new_oid, new_px, qty, reason = _place_maker_exit(pair, exit_side, bkt['size'])
+                            with PROTECTIONS_LOCK:
+                                if pair in BRACKET_ORDERS:
+                                    if ok:
+                                        bkt['triggered_oid'] = new_oid
+                                        bkt['last_reprice_at'] = time.time()
+                                    else:
+                                        bkt.pop('triggered_oid', None)
+                                        bkt.pop('triggered_at', None)
+                                        bkt.pop('last_reprice_at', None)
+                                        bkt.pop('hit', None)
+                            save_bracket_orders()
                             if ok:
-                                bkt['triggered_oid'] = new_oid
-                                bkt['last_reprice_at'] = time.time()
                                 log.info(f"[{pair}] Bracket {bkt.get('hit','?')} {exit_side} repriced @ ${new_px}")
                             else:
                                 log.error(f"[{pair}] Bracket reprice REJECTED: {reason} — rearming for next trigger")
-                                bkt.pop('triggered_oid', None)
-                                bkt.pop('triggered_at', None)
-                                bkt.pop('last_reprice_at', None)
-                                bkt.pop('hit', None)
                         continue
 
                     # Phase A: scan for TP/SL hit
@@ -369,7 +452,9 @@ def background_watcher():
                                 pnl = (cur_px - bkt['entry_price']) * float(bkt['size']) if side == 'BUY' else (bkt['entry_price'] - cur_px) * float(bkt['size'])
                                 log.info(f"[{pair}] Bracket SL market-exited @ ${cur_px:.4f} | entry ${bkt['entry_price']:.4f} | PnL ${pnl:.2f}")
                                 notify_bracket_hit(pair, 'SL', cur_px, pnl)
-                                del BRACKET_ORDERS[pair]
+                                with PROTECTIONS_LOCK:
+                                    BRACKET_ORDERS.pop(pair, None)
+                                save_bracket_orders()
                             else:
                                 log.error(f"[{pair}] Bracket SL market REJECTED: {fail_reason} — will retry next cycle")
                         except Exception as e:
@@ -377,10 +462,13 @@ def background_watcher():
                     elif hit == 'TP':
                         ok, oid, px, qty, reason = _place_maker_exit(pair, exit_side, bkt['size'])
                         if ok:
-                            bkt['triggered_oid'] = oid
-                            bkt['triggered_at'] = time.time()
-                            bkt['last_reprice_at'] = time.time()
-                            bkt['hit'] = hit
+                            with PROTECTIONS_LOCK:
+                                if pair in BRACKET_ORDERS:
+                                    bkt['triggered_oid'] = oid
+                                    bkt['triggered_at'] = time.time()
+                                    bkt['last_reprice_at'] = time.time()
+                                    bkt['hit'] = hit
+                            save_bracket_orders()
                             log.info(f"[{pair}] Bracket TP triggered @ ${cur_px:.4f} — maker limit {qty}@${px}")
                         else:
                             log.error(f"[{pair}] Bracket TP place REJECTED: {reason} — will retry next cycle")
@@ -413,8 +501,9 @@ def search(symbol):
 @rate_limit
 def trade():
     d = request.json
-    if not d:
-        return jsonify(success=False, error="Request body required"), 400
+    valid, err = validate_trade(d)
+    if not valid:
+        return jsonify(success=False, error=err), 400
     try:
         oid = str(uuid.uuid4())
         if d.get('action') == 'CLOSE':
@@ -430,8 +519,10 @@ def trade():
 
         side, pair, o_type, amt = d['side'], d['pair'], d['order_type'], str(d['amount'])
         if o_type == 'MARKET':
-            if side == 'BUY': client.market_order_buy(client_order_id=oid, product_id=pair, quote_size=amt)
-            else: client.market_order_sell(client_order_id=oid, product_id=pair, base_size=amt)
+            if side == 'BUY': res = client.market_order_buy(client_order_id=oid, product_id=pair, quote_size=amt)
+            else: res = client.market_order_sell(client_order_id=oid, product_id=pair, base_size=amt)
+            if not order_success(res):
+                return jsonify({"success": False, "error": f"Order rejected: {order_error(res)}"})
         elif o_type == 'MAKER_LIMIT':
             product = client.get_product(product_id=pair)
             quote_inc = product.quote_increment
@@ -445,17 +536,21 @@ def trade():
                 str_price = snap_to_increment(limit_px, quote_inc)
                 base_qty = float(amt) / limit_px
                 str_qty = snap_to_increment(base_qty, base_inc)
-                client.limit_order_buy(client_order_id=oid, product_id=pair, base_size=str_qty, limit_price=str_price)
+                res = client.limit_order_buy(client_order_id=oid, product_id=pair, base_size=str_qty, limit_price=str_price)
             else:
                 limit_px = best_ask
                 str_price = snap_to_increment(limit_px, quote_inc)
                 str_qty = snap_to_increment(float(amt), base_inc)
-                client.limit_order_sell(client_order_id=oid, product_id=pair, base_size=str_qty, limit_price=str_price)
+                res = client.limit_order_sell(client_order_id=oid, product_id=pair, base_size=str_qty, limit_price=str_price)
+            if not order_success(res):
+                return jsonify({"success": False, "error": f"Order rejected: {order_error(res)}"})
             return jsonify({"success": True, "message": f"Maker limit {side} @ {str_price}"})
         else:
             px = str(d['limit_price'])
-            if side == 'BUY': client.limit_order_buy(client_order_id=oid, product_id=pair, base_size=amt, limit_price=px)
-            else: client.limit_order_sell(client_order_id=oid, product_id=pair, base_size=amt, limit_price=px)
+            if side == 'BUY': res = client.limit_order_buy(client_order_id=oid, product_id=pair, base_size=amt, limit_price=px)
+            else: res = client.limit_order_sell(client_order_id=oid, product_id=pair, base_size=amt, limit_price=px)
+            if not order_success(res):
+                return jsonify({"success": False, "error": f"Order rejected: {order_error(res)}"})
         return jsonify({"success": True, "message": "Order Submitted"})
     except Exception as e: return jsonify({"success": False, "error": str(e)})
 
@@ -465,6 +560,20 @@ def trade():
 @trading_bp.route('/api/tpsl', methods=['POST'])
 def handle_tpsl():
     d = request.json
+    if not d or not isinstance(d, dict):
+        return jsonify(success=False, error="Request body required"), 400
+    if not d.get('pair') or not isinstance(d.get('pair'), str):
+        return jsonify(success=False, error="pair is required"), 400
+    try:
+        if float(d.get('size', 0)) <= 0:
+            return jsonify(success=False, error="size must be positive"), 400
+        for f in ('tp_price', 'sl_price'):
+            if d.get(f) is not None and float(d[f]) <= 0:
+                return jsonify(success=False, error=f"{f} must be positive"), 400
+    except (ValueError, TypeError):
+        return jsonify(success=False, error="size, tp_price and sl_price must be numbers"), 400
+    if not d.get('tp_price') and not d.get('sl_price'):
+        return jsonify(success=False, error="Set at least one of tp_price or sl_price"), 400
     try:
         pair, size, tp_price, sl_price = d['pair'], str(d['size']), d.get('tp_price'), d.get('sl_price')
         side = 'SELL' if d.get('side') == 'BUY' or d.get('type') == 'SPOT' else 'BUY'
@@ -509,14 +618,16 @@ def set_bracket():
         if not tp_price and not sl_price:
             return jsonify(success=False, error="Set at least TP or SL.")
 
-        BRACKET_ORDERS[pair] = {
-            'size': size,
-            'side': side,
-            'entry_price': entry_price,
-            'tp_price': tp_price,
-            'sl_price': sl_price,
-            'created': time.time()
-        }
+        with PROTECTIONS_LOCK:
+            BRACKET_ORDERS[pair] = {
+                'size': size,
+                'side': side,
+                'entry_price': entry_price,
+                'tp_price': tp_price,
+                'sl_price': sl_price,
+                'created': time.time()
+            }
+        save_bracket_orders()
 
         parts = []
         if tp_price: parts.append(f"TP @ ${tp_price:,.2f}")
@@ -550,7 +661,8 @@ def set_trail():
         else:
             entry['lowest_price'] = cur_px
 
-        TRAILING_STOPS[pair] = entry
+        with PROTECTIONS_LOCK:
+            TRAILING_STOPS[pair] = entry
         save_trailing_stops()
         return jsonify(success=True, message=f"Trailing stop ({d['pct']}%) activated for {pair}")
     except Exception as e:
@@ -603,12 +715,26 @@ def cancel_protection():
     ptype = d.get('type', '')
 
     if ptype == 'TRAIL' and pair in TRAILING_STOPS:
-        del TRAILING_STOPS[pair]
+        with PROTECTIONS_LOCK:
+            entry = TRAILING_STOPS.pop(pair, {})
         save_trailing_stops()
-        return jsonify(success=True, message=f"Trailing stop cancelled for {pair}")
+        # If the trail already placed its maker exit, cancel that live order too
+        live_oid = entry.get('triggered_oid')
+        note = ''
+        if live_oid:
+            cancelled = _cancel_by_client_oid(pair, live_oid)
+            note = ' (live exit order cancelled)' if cancelled else ' (WARNING: live exit order could not be cancelled — check open orders)'
+        return jsonify(success=True, message=f"Trailing stop cancelled for {pair}{note}")
     elif ptype == 'BRACKET' and pair in BRACKET_ORDERS:
-        del BRACKET_ORDERS[pair]
-        return jsonify(success=True, message=f"Bracket order cancelled for {pair}")
+        with PROTECTIONS_LOCK:
+            entry = BRACKET_ORDERS.pop(pair, {})
+        save_bracket_orders()
+        live_oid = entry.get('triggered_oid')
+        note = ''
+        if live_oid:
+            cancelled = _cancel_by_client_oid(pair, live_oid)
+            note = ' (live exit order cancelled)' if cancelled else ' (WARNING: live exit order could not be cancelled — check open orders)'
+        return jsonify(success=True, message=f"Bracket order cancelled for {pair}{note}")
     return jsonify(success=False, error="Protection not found.")
 
 @trading_bp.route('/api/protections/breakeven', methods=['POST'])
@@ -617,7 +743,9 @@ def move_to_breakeven():
     d = request.json
     pair = d.get('pair', '')
     if pair in BRACKET_ORDERS:
-        BRACKET_ORDERS[pair]['sl_price'] = BRACKET_ORDERS[pair]['entry_price']
+        with PROTECTIONS_LOCK:
+            BRACKET_ORDERS[pair]['sl_price'] = BRACKET_ORDERS[pair]['entry_price']
+        save_bracket_orders()
         return jsonify(success=True, message=f"SL moved to break-even @ ${BRACKET_ORDERS[pair]['entry_price']:,.2f}")
     return jsonify(success=False, error="No bracket order found for this pair.")
 
@@ -637,6 +765,7 @@ def create_twap():
 
         if slices < 2: return jsonify(success=False, error="Need at least 2 slices.")
         if total_usd <= 0: return jsonify(success=False, error="Amount must be positive.")
+        if duration_min < 1: return jsonify(success=False, error="Duration must be at least 1 minute.")
 
         interval_sec = (duration_min * 60) / slices
         twap_id = str(uuid.uuid4())[:8]
@@ -681,6 +810,12 @@ def create_sniper():
         amount = d['amount']  # USD for buys, units for sells
         direction = d.get('direction', 'BELOW')  # BELOW = buy the dip, ABOVE = sell the rip
 
+        if trigger_price <= 0: return jsonify(success=False, error="trigger_price must be positive.")
+        try:
+            if float(amount) <= 0: return jsonify(success=False, error="amount must be positive.")
+        except (ValueError, TypeError):
+            return jsonify(success=False, error="amount must be a number.")
+
         snip_id = str(uuid.uuid4())[:8]
         SNIPER_ORDERS[snip_id] = {
             'pair': pair,
@@ -722,6 +857,8 @@ def create_scaled():
 
         if num_orders < 2: return jsonify(success=False, error="Need at least 2 orders.")
         if price_from == price_to: return jsonify(success=False, error="Price range must span a range.")
+        if price_from <= 0 or price_to <= 0: return jsonify(success=False, error="Prices must be positive.")
+        if total_usd <= 0: return jsonify(success=False, error="Amount must be positive.")
 
         product = client.get_product(product_id=pair)
         quote_inc = product.quote_increment
@@ -785,17 +922,28 @@ def get_advanced_orders():
 # ==========================================
 # NOTIFICATION CONFIG
 # ==========================================
+NOTIFY_CONFIG_KEYS = {'enabled', 'ntfy_topic', 'ntfy_server'}
+
+def _masked_notify_config(cfg):
+    cfg = dict(cfg)
+    topic = cfg.get('ntfy_topic') or ''
+    # The topic is effectively a secret (anyone with it can read all trade alerts)
+    cfg['ntfy_topic'] = (topic[:4] + '…') if len(topic) > 4 else ('…' if topic else '')
+    cfg['ntfy_topic_set'] = bool(topic)
+    return cfg
+
 @trading_bp.route('/api/notify/config', methods=['GET'])
 def get_notify_config():
     from notifier import get_config
-    return jsonify(get_config())
+    return jsonify(_masked_notify_config(get_config()))
 
 @trading_bp.route('/api/notify/config', methods=['POST'])
 def set_notify_config():
     from notifier import update_config
-    d = request.json
-    config = update_config(d)
-    return jsonify(success=True, config=config)
+    d = request.json or {}
+    updates = {k: v for k, v in d.items() if k in NOTIFY_CONFIG_KEYS}
+    config = update_config(updates)
+    return jsonify(success=True, config=_masked_notify_config(config))
 
 @trading_bp.route('/api/notify/test', methods=['POST'])
 def test_notify():
@@ -890,7 +1038,10 @@ def manual_enter():
         return jsonify(success=False, error="Request body required"), 400
 
     pair = d.get('pair', '').upper()
-    amount = float(d.get('amount', 0))
+    try:
+        amount = float(d.get('amount', 0))
+    except (ValueError, TypeError):
+        return jsonify(success=False, error="amount must be a number"), 400
     order_type = d.get('order_type', 'MARKET').upper()
     strategy = d.get('strategy', '').upper()
 
@@ -1239,5 +1390,16 @@ def _manual_position_evaluator():
                     log.error(f"[{pair}] Manual exit sell failed: {e}")
 
 
+_manual_evaluator_started = False
+
 def start_manual_evaluator():
+    global _manual_evaluator_started
+    if _manual_evaluator_started:
+        return
+    _manual_evaluator_started = True
     threading.Thread(target=_manual_position_evaluator, daemon=True).start()
+
+# Start at import like every other engine thread — under gunicorn/uwsgi the
+# __main__ block in app.py never runs, which previously left manual positions
+# with no stop enforcement.
+start_manual_evaluator()
