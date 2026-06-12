@@ -23,9 +23,10 @@ FETCH_SLEEP = 0.3
 
 
 def _get_conn():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA busy_timeout=10000")
     return conn
 
 
@@ -205,17 +206,20 @@ def get_chart_candles(pair, tf_minutes, limit):
         return pd.DataFrame(columns=['start', 'open', 'high', 'low', 'close', 'volume'])
 
     end_ts = last_ts
-    # Pull a generous window of 1m rows, then aggregate + slice
-    lookback_seconds = max(limit, 100) * tf_minutes * 60 + tf_minutes * 60
-    start_ts = end_ts - lookback_seconds
+    # Tail-limited read: fetch only the newest rows needed (capped), newest-first
+    # via the (pair, start) index, then re-sort ascending. The old full-range
+    # scan pulled years of 1m rows into pandas for high-TF charts.
+    MAX_ROWS = 300_000  # ~208 days of 1m — bounds memory/latency on small hosts
+    rows_needed = min((max(limit, 100) + 1) * tf_minutes, MAX_ROWS)
 
     conn = _get_conn()
     df = pd.read_sql_query(
         "SELECT start, open, high, low, close, volume FROM candles_1m "
-        "WHERE pair = ? AND start >= ? AND start <= ? ORDER BY start",
-        conn, params=(pair, start_ts, end_ts)
+        "WHERE pair = ? AND start <= ? ORDER BY start DESC LIMIT ?",
+        conn, params=(pair, end_ts, int(rows_needed))
     )
     conn.close()
+    df = df.sort_values('start').reset_index(drop=True)
 
     if df.empty:
         return df

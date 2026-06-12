@@ -105,6 +105,27 @@ def get_book(pair):
 # ==========================================
 # CANDLES ENDPOINT FOR LIGHTWEIGHT CHARTS
 # ==========================================
+_backfill_threads = {}
+_backfill_lock = __import__('threading').Lock()
+
+def _spawn_backfill(pair, start_ts, end_ts):
+    """Backfill the 1m store in a daemon thread — at most one per pair."""
+    import threading
+    from candle_db import fetch_and_store_1m
+    with _backfill_lock:
+        t = _backfill_threads.get(pair)
+        if t is not None and t.is_alive():
+            return
+        def _run():
+            try:
+                n = fetch_and_store_1m(pair, start_ts, end_ts)
+                log.info(f"[{pair}] background candle backfill done: {n} rows")
+            except Exception as e:
+                log.error(f"[{pair}] background candle backfill failed: {e}")
+        t = threading.Thread(target=_run, daemon=True)
+        _backfill_threads[pair] = t
+        t.start()
+
 GRANULARITY_MAP = {
     "1m":  {"cb": "ONE_MINUTE",      "seconds": 60},
     "5m":  {"cb": "FIVE_MINUTE",     "seconds": 300},
@@ -168,13 +189,20 @@ def get_chart_candles_endpoint(pair, granularity):
         now_ts = int(time.time())
         tf_seconds = g['seconds']
 
-        # Top up the 1m store if it's more than one TF period stale
+        # Top up the 1m store — but NEVER block the chart on a big backfill.
+        # A stale DB (cron not running) used to trigger an unbounded synchronous
+        # fetch here: a month-stale store meant ~144 sequential Coinbase calls
+        # before the response was sent, so every TF and the bot chart timed out.
         last_1m = get_last_timestamp(pair)
-        if last_1m > 0 and (now_ts - last_1m) > tf_seconds:
-            try:
-                fetch_and_store_1m(pair, last_1m, now_ts)
-            except Exception as e:
-                log.warning(f"[{pair}] chart tail top-up failed: {e}")
+        gap = now_ts - last_1m if last_1m > 0 else 0
+        if 0 < gap:
+            if gap <= 7200:  # <= 2h: quick inline top-up (a few API calls max)
+                try:
+                    fetch_and_store_1m(pair, last_1m, now_ts)
+                except Exception as e:
+                    log.warning(f"[{pair}] chart tail top-up failed: {e}")
+            elif gap > tf_seconds:
+                _spawn_backfill(pair, last_1m, now_ts)  # heal in the background
 
         df = get_chart_candles(pair, tf_minutes, limit)
 
@@ -203,6 +231,28 @@ def get_chart_candles_endpoint(pair, granularity):
             "close": float(row.close),
             "volume": float(row.volume)
         } for row in df.itertuples(index=False)]
+
+        # Live tail: if the DB bars end more than one TF period ago (backfill
+        # still running, or cron behind), splice the recent bars straight from
+        # Coinbase at the requested granularity so the chart is always current.
+        newest = parsed[-1]['time'] if parsed else 0
+        if now_ts - newest > tf_seconds * 2:
+            try:
+                tail_start = max(newest + tf_seconds, now_ts - (300 * tf_seconds))
+                res = client.get(f"/api/v3/brokerage/products/{pair}/candles", params={
+                    "start": str(tail_start), "end": str(now_ts), "granularity": g['cb']
+                })
+                tail = sorted([{
+                    "time": int(c['start']),
+                    "open": float(c['open']),
+                    "high": float(c['high']),
+                    "low": float(c['low']),
+                    "close": float(c['close']),
+                    "volume": float(c.get('volume', 0))
+                } for c in res.get('candles', [])], key=lambda x: x['time'])
+                parsed.extend(t for t in tail if t['time'] > newest)
+            except Exception as e:
+                log.warning(f"[{pair}] live tail fetch failed: {e}")
 
         return jsonify(parsed)
     except Exception as e:
