@@ -5,6 +5,7 @@ converts to any arbitrary timeframe on the fly via aggregation.
 import os
 import time
 import sqlite3
+import threading
 import pandas as pd
 from shared import client
 from logger import get_logger
@@ -193,6 +194,36 @@ def query(pair, tf_minutes, start_ts, end_ts):
     return result.reset_index(drop=True)
 
 
+# In-memory aggregation cache for chart candles. High-TF charts (6h/1d) need
+# hundreds of thousands of 1m rows aggregated; pay that once per (pair, tf),
+# then each request only aggregates the few 1m rows that arrived since.
+_chart_agg_cache = {}
+_chart_agg_lock = threading.Lock()
+_chart_build_locks = {}
+
+def _build_lock(key):
+    with _chart_agg_lock:
+        lock = _chart_build_locks.get(key)
+        if lock is None:
+            lock = _chart_build_locks[key] = threading.Lock()
+        return lock
+_CHART_CACHE_FULL_REBUILD_SEC = 900  # periodic full rebuild picks up backfilled history
+
+
+def _aggregate_1m(df, period):
+    df = df.copy()
+    df['tf_group'] = (df['start'] // period) * period
+    result = df.groupby('tf_group').agg(
+        open=('open', 'first'),
+        high=('high', 'max'),
+        low=('low', 'min'),
+        close=('close', 'last'),
+        volume=('volume', 'sum')
+    ).reset_index()
+    result.rename(columns={'tf_group': 'start'}, inplace=True)
+    return result
+
+
 def get_chart_candles(pair, tf_minutes, limit):
     """
     Return the most recent `limit` bars at `tf_minutes` timeframe from the 1m store.
@@ -206,38 +237,76 @@ def get_chart_candles(pair, tf_minutes, limit):
         return pd.DataFrame(columns=['start', 'open', 'high', 'low', 'close', 'volume'])
 
     end_ts = last_ts
-    # Tail-limited read: fetch only the newest rows needed (capped), newest-first
-    # via the (pair, start) index, then re-sort ascending. The old full-range
-    # scan pulled years of 1m rows into pandas for high-TF charts.
-    MAX_ROWS = 300_000  # ~208 days of 1m — bounds memory/latency on small hosts
-    rows_needed = min((max(limit, 100) + 1) * tf_minutes, MAX_ROWS)
-
-    conn = _get_conn()
-    df = pd.read_sql_query(
-        "SELECT start, open, high, low, close, volume FROM candles_1m "
-        "WHERE pair = ? AND start <= ? ORDER BY start DESC LIMIT ?",
-        conn, params=(pair, end_ts, int(rows_needed))
-    )
-    conn.close()
-    df = df.sort_values('start').reset_index(drop=True)
-
-    if df.empty:
-        return df
 
     if tf_minutes <= 1:
-        return df.tail(limit).reset_index(drop=True)
+        conn = _get_conn()
+        df = pd.read_sql_query(
+            "SELECT start, open, high, low, close, volume FROM candles_1m "
+            "WHERE pair = ? AND start <= ? ORDER BY start DESC LIMIT ?",
+            conn, params=(pair, end_ts, int(limit))
+        )
+        conn.close()
+        return df.sort_values('start').reset_index(drop=True)
 
     period = tf_minutes * 60
-    df['tf_group'] = (df['start'] // period) * period
-    result = df.groupby('tf_group').agg(
-        open=('open', 'first'),
-        high=('high', 'max'),
-        low=('low', 'min'),
-        close=('close', 'last'),
-        volume=('volume', 'sum')
-    ).reset_index()
-    result.rename(columns={'tf_group': 'start'}, inplace=True)
-    return result.tail(limit).reset_index(drop=True)
+    key = (pair, tf_minutes)
+    now = time.time()
+
+    with _chart_agg_lock:
+        cached = _chart_agg_cache.get(key)
+        # Valid when built with at least this limit's row budget (the DB may
+        # simply hold fewer bars than requested — that's still a complete answer)
+        if (cached is not None
+                and limit <= cached['requested']
+                and now - cached['built_at'] < _CHART_CACHE_FULL_REBUILD_SEC):
+            # Incremental: re-aggregate only from the start of the cached tail bar
+            # (it may have been partial) plus anything newer — a few hundred rows.
+            tail_bar_start = int(cached['bars'].iloc[-1]['start'])
+            conn = _get_conn()
+            fresh = pd.read_sql_query(
+                "SELECT start, open, high, low, close, volume FROM candles_1m "
+                "WHERE pair = ? AND start >= ? AND start <= ? ORDER BY start",
+                conn, params=(pair, tail_bar_start, end_ts)
+            )
+            conn.close()
+            if not fresh.empty:
+                new_bars = _aggregate_1m(fresh, period)
+                bars = cached['bars']
+                bars = pd.concat([bars[bars['start'] < tail_bar_start], new_bars], ignore_index=True)
+                cached['bars'] = bars
+            return cached['bars'].tail(limit).reset_index(drop=True)
+
+    # Full (re)build — only one builder per (pair, tf); parallel requests
+    # (candles/overlays/indicators fire together) wait and reuse the result.
+    with _build_lock(key):
+        with _chart_agg_lock:
+            cached = _chart_agg_cache.get(key)
+        if (cached is not None and limit <= cached['requested']
+                and time.time() - cached['built_at'] < _CHART_CACHE_FULL_REBUILD_SEC):
+            return cached['bars'].tail(limit).reset_index(drop=True)
+
+        # Tail-limited read: only the newest rows needed (capped), newest-first
+        # via the (pair, start) index, then re-sort ascending. The old
+        # full-range scan pulled years of 1m rows into pandas for high-TF charts.
+        MAX_ROWS = 300_000  # ~208 days of 1m — bounds memory/latency on small hosts
+        rows_needed = min((max(limit, 100) + 1) * tf_minutes, MAX_ROWS)
+
+        conn = _get_conn()
+        df = pd.read_sql_query(
+            "SELECT start, open, high, low, close, volume FROM candles_1m "
+            "WHERE pair = ? AND start <= ? ORDER BY start DESC LIMIT ?",
+            conn, params=(pair, end_ts, int(rows_needed))
+        )
+        conn.close()
+        df = df.sort_values('start').reset_index(drop=True)
+
+        if df.empty:
+            return df
+
+        result = _aggregate_1m(df, period)
+        with _chart_agg_lock:
+            _chart_agg_cache[key] = {'bars': result, 'built_at': time.time(), 'requested': limit}
+        return result.tail(limit).reset_index(drop=True)
 
 
 def get_backtest_candles(pair, tf_minutes, start_ts, end_ts, progress_cb=None):
