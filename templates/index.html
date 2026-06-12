@@ -188,6 +188,7 @@
                                     </div>
                                     <button class="btn btn-sm btn-outline-info fw-bold" id="scanner-toggle-btn" onclick="toggleScanner()"><i class="bi bi-broadcast me-1"></i>SCANNER</button>
                                     <button class="btn btn-sm btn-outline-secondary" id="vpvr-toggle" onclick="toggleVolumeProfile()" title="Volume Profile"><i class="bi bi-bar-chart-steps"></i></button>
+                                    <button class="btn btn-sm btn-outline-secondary" id="lung-toggle" onclick="toggleLung()" title="MTF RSI Lung"><i class="bi bi-activity"></i></button>
                                     <button class="btn btn-sm btn-outline-secondary" id="main-chart-fs-btn" onclick="toggleMainChartFullscreen()" title="Fullscreen"><i class="bi bi-arrows-fullscreen"></i></button>
                                 </div>
                             </div>
@@ -222,6 +223,14 @@
                                         <tbody id="scanner-body"></tbody>
                                     </table>
                                 </div>
+                            </div>
+                            <!-- MTF RSI LUNG SUB-PANEL (inside chart card) -->
+                            <div id="lung-sub-panel" class="d-none px-2 pb-2 flex-shrink-0">
+                                <div class="d-flex justify-content-between align-items-center py-1">
+                                    <span class="fw-bold" style="color:#66fcf1; font-size:0.7rem;"><i class="bi bi-activity me-1"></i>MTF RSI LUNG</span>
+                                    <span id="lung-avg-badge" class="badge bg-secondary px-2 py-1" style="font-size:0.65rem;">LOADING...</span>
+                                </div>
+                                <svg id="lung-svg" width="100%" height="150" preserveAspectRatio="none" style="display:block;"></svg>
                             </div>
                         </div>
                     </div>
@@ -1540,6 +1549,7 @@
         async function renderChart(pair) {
             chartPair = pair;
             document.getElementById('chart-pair-label').innerText = pair;
+            if (lungActive) refreshLung();
             const container = document.getElementById('tv_chart_container');
 
             // Clear existing overlays when chart rebuilds
@@ -1595,6 +1605,114 @@
 
             // Start live candle updates
             startLiveUpdates();
+        }
+
+        // ==========================================
+        // MTF RSI "LUNG" — symmetric multi-timeframe RSI visual
+        // ==========================================
+        let lungActive = false;
+        let lungTimer = null;
+
+        function toggleLung() {
+            lungActive = !lungActive;
+            document.getElementById('lung-sub-panel').classList.toggle('d-none', !lungActive);
+            document.getElementById('lung-toggle').classList.toggle('active', lungActive);
+            if (lungActive) {
+                refreshLung();
+                lungTimer = setInterval(refreshLung, 30000);
+            } else if (lungTimer) {
+                clearInterval(lungTimer);
+                lungTimer = null;
+            }
+        }
+
+        async function refreshLung() {
+            try {
+                const r = await fetch(`/api/mtf_rsi/${chartPair}`);
+                const data = await r.json();
+                if (data.error) { console.error('Lung error:', data.error); return; }
+                renderLung(data);
+            } catch (e) { console.error('Lung fetch error:', e); }
+        }
+
+        // Catmull-Rom -> cubic bezier path through points (organic smoothing)
+        function lungSplinePath(pts) {
+            if (pts.length < 2) return '';
+            let d = `M ${pts[0][0]} ${pts[0][1]}`;
+            for (let i = 0; i < pts.length - 1; i++) {
+                const p0 = pts[Math.max(0, i - 1)], p1 = pts[i],
+                      p2 = pts[i + 1], p3 = pts[Math.min(pts.length - 1, i + 2)];
+                const c1x = p1[0] + (p2[0] - p0[0]) / 6, c1y = p1[1] + (p2[1] - p0[1]) / 6;
+                const c2x = p2[0] - (p3[0] - p1[0]) / 6, c2y = p2[1] - (p3[1] - p1[1]) / 6;
+                d += ` C ${c1x.toFixed(1)} ${c1y.toFixed(1)}, ${c2x.toFixed(1)} ${c2y.toFixed(1)}, ${p2[0]} ${p2[1].toFixed(1)}`;
+            }
+            return d;
+        }
+
+        function renderLung(data) {
+            const svg = document.getElementById('lung-svg');
+            const W = svg.clientWidth || 800, H = 150;
+            svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+            const padX = 24, labelH = 16, midY = (H - labelH) / 2;
+            const halfMax = (H - labelH) / 2 - 6;   // px for RSI 100 (i.e. ±50 from spine)
+
+            const pts = data.points || [];
+            const n = pts.length;
+            const xFor = i => padX + (W - 2 * padX) * (n > 1 ? i / (n - 1) : 0);
+
+            // Color: oxygenated (bullish) cyan above avg 50, magenta below
+            const avg = data.avg;
+            const color = (avg === null || avg >= 50) ? '#00ffcc' : '#ff3366';
+
+            // Build symmetric boundary points; missing TFs (null RSI) collapse to the spine
+            const upper = [], lower = [];
+            pts.forEach((p, i) => {
+                const r = (p.rsi === null || p.rsi === undefined) ? 0 : p.rsi;
+                const half = (r / 100) * halfMax;
+                upper.push([xFor(i), midY - half]);
+                lower.push([xFor(i), midY + half]);
+            });
+
+            let html = '';
+            // Filled cavity: upper spline forward + lower spline reversed
+            if (n >= 2) {
+                const upPath = lungSplinePath(upper);
+                const downSegs = lungSplinePath([...lower].reverse()).replace(/^M[^C]*/, '');
+                html += `<path d="${upPath} L ${lower[n-1][0]} ${lower[n-1][1].toFixed(1)} ${downSegs} Z" fill="${color}" fill-opacity="0.22" stroke="none"/>`;
+                html += `<path d="${upPath}" fill="none" stroke="${color}" stroke-width="2.5" stroke-linecap="round"/>`;
+                html += `<path d="${lungSplinePath(lower)}" fill="none" stroke="${color}" stroke-width="2.5" stroke-linecap="round"/>`;
+            }
+            // Center spine
+            html += `<line x1="${padX - 10}" y1="${midY}" x2="${W - padX + 10}" y2="${midY}" stroke="#8b949e" stroke-width="1" opacity="0.5"/>`;
+            // Reference ring at RSI 50 (half inflation) for instant calibration
+            const ref = (50 / 100) * halfMax;
+            html += `<line x1="${padX}" y1="${midY - ref}" x2="${W - padX}" y2="${midY - ref}" stroke="#8b949e" stroke-width="0.5" stroke-dasharray="3,4" opacity="0.35"/>`;
+            html += `<line x1="${padX}" y1="${midY + ref}" x2="${W - padX}" y2="${midY + ref}" stroke="#8b949e" stroke-width="0.5" stroke-dasharray="3,4" opacity="0.35"/>`;
+
+            // TF labels + RSI values
+            pts.forEach((p, i) => {
+                const x = xFor(i);
+                const hasVal = p.rsi !== null && p.rsi !== undefined;
+                html += `<text x="${x}" y="${H - 3}" text-anchor="middle" fill="#c9d1d9" font-size="9" font-weight="bold">${p.tf}</text>`;
+                if (hasVal) {
+                    const half = (p.rsi / 100) * halfMax;
+                    const hot = p.rsi >= 70 || p.rsi <= 30;
+                    html += `<circle cx="${x}" cy="${(midY - half).toFixed(1)}" r="2.2" fill="${color}"/>`;
+                    html += `<text x="${x}" y="${(midY - half - 5).toFixed(1)}" text-anchor="middle" fill="${hot ? color : '#8b949e'}" font-size="8"${hot ? ' font-weight="bold"' : ''}>${Math.round(p.rsi)}</text>`;
+                } else {
+                    html += `<text x="${x}" y="${midY - 5}" text-anchor="middle" fill="#555" font-size="8">--</text>`;
+                }
+            });
+            svg.innerHTML = html;
+
+            const badge = document.getElementById('lung-avg-badge');
+            if (avg === null || avg === undefined) {
+                badge.className = 'badge bg-secondary px-2 py-1';
+                badge.innerText = 'NO DATA';
+            } else {
+                badge.className = `badge px-2 py-1 ${avg >= 50 ? 'bg-success' : 'bg-danger'}`;
+                badge.innerText = `${avg >= 50 ? 'INHALING' : 'EXHALING'} · AVG ${avg}`;
+            }
         }
 
         function switchTF(tf) {

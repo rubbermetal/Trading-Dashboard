@@ -259,6 +259,56 @@ def get_chart_candles_endpoint(pair, granularity):
         log.error(f"[{pair}] chart_candles error: {e}")
         return jsonify(error=str(e))
 
+# ==========================================
+# MTF RSI "LUNG" — RSI(14) across 12 timeframes from the 1m store
+# ==========================================
+MTF_RSI_TFS = [
+    ('1m', 1), ('2m', 2), ('5m', 5), ('10m', 10), ('15m', 15), ('30m', 30),
+    ('1h', 60), ('4h', 240), ('12h', 720), ('1d', 1440), ('1w', 10080), ('1M', 43200),
+]
+
+def _wilder_rsi_last(closes, length=14):
+    """Last Wilder RSI value (same smoothing as pandas_ta.rsi). None if not enough data."""
+    if closes is None or len(closes) < length + 1:
+        return None
+    delta = closes.astype(float).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1.0 / length, min_periods=length).mean()
+    avg_loss = loss.ewm(alpha=1.0 / length, min_periods=length).mean()
+    ag, al = float(avg_gain.iloc[-1]), float(avg_loss.iloc[-1])
+    if pd.isna(ag) or pd.isna(al):
+        return None
+    if al == 0:
+        return 100.0
+    rs = ag / al
+    return round(100.0 - 100.0 / (1.0 + rs), 1)
+
+@market_data_bp.route('/api/mtf_rsi/<pair>')
+def get_mtf_rsi(pair):
+    """RSI(14) per timeframe for the MTF 'lung' visual. Timeframes the 1m store
+    can't support yet (e.g. monthly RSI needs 15+ months) return null."""
+    from candle_db import get_chart_candles
+    points = []
+    try:
+        for label, tfm in MTF_RSI_TFS:
+            rsi_val = None
+            bars = 0
+            try:
+                df = get_chart_candles(pair, tfm, 80)
+                bars = len(df)
+                if bars >= 15:
+                    rsi_val = _wilder_rsi_last(df['close'])
+            except Exception as e:
+                log.debug(f"[{pair}] mtf_rsi {label} failed: {e}")
+            points.append({'tf': label, 'rsi': rsi_val, 'bars': bars})
+        valid = [p['rsi'] for p in points if p['rsi'] is not None]
+        avg = round(sum(valid) / len(valid), 1) if valid else None
+        return jsonify({'pair': pair, 'points': points, 'avg': avg, 'ts': int(time.time())})
+    except Exception as e:
+        log.error(f"[{pair}] mtf_rsi error: {e}")
+        return jsonify(error=str(e))
+
 @market_data_bp.route('/api/chart_indicators/<pair>/<granularity>')
 def get_chart_indicators(pair, granularity):
     """
